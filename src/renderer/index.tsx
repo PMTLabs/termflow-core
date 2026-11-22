@@ -35,6 +35,35 @@ if (isTauri) {
 
   console.log('Running in Tauri mode - loading Tauri Bridge...');
   require('./api/tauri-bridge');
+  const { PaneIncarnations, installPaneIncarnations } = require('./services/paneIncarnations');
+  const incarnations = new PaneIncarnations(invoke, () => {
+    (window as any).__REDUX_STORE__?.dispatch({ type: 'ui/addToast', payload: {
+      type: 'warning', message: 'Terminal ownership updates are not reaching the backend. Retry without closing your shells.',
+    } });
+  });
+  installPaneIncarnations(incarnations);
+  // Put predecessor retirement at the FIFO head, before restore or mounts can
+  // enqueue ownership work. Do not block UI bootstrap on an unavailable backend:
+  // the stream retries its head and can still show the ownership warning.
+  void incarnations.replacePage().catch((error: unknown) => {
+    if (!incarnations.ended) console.warn('Could not replace renderer page:', error);
+  });
+  window.addEventListener('beforeunload', () => incarnations.stop(), { once: true });
+  window.addEventListener('pane:resync', () => incarnations.resync());
+
+  // Plan 045: resolve once whether this window can offer "Open admin Tab" at
+  // all (Windows, not already elevated, sidecar enabled, not killed). Cached
+  // for every menu surface — see adminTabActions.ts.
+  //
+  // AFTER the bridge, never before. adminTabActions imports the store, and the
+  // store drags in StateManager -> TerminalService, whose singleton constructor
+  // registers the `terminal:data` / `terminal:exit` listeners on construction
+  // and SKIPS them when `window.electronAPI` is still undefined. Required ahead
+  // of the bridge, that skip is permanent (the DOMContentLoaded retry has
+  // already passed by the time the awaits above resolve), and every terminal
+  // in the window spawns fine but never renders a byte of live output.
+  const { initAdminTabSupport } = require('./services/adminTabActions');
+  await initAdminTabSupport(invoke);
 } else if (!(window as any).electronAPI) {
   console.log('Running in browser mode - loading Browser Bridge...');
   require('./api/browser-bridge');
@@ -45,6 +74,8 @@ if (isTauri) {
 // Now that window.electronAPI is guaranteed to be set, require the rest
 const { Provider } = require('react-redux');
 const { store } = require('./store');
+const { installSshSessionStartup } = require('./services/sshSessionEvents');
+installSshSessionStartup(store, window.electronAPI);
 const { default: App } = require('./App');
 const { default: BuildBadge } = require('./components/BuildBadge/BuildBadge');
 const { terminalService } = require('./services/TerminalService');

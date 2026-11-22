@@ -60,6 +60,48 @@ export const stateKey = (): string => stateKeyFor(current.scope);
 export const layoutsKey = (): string => layoutsKeyFor(current.scope);
 export const apiTokenKey = (): string => apiTokenKeyFor(current.scope);
 
+let memoryToken = '';
+
+/**
+ * Read the current session's API access token.
+ *
+ * D5: an elevated instance's API token is kept strictly in-memory so it never
+ * lands on disk in WebView2's unencrypted Local Storage (where any medium-integrity
+ * process could read it). For standard instances, falls back to localStorage.
+ */
+export function getStoredApiToken(): string {
+  if (current.elevated) {
+    return memoryToken;
+  }
+  return memoryToken || (typeof localStorage !== 'undefined' ? localStorage.getItem(apiTokenKey()) || '' : '');
+}
+
+/**
+ * Update the API access token for this session.
+ *
+ * When running elevated, the token is stored ONLY in memory and any previously
+ * persisted localStorage copy is purged to close the Medium->High elevation window.
+ */
+export function setStoredApiToken(token: string): void {
+  memoryToken = token;
+  if (current.elevated) {
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(apiTokenKey());
+        localStorage.removeItem(apiTokenKeyFor(current.scope));
+      } catch { /* ignore */ }
+    }
+  } else if (typeof localStorage !== 'undefined') {
+    try {
+      if (token) {
+        localStorage.setItem(apiTokenKey(), token);
+      } else {
+        localStorage.removeItem(apiTokenKey());
+      }
+    } catch { /* ignore */ }
+  }
+}
+
 export function currentProfile(): ProfileInfo {
   return current;
 }
@@ -95,6 +137,12 @@ export async function initProfileScope(
     const info = (await invoke('get_profile')) as ProfileInfo | undefined;
     if (info && typeof info.scope === 'string') {
       current = info;
+      if (current.elevated && typeof localStorage !== 'undefined') {
+        // D5: purge any previously persisted high-integrity token from disk-backed localStorage
+        try {
+          localStorage.removeItem(apiTokenKeyFor(current.scope));
+        } catch { /* ignore */ }
+      }
     }
   } catch (e) {
     console.warn('profileScope: could not resolve the profile; using the default keys', e);
@@ -105,4 +153,9 @@ export async function initProfileScope(
 /** Test seam. Production code sets the scope only via `initProfileScope`. */
 export function __setProfileForTests(info: Partial<ProfileInfo>): void {
   current = { ...current, ...info };
+  if (current.elevated && typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(apiTokenKeyFor(current.scope));
+    } catch { /* ignore */ }
+  }
 }

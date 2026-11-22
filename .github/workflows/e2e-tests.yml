@@ -2,9 +2,7 @@ name: E2E Tests
 
 on:
   push:
-    branches: [ main, master, develop ]
-  pull_request:
-    branches: [ main, master, develop ]
+    branches: [ master, main, develop ]
 
 # The Playwright e2e/performance suites in this workflow are QUARANTINED: they target
 # the obsolete Electron build and give no signal on the current Tauri product (the

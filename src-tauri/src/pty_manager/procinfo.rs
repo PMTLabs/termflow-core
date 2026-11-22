@@ -1,6 +1,10 @@
+mod identity;
+pub(crate) use identity::native_process_birth;
+
 use std::collections::HashMap;
 use sysinfo::{Pid, System};
 use super::spawn_spec::PS_CWD_INTEGRATION;
+use super::ssh_shell::posix::windows::is_powershell_hook_command;
 
 /// How deep the foreground descent may go before it gives up.
 ///
@@ -107,16 +111,33 @@ fn is_console_host(name: &str) -> bool {
     matches!(stem, "conhost" | "openconsole")
 }
 
+/// A process that lives under the shell but is NOT a program the user ran — the console hosts
+/// above, plus long-lived helpers a shell's own startup spawns.
+///
+/// `WindowsPackageManagerServer.exe` is WinGet's COM server. Normally it is DCOM-activated
+/// (`-Embedding`, parented to svchost) and never under a shell at all; in an **elevated** session
+/// the `Microsoft.WinGet.Client` PowerShell module cannot COM-activate the packaged server, so it
+/// "manually activates" it as a direct CHILD of the shell and keeps it for the session. A profile
+/// that imports the module therefore gives every admin tab (plan 045) a permanent non-shell child,
+/// measured live: `termflow-pty-host (High) -> pwsh.exe -> WindowsPackageManagerServer.exe`. Left
+/// in the chain it is announced as the pane's foreground program, and its working directory is
+/// read as the pane's cwd — the exact pair of faults [`is_console_host`] exists for.
+fn is_shell_helper(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    is_console_host(name) || stem == "windowspackagemanagerserver"
+}
+
 /// The deepest level of a foreground chain that names a program the user actually ran.
 ///
-/// `chain` is shell-first, so the search ends at the shell itself — a chain of nothing but console
-/// hosts is impossible (the shell heads it), and an empty chain yields `None` for the caller to
+/// `chain` is shell-first, so the search ends at the shell itself — a chain of nothing but shell
+/// helpers is impossible (the shell heads it), and an empty chain yields `None` for the caller to
 /// fall back on.
 fn deepest_real_program(chain: &[(u32, String)]) -> Option<u32> {
     chain
         .iter()
         .rev()
-        .find(|(_, name)| !is_console_host(name))
+        .find(|(_, name)| !is_shell_helper(name))
         .map(|(pid, _)| *pid)
 }
 
@@ -132,7 +153,7 @@ pub(crate) fn deepest_chain_cwd(chain: &[(String, Option<String>)]) -> Option<St
     chain
         .iter()
         .rev()
-        .find(|(name, cwd)| cwd.is_some() && !is_console_host(name))
+        .find(|(name, cwd)| cwd.is_some() && !is_shell_helper(name))
         .and_then(|(_, cwd)| cwd.clone())
 }
 
@@ -204,12 +225,13 @@ pub fn foreground_command_lines(parent_pid: u32, sys: &System) -> Vec<String> {
 /// see it. Matching on it is matching on an implementation detail of OSC 9;9 cwd reporting.
 ///
 /// **Only the exact injected sequence is removed, never a user's own flags.** The script is compared
-/// against the constant itself, and `-Command` / `-NoExit` are dropped only as the tokens
+/// against the constant or the exact SSH wrapper with its quoted helper path, and `-Command` / `-NoExit` are dropped only as the tokens
 /// immediately preceding that exact match — so a profile that legitimately passes `-NoExit` keeps it.
 pub fn command_line_for(argv: &[String], name: &str) -> String {
     let mut dropped = vec![false; argv.len()];
     for (i, arg) in argv.iter().enumerate() {
-        if arg != PS_CWD_INTEGRATION {
+        let ssh_hook = i >= 1 && argv[i - 1] == "-Command" && is_powershell_hook_command(arg);
+        if arg != PS_CWD_INTEGRATION && !ssh_hook {
             continue;
         }
         dropped[i] = true;
@@ -235,6 +257,22 @@ pub fn command_line_for(argv: &[String], name: &str) -> String {
     kept.join(" ")
 }
 
+#[test]
+fn procinfo_hides_ssh_powershell_hook_argument() {
+    use super::ssh_shell::posix::windows::powershell_hook_command;
+    let path = if cfg!(windows) { r"C:\O'Brien Lab\helper.txt" } else { "/O'Brien Lab/helper.txt" };
+    let hook = powershell_hook_command(path).unwrap();
+    let mut argv = ["powershell.exe", "-NoProfile", "-NoExit", "-Command"]
+        .map(str::to_owned).to_vec();
+    argv.push(hook.clone());
+    assert_eq!(command_line_for(&argv, "powershell.exe"), "powershell.exe -NoProfile");
+
+    for near_match in [format!("{hook}; Get-Date"), hook.replace("O''Brien", "O'Brien")] {
+        *argv.last_mut().unwrap() = near_match;
+        assert_eq!(command_line_for(&argv, "powershell.exe"), argv.join(" "));
+    }
+}
+
 /// Derive a friendly label for the foreground program in a pane, from a
 /// process's executable name and full argv. Returns None for a plain shell (an
 /// idle pane) so the caller reverts to tab/default theming; returns a friendly
@@ -257,6 +295,13 @@ pub fn detect_agent(name: &str, cmd: &[String]) -> Option<String> {
         "nu", "dash", "ksh", "csh", "tcsh",
     ];
     if SHELLS.contains(&exe) {
+        return None;
+    }
+    // Same answer for a helper the shell's own startup spawned (see `is_shell_helper`): it is
+    // not "a program the user launched", so an admin tab idling at its prompt with WinGet's
+    // server parked under it must read as idle, not as running `windowspackagemanagerserver`.
+    // The walk in `get_foreground_agent_with_exe` then descends past it exactly as past a shell.
+    if is_shell_helper(&lowered) {
         return None;
     }
 
@@ -290,6 +335,12 @@ fn derive_interpreted_label(cmd: &[String]) -> Option<String> {
         ("gemini-cli", "gemini"),
         ("@google/gemini", "gemini"),
         ("cursor-agent", "cursor-agent"),
+        ("pi-coding-agent", "pi"),
+        ("@earendil-works/pi", "pi"),
+        ("packages/coding-agent", "pi"),
+        ("packages\\coding-agent", "pi"),
+        ("node_modules/pi/", "pi"),
+        ("node_modules\\pi\\", "pi"),
     ];
     for (needle, label) in MARKERS {
         if joined.contains(needle) {
@@ -437,7 +488,7 @@ mod bare_prompt_tests {
 
 #[cfg(test)]
 mod chain_tests {
-    use super::{deepest_chain_cwd, deepest_real_program, is_console_host};
+    use super::{deepest_chain_cwd, deepest_real_program, is_console_host, is_shell_helper};
     use super::detect_agent;
     use super::{get_foreground_agent, get_foreground_agent_with_exe};
     use super::PS_CWD_INTEGRATION;
@@ -558,6 +609,62 @@ mod chain_tests {
         }
     }
 
+    /// **Plan 045, measured live on an admin tab at its idle prompt:**
+    /// `termflow-pty-host.exe (High) -> pwsh.exe -> WindowsPackageManagerServer.exe`, the
+    /// server carrying no `-Embedding` flag — the WinGet PowerShell module's manual activation,
+    /// which only happens in an elevated session. The chip announced
+    /// `windowspackagemanagerserver` as the pane's program. The same set-not-sample rule as the
+    /// console-host guard: every spelling, and no substring over-match.
+    #[test]
+    fn the_shell_helper_guard_adds_wingets_server_to_the_console_hosts() {
+        for name in [
+            "WindowsPackageManagerServer.exe", "windowspackagemanagerserver.exe",
+            "WINDOWSPACKAGEMANAGERSERVER.EXE", "windowspackagemanagerserver",
+            "conhost.exe", "OpenConsole.exe",
+        ] {
+            assert!(is_shell_helper(name), "{name} must be recognised as a shell helper");
+        }
+        for name in [
+            "pwsh.exe", "claude.exe", "winget.exe", "WindowsPackageManagerServer.exe.bak",
+            "mywindowspackagemanagerserver.exe", "windowspackagemanager.exe", "",
+        ] {
+            assert!(!is_shell_helper(name), "{name} must NOT be treated as a shell helper");
+        }
+    }
+
+    /// The three consumers of "which program is in front", each against the measured admin-tab
+    /// chain. One predicate feeds all three so they cannot disagree about what a helper is.
+    #[test]
+    fn an_idle_admin_tab_with_wingets_server_parked_under_it_reads_as_idle() {
+        // The chip / per-agent colour scheme / close-confirmation label.
+        assert_eq!(
+            detect_agent("WindowsPackageManagerServer.exe", &["WindowsPackageManagerServer.exe".into()]),
+            None,
+            "the helper must read as idle, like a shell, so the walk descends past it"
+        );
+        // `/api/processes`' foreground pid: the shell, not the helper.
+        let chain = [
+            (100u32, "pwsh.exe".to_string()),
+            (200, "WindowsPackageManagerServer.exe".to_string()),
+        ];
+        assert_eq!(deepest_real_program(&chain), Some(100));
+        // The pane's cwd fallback: the shell's directory, never the helper's package dir.
+        let cwd_chain = [
+            level("pwsh.exe", Some(r"D:\work\project")),
+            level("WindowsPackageManagerServer.exe", Some(r"C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe")),
+        ];
+        assert_eq!(deepest_chain_cwd(&cwd_chain).as_deref(), Some(r"D:\work\project"));
+        // And a real program launched from that prompt still wins over the parked helper — the
+        // helper is skipped, not the whole descent abandoned.
+        let running = [
+            (100u32, "pwsh.exe".to_string()),
+            (200, "WindowsPackageManagerServer.exe".to_string()),
+            (300, "claude.exe".to_string()),
+        ];
+        assert_eq!(deepest_real_program(&running), Some(300));
+        assert_eq!(detect_agent("claude.exe", &["claude".into()]), Some("claude".into()));
+    }
+
     #[test]
     fn detect_agent_native_exe_uses_own_name() {
         assert_eq!(detect_agent("codex.exe", &["codex".into()]), Some("codex".into()));
@@ -585,6 +692,11 @@ mod chain_tests {
         let gemini = vec!["node".into(), "/usr/lib/node_modules/@google/gemini-cli/dist/gemini.js".into()];
         assert_eq!(detect_agent("node", &gemini), Some("gemini".into()));
         assert_eq!(detect_agent("python", &["python".into(), "-m".into(), "aider".into()]), Some("aider".into()));
+        let pi = vec![
+            "node".into(),
+            r"C:\Users\x\AppData\Local\pi-node\current\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js".into(),
+        ];
+        assert_eq!(detect_agent("node", &pi), Some("pi".into()));
     }
 
     #[test]

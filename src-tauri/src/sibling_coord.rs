@@ -72,6 +72,27 @@ pub fn describe_unarmable(siblings: &[InstanceRecord]) -> Option<String> {
     ))
 }
 
+/// Why an update that closes every terminal must not proceed while other TermFlow
+/// instances are running, or `None` when there are none.
+///
+/// Unlike [`describe_unarmable`], being reachable is no help: a full update does
+/// not arm anyone, and the updater kills every process under the install root,
+/// so a sibling that is still running would lose its window. Its terminals too
+/// if its pty-host runs from inside that folder; a host outside it keeps them
+/// (held, as after a crash), but the user would still find the window gone.
+pub fn describe_live_siblings(siblings: &[InstanceRecord]) -> Option<String> {
+    if siblings.is_empty() {
+        return None;
+    }
+    let mut live: Vec<String> = siblings.iter().map(|s| format!("{} (pid {})", s.profile, s.pid)).collect();
+    live.sort();
+    Some(format!(
+        "Cannot update while another TermFlow instance is running: {}. \
+         The update would close that instance's window as well. Close it and try again.",
+        live.join(", ")
+    ))
+}
+
 /// The base URL for a sibling's API.
 ///
 /// **From the RECORD's port, never the configured one.** `default_api_port()`
@@ -122,6 +143,8 @@ pub const SIBLING_CALL_TIMEOUT_SECS: u64 = 5;
 ///
 /// If a call fails part-way through, the siblings already armed are disarmed
 /// before the error is returned — an aborted update must not mutate strangers.
+/// So is the sibling whose call failed: an arm whose acknowledgement was lost
+/// (a timeout, a dropped connection) may still have taken effect there.
 pub async fn arm_siblings<F, Fut>(
     siblings: &[InstanceRecord],
     call: F,
@@ -154,7 +177,8 @@ where
             Ok(()) => armed.push(s.profile.clone()),
             Err(e) => {
                 let msg = format!("{} could not be prepared for the update: {e}", s.profile);
-                log::warn!("[UPDATE] {msg}; releasing {} already-armed sibling(s)", armed.len());
+                log::warn!("[UPDATE] {msg}; releasing {} already-armed sibling(s) and it", armed.len());
+                armed.push(s.profile.clone());
                 let _ = disarm_siblings(siblings, &armed, &call).await;
                 return Err(msg);
             }
@@ -198,6 +222,8 @@ where
 pub async fn http_call(req: SiblingCall) -> Result<(), String> {
     let url = format!("{}{}", sibling_base_url(req.port), req.action.path());
     let client = reqwest::Client::builder()
+        // Loopback: never route through a machine-wide HTTP_PROXY (see localhost_client).
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(SIBLING_CALL_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;
@@ -210,7 +236,20 @@ pub async fn http_call(req: SiblingCall) -> Result<(), String> {
     if resp.status().is_success() {
         Ok(())
     } else {
-        Err(format!("HTTP {}", resp.status()))
+        let status = resp.status();
+        // The sibling says WHY it refused (which of its hosts cannot be armed), and
+        // the update that is refused because of it has to be able to say so.
+        let body = resp.text().await.unwrap_or_default();
+        Err(failure_text(status, &body))
+    }
+}
+
+/// How a non-success answer reads in an error: the status, then the sibling's own
+/// explanation when it gave one.
+fn failure_text(status: reqwest::StatusCode, body: &str) -> String {
+    match body.trim() {
+        "" => format!("HTTP {status}"),
+        reason => format!("HTTP {status}: {reason}"),
     }
 }
 
@@ -286,6 +325,19 @@ mod tests {
         .expect("must block");
         assert!(msg.contains("rel.elevated.high"), "got: {msg}");
         assert!(!msg.contains("rel.alt"), "a reachable sibling must not be named: {msg}");
+    }
+
+    /// A full update arms nobody, so a sibling that could be armed is still in the
+    /// way: every live one is named, reachable or not.
+    #[test]
+    fn a_full_update_is_blocked_by_every_live_sibling_reachable_or_not() {
+        assert_eq!(describe_live_siblings(&[]), None);
+        let msg = describe_live_siblings(&[
+            rec("rel.alt", 41, Some(42035), Some("tok")),
+            rec("rel.elevated.high", 9, None, None),
+        ])
+        .expect("a reachable sibling still blocks a full update");
+        assert!(msg.contains("rel.alt (pid 41)") && msg.contains("rel.elevated.high (pid 9)"), "{msg}");
     }
 
     /// The record's port wins. A configured-port URL would address whichever
@@ -398,18 +450,36 @@ mod tests {
         assert_eq!(r.armed(), vec!["a".to_string(), "b".to_string()], "both were attempted");
         assert_eq!(
             r.disarmed(),
-            vec!["a".to_string()],
-            "the already-armed sibling must be released, not left holding a window"
+            vec!["a".to_string(), "b".to_string()],
+            "the already-armed sibling must be released, not left holding a window, \
+             and so must the one whose arm failed: its acknowledgement may have been lost"
         );
     }
 
-    /// The failing sibling itself is NOT disarmed — it never armed, and calling
-    /// disarm on it would report a spurious success for work never done.
+    /// An arm that errored (a timeout on the caller's side while the sibling went
+    /// on to arm) must be answered by a disarm to THAT sibling, at its own port and
+    /// with its own token, or nothing ever releases it.
     #[tokio::test]
-    async fn the_sibling_that_failed_to_arm_is_not_disarmed() {
+    async fn a_sibling_whose_arm_call_failed_is_disarmed_too() {
         let r = Recorder::failing_on(1);
-        let _ = arm_siblings(&[rec("a", 1, Some(1001), Some("t"))], r.call()).await;
-        assert!(r.disarmed().is_empty(), "nothing armed, so nothing to release");
+        arm_siblings(&[rec("only", 7, Some(1007), Some("tok-only"))], r.call())
+            .await
+            .expect_err("the only sibling's arm failed");
+        let call = |action| SiblingCall { profile: "only".into(), port: 1007, token: "tok-only".into(), action };
+        assert_eq!(
+            *r.calls.lock().unwrap(),
+            vec![call(Action::Arm), call(Action::Disarm)],
+            "the failed arm is followed by a disarm addressed to the same sibling"
+        );
+    }
+
+    /// The refusal a sibling sends back names its host; the error the updating
+    /// instance shows must carry it, not just a status code.
+    #[test]
+    fn a_refusal_carries_the_siblings_reason() {
+        let status = reqwest::StatusCode::CONFLICT;
+        assert_eq!(failure_text(status, "  host h1 is inside the app folder\n"), "HTTP 409 Conflict: host h1 is inside the app folder");
+        assert_eq!(failure_text(status, ""), "HTTP 409 Conflict");
     }
 
     #[test]

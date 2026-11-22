@@ -2,12 +2,14 @@
 //! seed. Split out of the former `commands.rs`.
 
 use super::window::flush_all_windows;
-use crate::state::AppState;
+use crate::state::{send_mcp_hold, Availability, AppState, ConfirmToken, Confirmation};
+use termflow_pty_protocol::McpHoldReason;
 use tauri::State;
 
-/// Lifecycle retention reported by the host this app is currently connected to.
-/// This deliberately reads the connected client, never discovery: a discovery
-/// record can be stale or replaced after the pipe connection is established.
+/// Lifecycle retention reported by the hosts this app is currently connected to:
+/// the least any of them promises. This deliberately reads the connected clients,
+/// never discovery: a discovery record can be stale or replaced after the pipe
+/// connection is established.
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 // `rename_all` renames the VARIANTS; the fields INSIDE a struct variant need
 // `rename_all_fields`. Without it this sent `active_secs` while the renderer
@@ -32,14 +34,12 @@ impl From<crate::pty_host_client::HostRetention> for ConnectedHostRetention {
     }
 }
 
-/// Return the retention contract of the connected host. No connected client is
-/// also unknown: absence does not establish an indefinite retention promise.
+/// Return the retention contract of the connected hosts, worst of all. No
+/// connected client, or an owned host that is not connected, is also unknown:
+/// absence does not establish an indefinite retention promise.
 #[tauri::command]
 pub fn connected_host_retention(state: State<'_, AppState>) -> ConnectedHostRetention {
-    state
-        .pty_host_clone()
-        .map(|client| client.host_retention().into())
-        .unwrap_or(ConnectedHostRetention::Unknown)
+    state.connected_retention().into()
 }
 
 /// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
@@ -57,7 +57,7 @@ pub fn connected_host_retention(state: State<'_, AppState>) -> ConnectedHostRete
 /// it cannot reach another instance at all. It used to run the sibling check
 /// too, which is why running `rel` while `rel.alt` was alive refused with
 /// "Updating would close it and lose its terminals" — a message about an update
-/// this command does not perform (design 014 §B1.2).
+/// this command does not perform.
 pub fn offload_preflight(state: &AppState) -> Result<(), String> {
     hotswap_preflight(state)
 }
@@ -69,35 +69,56 @@ pub fn offload_preflight(state: &AppState) -> Result<(), String> {
 /// shells with its GUI. Unlike offload, that reach is real, so the check is real.
 pub fn update_preflight(state: &AppState) -> Result<(), String> {
     hotswap_preflight(state)?;
+    // A host that would be killed by the swap cannot be offloaded: say which, and
+    // why, rather than offer an update that would close its terminals.
+    crate::state::update_refusal(&state.owned_hosts_now())?;
     let own = crate::profile::current().key();
-    let siblings = crate::net_ports::live_siblings_now(&own);
+    // Fail closed: a sibling this cannot SEE is a sibling the apply would kill
+    // unarmed, so an unreadable record store refuses the update outright.
+    let siblings = crate::net_ports::live_siblings_now(&own)
+        .map_err(|e| format!("cannot enumerate sibling instances: {e}"))?;
     crate::sibling_coord::describe_unarmable(&siblings).map_or(Ok(()), Err)
 }
 
-/// The Settings preflight for Offload & Close.
+/// The Settings preflight for the update affordance, and the mode the update
+/// would run in: `offload` keeps the terminals running, `full` closes them all
+/// and lists why.
 ///
-/// Both this and `restart_for_update` call `offload_preflight`, so the verdict
-/// the panel SHOWS cannot disagree with the one the button ENFORCES. They did
-/// disagree: this command ran only `hotswap_preflight` while the button ran the
-/// sibling check as well, so the panel green-lit an action that then refused as
-/// a toast after the click (design 014 §B4).
+/// An offload shares `update_preflight` with the update's own check, so the two
+/// judge the same things, but they are not the same question. This is a snapshot
+/// of what is known (`owned_hosts_now`): no discovery, no waiting. The action
+/// itself closes admission and looks again (`begin_update`), so it can still
+/// refuse what this approved: an operation that does not drain within the bound,
+/// or a host discovered or still unanswered by then. The panel can be green and
+/// the click refuse; the refusal is never the other way round, provided the
+/// release's mode is passed in. Asked before any check has found the release, the
+/// verdict is the offload's, and the caller asks again once the check resolves.
+///
+/// A full update is not subject to the offload's refusals (an in-process shell, a
+/// disconnected host); only a running sibling instance still stops it. The mode is
+/// the one the update check reported for the release (`marker_mode`); with no check
+/// yet, or none that found a release, it is an offload. The download decides for
+/// good, and the confirmation is bound to what it found.
 #[tauri::command]
-pub fn update_available(state: State<'_, AppState>) -> Result<(), String> {
-    update_preflight(&state)
+pub fn update_available(
+    state: State<'_, AppState>,
+    marker_mode: Option<crate::update_policy::UpdateMode>,
+) -> Result<Availability, String> {
+    state.update_availability(marker_mode.unwrap_or(crate::update_policy::UpdateMode::Offload), || {
+        update_preflight(&state)
+    })
 }
 
 pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
-    let client = state
-        .pty_host_clone()
-        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
-    if !client.survives_hotswap() {
-        return Err(
-            "hot-swap unavailable: the sidecar could not break away from a kill-on-close job"
-                .to_string(),
-        );
-    }
-    // Refuse if ANY live terminal is in-process (not host-owned) — a hot-swap
-    // would kill those shells. Only proceed when every terminal will survive.
+    // Every host this instance owns must be able to keep its shells alive; the
+    // refusal names the ones that cannot.
+    crate::state::offload_refusal(&state.owned_hosts_now())?;
+    local_terminals_refusal(state)
+}
+
+/// Refuse if ANY live terminal is in-process (not host-owned) — a hot-swap would
+/// kill those shells. Only proceed when every terminal will survive.
+fn local_terminals_refusal(state: &AppState) -> Result<(), String> {
     let has_local = state
         .terminals
         .iter()
@@ -111,8 +132,13 @@ pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// Preflight query for the Settings "Offload & Close" affordance. Returns Ok
-/// when the offload would keep all terminals alive; Err with the reason if not.
+/// Preflight query for the Settings "Offload & Close" affordance: a snapshot of
+/// whether the offload looks possible right now, from what is already known
+/// (`offload_preflight`). The button asks again and also runs `begin_offload`
+/// (discovery, waiting for operations in flight, refusing hosts that are
+/// unresolved or never discovered), so it can still refuse after the panel
+/// showed the offload as available. Ok means this check passed, not that the
+/// offload will go ahead.
 #[tauri::command]
 pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
     offload_preflight(&state)
@@ -196,11 +222,14 @@ async fn sample_at_prompt(hook: bool, pid: u32) -> bool {
 /// Update availability, surfaced to the "Check for updates" UI. `Unavailable`
 /// means this build has no updater compiled in (store flavor / feature off).
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UpdateStatus {
     NotInstalled,
     UpToDate,
-    Available { version: String },
+    /// `marker_mode` is what the release's own notes ask for. It travels with the
+    /// check that found the release, so whoever asks `update_available` next hands
+    /// it back and the answer never depends on which command ran first.
+    Available { version: String, marker_mode: crate::update_policy::UpdateMode },
     Unavailable,
 }
 
@@ -220,17 +249,36 @@ pub async fn check_for_updates() -> UpdateStatus {
     }
 }
 
-/// Download + arm + apply a Velopack update, keeping terminals alive. Always
-/// registered; a store/no-updater build returns a stable "not available" error.
+/// What `update_and_restart` came to when it returned without an error.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum UpdateRestart {
+    /// The updater is running and the app is exiting.
+    Started,
+    /// The update closes every terminal and the user has not agreed to this yet, or
+    /// what was agreed to has changed. Nothing was done. Send the same call again
+    /// with `confirm` made from this: `targetVersion` is the `version` here, the
+    /// other fields keep their names.
+    NeedsConfirmation(Confirmation),
+}
+
+/// Download + apply a Velopack update. An offload arms the hosts and keeps
+/// terminals alive; an update that has to close them (see `update_available`)
+/// answers `needsConfirmation` until `confirm` matches what is then true.
+/// Always registered; a store/no-updater build returns a stable "not available"
+/// error.
 #[tauri::command]
-pub async fn update_and_restart(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn update_and_restart(
+    state: State<'_, AppState>,
+    confirm: Option<ConfirmToken>,
+) -> Result<UpdateRestart, String> {
     #[cfg(feature = "velopack-updates")]
     {
-        crate::updater::update_and_restart(&state).await
+        crate::updater::update_and_restart(&state, confirm).await
     }
     #[cfg(not(feature = "velopack-updates"))]
     {
-        let _ = state;
+        let _ = (state, confirm);
         Err("in-app updates aren't available in this build (managed by the store)".to_string())
     }
 }
@@ -241,31 +289,154 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // exits this process — it performs no payload swap and cannot reach another
     // instance. The check that used to be here justified itself with "whatever
     // swaps the binary", which is a rebuild this command does not perform, and
-    // it is what made a live `rel.alt` refuse `rel`'s offload (design 014 §B1.2).
+    // it is what made a live `rel.alt` refuse `rel`'s offload.
     offload_preflight(&state)?;
-    let client = state
-        .pty_host_clone()
-        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    // Close admission first, then look again at what every owned host can do: a
+    // create in flight would otherwise land on a host after it was armed.
+    let mut hold = state.begin_offload().await?;
     let token = crate::pty_host_client::resolve_token();
-    // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
-    // exit and drop the pipe (10-minute safety window).
-    client
-        .arm_detach(
-            termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
-            &token,
-            Some(termflow_pty_protocol::ArmDetachPurpose::Local),
-        )
-        .await?;
+    // Arm every host and WAIT for the acks so we know each sidecar durably armed
+    // BEFORE we exit and drop the pipes (10-minute safety window). All or none.
+    hold.arm_detach(
+        termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+        &token,
+        Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+    )
+    .await?;
+    // Hand the MCP port to a pty-host, so agents get a timed wait instead of a dead port while
+    // the app is away. Best effort: it never stops the offload.
+    let handed = send_mcp_hold(&state, hold, McpHoldReason::Offload).await;
     // Let every window persist its state (cwd snapshot included) before we drop
     // it — an offload that skipped this came back with no persisted cwd for a
     // just-created/just-`cd`'d tab (see `flush_all_windows`).
     flush_all_windows(&state.app_handle).await;
     log::info!("pty-host: armed hot-swap hold; exiting to release the .exe lock");
+    handed.commit();
     state.app_handle.exit(0);
     Ok(())
 }
 
-/// The offload/update preflight split (design 014 §B4).
+/// Which windows get a chance to persist before the process goes away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushPolicy {
+    /// Ask every renderer to persist (tray item / healthy app).
+    Renderer,
+    /// The renderer is dead (WebView2 browser process gone) — waiting 1.5 s
+    /// for an ack that can never come only delays the recovery.
+    Skip,
+}
+
+/// Restart THIS process while the pty-host keeps every terminal alive: arm the
+/// local hold (the current host must arm, as for an offload) → optional flush →
+/// spawn a successor (`termflow.exe … --relaunch-after <our pid>`) → exit. Unlike
+/// `restart_for_update`, this always relaunches — offload leaves the user to
+/// reopen the app by hand, which is fine for a deliberate update but not for
+/// an unplanned webview death or an impatient tray click.
+///
+/// This is the way out of a hollow process, so it is stricter than nothing and
+/// laxer than an offload: it arms every host it is connected to and goes ahead
+/// without one it cannot reach (that host is left as a crash would leave it, for
+/// the successor to take back). It waits for operations in flight like an
+/// offload, but a create that is still stuck after that wait does not stop it.
+/// A host that merely will not arm is not allowed to stop the restart either,
+/// except the current one.
+///
+/// If the spawn fails we must NOT exit: doing so would leave the user with no
+/// process at all, armed or otherwise. The hold is *asked* to release (a
+/// disarm that goes unacknowledged is logged as an error — the host may then
+/// keep its 15-minute window, exactly as `disarm_then_exit` warns) and the
+/// error is returned for the caller to log/toast while the (still hollow,
+/// still tray-operable) process stays alive.
+///
+/// Single-flight: the automatic recovery and the tray item can both reach
+/// here for the same death (the window is hollow but the tray still works,
+/// and a user who sees nothing happen clicks). Two concurrent runs would each
+/// spawn a successor and race to exit; the second caller gets
+/// [`RESTART_IN_FLIGHT`] instead. The latch is released on every failure and
+/// deliberately kept on success — the process is exiting.
+pub async fn restart_keeping_terminals(
+    app: tauri::AppHandle,
+    flush: FlushPolicy,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    use tauri::Manager as _;
+
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "AppState not managed".to_string())?;
+    if state.restart_in_flight.swap(true, Ordering::SeqCst) {
+        return Err(RESTART_IN_FLIGHT.to_string());
+    }
+    let mut in_flight = InFlight {
+        flag: state.restart_in_flight.clone(),
+        keep: false,
+    };
+
+    local_terminals_refusal(&state)?;
+    let mut hold = state.begin_relaunch().await?;
+    let token = crate::pty_host_client::resolve_token();
+    hold.arm_detach(
+        termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+        &token,
+        Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+    )
+    .await?;
+    log::info!("[RECOVERY] armed the hot-swap hold on every connected host");
+    let handed = send_mcp_hold(&state, hold, McpHoldReason::Relaunch).await;
+
+    let flushed_by_us = if flush == FlushPolicy::Renderer {
+        flush_all_windows(&app).await
+    } else {
+        false
+    };
+
+    let pid = match crate::relaunch::spawn_relaunch() {
+        Ok(pid) => pid,
+        Err(e) => {
+            log::error!("[RECOVERY] relaunch spawn failed: {e}; releasing the hold");
+            // The flush marked this process as exiting; take that back only if the
+            // mark is ours, so the restore sweep keeps running and a later Quit
+            // still saves the windows.
+            if flushed_by_us {
+                state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            // Disarms every host that was armed (an unacknowledged one is logged by
+            // name: it may keep holding its detach window while this GUI is still
+            // connected) and lets creates through again.
+            handed.release().await;
+            return Err(e);
+        }
+    };
+    log::info!("[RECOVERY] relaunch spawned (pid {pid}); exiting");
+    in_flight.keep = true;
+    handed.commit();
+    app.exit(0);
+    Ok(())
+}
+
+/// The error `restart_keeping_terminals` returns to a second concurrent caller.
+/// Callers compare against it to tell "busy" from "failed" — a toast saying the
+/// restore failed would be wrong while the first run is still going.
+pub const RESTART_IN_FLIGHT: &str = "a restart keeping terminals is already in progress";
+
+/// Releases `AppState::restart_in_flight` on every early return unless the run
+/// reached its exit. A guard rather than a reset at each `return`: the `?`
+/// operators above are the failure paths, and a forgotten reset on one of them
+/// would wedge the tray item for the life of the process.
+struct InFlight {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    keep: bool,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// The offload/update preflight split.
 ///
 /// `AppState` needs a Tauri `AppHandle`, and the `tauri::test` feature crashes
 /// the test binary on Windows, so these assert the WIRING from source. That is
@@ -351,13 +522,29 @@ mod preflight_wiring_tests {
             assert!(
                 !body.contains(api),
                 "Offload & Close must not consult siblings (`{api}` found) — it performs no \
-                 payload swap and cannot reach another instance (design 014 §B1.2). Body:\n{body}"
+                 payload swap and cannot reach another instance. Body:\n{body}"
             );
         }
         assert!(
             body.contains("offload_preflight"),
             "Offload must still guard THIS instance's terminals. Body:\n{body}"
         );
+    }
+
+    /// A relaunch that fails to start takes back the exit mark its own window flush
+    /// set (and only that one), or the restore sweep would skip every tick and a
+    /// later Quit would exit without saving the windows.
+    #[test]
+    fn a_failed_relaunch_takes_back_only_the_exit_mark_its_flush_set() {
+        let body = fn_body(include_str!("update.rs"), "async fn restart_keeping_terminals");
+        let flush = body.find("let flushed_by_us").expect("the flush result must be kept");
+        let spawn_err = body.find("relaunch spawn failed").expect("spawn failure branch");
+        let reset = body.find("exiting.store(false").expect("the failure branch must clear the mark");
+        assert!(flush < spawn_err && spawn_err < reset, "reset belongs in the spawn-failure branch:
+{body}");
+        let guard = body[spawn_err..reset].rfind("if flushed_by_us").expect("guarded by ownership");
+        assert!(guard < reset - spawn_err, "the reset must be guarded by `flushed_by_us`:
+{body}");
     }
 
     /// The argument list of every `arm_detach` call in a file, excluding this
@@ -393,39 +580,58 @@ mod preflight_wiring_tests {
     #[test]
     fn all_arm_call_sites_send_the_intended_purpose() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let read = |rel: &str| {
-            let args = arm_detach_args(&std::fs::read_to_string(root.join(rel)).unwrap());
-            assert_eq!(args.len(), 1, "{rel}: expected exactly one arm_detach call");
-            args.into_iter().next().unwrap()
-        };
+        let read_all =
+            |rel: &str| arm_detach_args(&std::fs::read_to_string(root.join(rel)).unwrap());
 
         // Both LOCAL sites label the arm, so a future deadline can apply to them.
+        // `commands/update.rs` carries TWO local sites since plan 044
+        // (`restart_for_update`'s offload and `restart_keeping_terminals`'s
+        // relaunch) — every one of them must be labelled the same way.
         for local in ["commands/update.rs", "updater.rs"] {
-            let args = read(local);
-            assert!(
-                args.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"),
-                "{local}: a local arm must be labelled Local, got: {args}"
-            );
+            let calls = read_all(local);
+            assert!(!calls.is_empty(), "{local}: expected at least one arm_detach call");
+            for args in &calls {
+                assert!(
+                    args.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"),
+                    "{local}: a local arm must be labelled Local, got: {args}"
+                );
+            }
         }
 
         // The sibling site must stay UNLABELLED — a different profile's update
-        // must never install a deadline on terminals its user never touched.
-        let sibling = read("api_server/system.rs");
+        // must never install a deadline on terminals its user never touched. The
+        // handler no longer arms anything itself: it asks `sibling_arm`, which arms
+        // through a hold and passes no purpose.
         assert!(
-            !sibling.contains("ArmDetachPurpose"),
-            "a sibling-armed hold must carry no purpose, got: {sibling}"
+            read_all("api_server/system.rs").is_empty(),
+            "api_server/system.rs must arm through `sibling_arm`, not call arm_detach itself"
         );
+        let lifecycle = std::fs::read_to_string(root.join("state/host_lifecycle.rs")).unwrap().replace("\r\n", "\n");
+        let sibling_calls = arm_detach_args(&fn_body(&lifecycle, "async fn sibling_arm"));
+        assert_eq!(sibling_calls.len(), 1, "sibling_arm: expected exactly one arm_detach call");
         assert!(
-            sibling.contains("None"),
-            "sibling arm must pass an explicit None, got: {sibling}"
+            !sibling_calls[0].contains("ArmDetachPurpose") && sibling_calls[0].trim_end().ends_with("None"),
+            "a sibling-armed hold must carry no purpose (an explicit None), got: {}",
+            sibling_calls[0]
         );
+        // The hold's arm hands the caller's purpose to the shared arm untouched, and
+        // the shared arm to the host.
+        let hold_arm = fn_body(&lifecycle, "pub async fn arm_detach");
+        // (" arm_hosts(" with its space: `disarm_hosts(` ends the same way.)
+        assert_eq!(hold_arm.matches(" arm_hosts(").count(), 2, "{hold_arm}");
+        assert_eq!(hold_arm.matches("purpose).await").count(), 2, "every arm forwards the purpose: {hold_arm}");
+        let shared = arm_detach_args(&fn_body(&lifecycle, "async fn arm_hosts"));
+        assert_eq!(shared.len(), 1, "arm_hosts: expected exactly one arm_detach call");
+        assert!(shared[0].contains("purpose"), "the shared arm must forward its purpose: {}", shared[0]);
     }
 
     /// The asymmetry that produced the report: the panel showed offload as
     /// available while the button ran a stricter check, so the refusal arrived
-    /// as a toast after the click. One shared function, so they cannot diverge.
+    /// as a toast after the click. The panel is a snapshot and the button also
+    /// runs `begin_offload`, so the button can still refuse what the panel
+    /// showed; what is shared is the preflight, so that part cannot diverge.
     #[test]
-    fn the_settings_preflight_runs_the_same_check_the_button_enforces() {
+    fn the_settings_panel_and_the_button_both_run_the_shared_preflight() {
         let src = source();
         let shown = fn_body(&src, "pub fn hotswap_available");
         let enforced = fn_body(&src, "pub async fn restart_for_update");

@@ -84,7 +84,10 @@ afterEach(() => {
 
 const exit = (detail: Record<string, unknown>) =>
   act(() => {
-    window.dispatchEvent(new CustomEvent('pty:exit', { detail }));
+    // The service always supplies the exiting process, including when it resolves the leaf.
+    window.dispatchEvent(new CustomEvent('pty:exit', {
+      detail: { processId: 'pc-1', ...detail },
+    }));
   });
 
 const banner = () => container.querySelector('.session-closed-banner');
@@ -123,6 +126,13 @@ describe('pane exit → SessionClosedBanner (plan/024 Req 4)', () => {
   it('ignores a SIBLING pane\'s exit', () => {
     exit({ terminalId: 'tm-someone-else', processId: 'pc-99', exitCode: 0, cwd: null });
     expect(banner()).toBeNull();
+  });
+
+  it('ignores a former process exit even when its leaf id is reused', () => {
+    exit({ terminalId: TERM, processId: 'pc-former', exitCode: 0, cwd: null });
+    expect(banner()).toBeNull();
+    exit({ terminalId: TERM, processId: 'pc-1', exitCode: 0, cwd: null });
+    expect(banner()).not.toBeNull();
   });
 
   it('dismisses back to no banner', () => {

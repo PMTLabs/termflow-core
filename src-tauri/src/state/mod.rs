@@ -1,11 +1,95 @@
 mod types;
+mod incarnation_ids;
+mod host_routes;
+mod host_keys;
+pub(crate) mod ingress;
+pub(crate) use host_keys::{SessionIdentity, PageRegistration, WindowBuildGuard, PaneIdentity, PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
+#[cfg(test)]
+pub(crate) use host_keys::PageIdentity;
 mod terminals;
+mod owner_lifecycle;
+pub(crate) use owner_lifecycle::CreateGuard;
+mod host_registry;
+mod host_retire;
+mod host_table;
+mod host_adoption;
+mod host_connect;
+mod host_lifecycle;
+mod mcp_handover;
+pub(crate) mod mcp_reclaim;
+mod mcp_snapshot;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+#[path = "mcp_hold_e2e_tests.rs"]
+mod mcp_hold_e2e;
+#[cfg(test)]
+pub(crate) mod mcp_snapshot_tests;
+mod host_port;
+mod host_routing;
+pub(crate) use host_routing::prepare_elevated_process;
+mod host_generation;
+pub(crate) mod permissions;
+mod update_survival;
+mod update_full;
 mod windows;
 mod history;
+pub(crate) mod leaf_storage;
+#[cfg(test)]
+mod leaf_storage_tests;
+#[cfg(test)]
+mod storage_wiring_tests;
+#[cfg(test)]
+mod inherit_cursor_wiring_tests;
 mod render;
+mod restore_frame;
 mod engine_host;
 mod reattach;
+#[cfg(test)]
+pub(crate) mod source_scan;
+#[cfg(test)]
+pub(crate) mod live_call_census;
+#[cfg(test)]
+pub(crate) mod mcp_hold_census_tests;
+#[cfg(test)]
+mod permissions_census_tests;
+#[cfg(test)]
+mod mcp_launch_census_tests;
+#[cfg(test)]
+pub(crate) mod mcp_exit_census_tests;
+#[cfg(test)]
+mod mcp_sibling_census_tests;
+#[cfg(test)]
+mod mcp_reclaim_census_tests;
+#[cfg(test)]
+mod wiring_tests;
+#[cfg(test)]
+mod owner_wiring_tests;
+#[cfg(test)]
+mod pane_wiring_tests;
+#[cfg(test)]
+mod transfer_wiring_tests;
+#[cfg(test)]
+mod mutator_wiring_tests;
+#[cfg(test)]
+mod sink_inventory_tests;
+#[cfg(test)]
+mod input_gate_census_tests;
+#[cfg(test)]
+pub(crate) use host_adoption::wiring_tests::exercise_generations;
 
 pub use types::*;
-pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, tail_text_with};
+pub use incarnation_ids::{IdAllocator, mint_process_id, mint_session_key, parse_session_key, restore_candidate, SessionKeyKind};
+pub use host_routes::HostRoutes;
+pub use host_keys::{HostKeys, KeyState, CloseState, KeyStage, StageMode, CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
+pub use restore_frame::{plan_restore, CursorFrame, RestorePlan};
+pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, strip_cursor_state_tail, tail_text_with};
 pub use reattach::{ReattachAction, ReattachPlan, plan_reattach};
+pub use host_table::{Admission, Busy, DrainGuard, DrainRefusal, HostTable, QuiesceGuard, QuiesceReason, Ticket, LIFECYCLE_BUSY};
+pub use mcp_handover::{send_mcp_hold, Cleanup, HandedOver};
+pub use mcp_reclaim::McpReclaim;
+pub use host_adoption::{Barrier, Resolution, UnresolvedHost};
+pub use host_lifecycle::{offload_refusal, update_refusal, AckedHost, CloseBounds, ExitReport, Hold, HostExit, OwnedHost, SiblingArm};
+pub use update_survival::{describe_reasons, effective_mode, FullReason, HostOrigin, UpdateMode};
+pub use update_full::{Availability, ConfirmToken, Confirmation, FullRun, Target};
+pub use host_routing::{Placement, HOST_OWNERSHIP_PENDING};
+pub use host_registry::effective_session_key;
+pub use host_generation::{generation_marker, Marker, TERMINAL_GENERATIONS_EVENT};

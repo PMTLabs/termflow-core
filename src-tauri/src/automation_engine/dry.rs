@@ -134,12 +134,18 @@ fn action_trace(
     reserved: &subst::Reserved,
 ) -> Option<StepTrace> {
     let action = action?;
+    if action.masked && action.message.is_empty() {
+        return Some(step(ACTION, "failed", "the hidden message can't be read on this machine".into()));
+    }
     Some(match preview_message(&action.message, action.substitute, caps, reserved, subst::ValueEscape::Raw) {
-        Ok(body) => step(ACTION, "ok", match terminal_name {
+        Ok(body) => { let body = if action.masked { "••••••••".to_string() } else { body };
+            step(ACTION, "ok", match terminal_name {
             Some(name) => format!("would type `{}` into {}", body, name),
             None => format!("would type `{}`", body),
-        }),
-        Err(e) => step(ACTION, "failed", format!("nothing would be sent — `{}` had no value here", e)),
+        }) },
+        Err(e) => step(ACTION, "failed", if action.masked {
+            "nothing would be sent — a hidden message token had no value here".to_string()
+        } else { format!("nothing would be sent — `{}` had no value here", e) }),
     })
 }
 
@@ -1195,6 +1201,20 @@ mod tests {
 
     /// The whole point of the shared module. This asserts the RELATION, not two hard-coded strings —
     /// a test that pins both to "Fix the 17 …" passes even if both are wrong in the same way.
+    #[test]
+    fn hidden_action_trace_never_quotes_body_or_token() {
+        let mut action = ctx_rule("hidden").graph.action.unwrap();
+        action.masked = true;
+        for substitute in [false, true] {
+            action.substitute = substitute;
+            action.message = "secret ${secretPassword}".into();
+            let trace = action_trace(Some(&action), None, None, &subst::Reserved::sample()).unwrap();
+            let json = serde_json::to_string(&trace).unwrap();
+            assert!(!json.contains("secret"));
+            assert!(!json.contains("secretPassword"));
+        }
+    }
+
     #[test]
     fn the_preview_and_the_send_resolve_identically() {
         let caps = Captures {

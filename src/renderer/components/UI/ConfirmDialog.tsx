@@ -13,6 +13,8 @@ interface ConfirmDialogProps {
   onCancel: () => void;
   confirmText?: string;
   cancelText?: string;
+  confirmDisabled?: boolean;
+  cancelDisabled?: boolean;
   /**
    * Is the primary action itself destructive?
    *
@@ -51,6 +53,11 @@ interface ConfirmDialogProps {
    * so it reads as the dangerous ALTERNATIVE and not as a second primary competing for the eye.
    */
   secondaryDestructive?: boolean;
+  /** Optional close-time focus-restore veto, passed to `useDialogA11y` (068 F5, plan 070 T4). */
+  restoreFocusIf?: (trigger: HTMLElement) => boolean;
+  /** Marks the dialog as owning the keyboard, so Canvas capture shortcuts leave its keys alone
+   *  (`canvasGestures.sshOwnsKeyboard`). Off by default. */
+  sshKeyboardOwner?: boolean;
 }
 
 export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
@@ -61,25 +68,30 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   onCancel,
   confirmText = 'Confirm',
   cancelText = 'Cancel',
+  confirmDisabled = false,
+  cancelDisabled = false,
   destructive = false,
   confirmMnemonic,
   cancelMnemonic,
   secondaryText,
   onSecondary,
   secondaryDestructive = false,
+  restoreFocusIf,
+  sshKeyboardOwner = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
   const mnemonics: MnemonicType[] = [];
-  if (confirmMnemonic) mnemonics.push({ key: confirmMnemonic, handler: onConfirm });
-  if (cancelMnemonic) mnemonics.push({ key: cancelMnemonic, handler: onCancel });
+  if (confirmMnemonic && !confirmDisabled) mnemonics.push({ key: confirmMnemonic, handler: onConfirm });
+  if (cancelMnemonic && !cancelDisabled) mnemonics.push({ key: cancelMnemonic, handler: onCancel });
 
   useDialogA11y(containerRef, {
     isOpen,
-    onCancel,
+    onCancel: () => { if (!cancelDisabled) onCancel(); },
     mnemonics,
     initialFocus: destructive ? 'cancel' : 'confirm',
+    restoreFocusIf,
   });
 
   if (!isOpen) return null;
@@ -97,7 +109,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   // next thing to paint above 100 would hit it identically. A modal has to be a child of
   // <body>.
   return createPortal(
-    <div className="confirm-dialog-overlay" onClick={onCancel}>
+    <div className="confirm-dialog-overlay" onClick={cancelDisabled ? undefined : onCancel}>
       <div
         className="confirm-dialog"
         ref={containerRef}
@@ -105,6 +117,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
+        data-ssh-keyboard-owner={sshKeyboardOwner ? '' : undefined}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="confirm-dialog-header">
@@ -114,7 +127,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           {typeof message === 'string' ? <p>{message}</p> : message}
         </div>
         <div className="confirm-dialog-footer">
-          <button className="confirm-btn cancel" data-dialog-cancel onClick={onCancel}>
+          <button className="confirm-btn cancel" data-dialog-cancel disabled={cancelDisabled} onClick={onCancel}>
             {cancelMnemonic ? <Mnemonic label={cancelText} char={cancelMnemonic} /> : cancelText}
           </button>
           {secondaryText && onSecondary && (
@@ -128,6 +141,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <button
             className={`confirm-btn ${destructive ? 'danger' : 'primary'}`}
             data-dialog-confirm
+            disabled={confirmDisabled}
             onClick={onConfirm}
           >
             {confirmMnemonic ? (

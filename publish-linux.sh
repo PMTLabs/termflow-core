@@ -13,10 +13,23 @@ set -e
 #     libwebkit2gtk-4.1-dev build-essential curl wget file \
 #     libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 #
-# Usage:  ./publish-linux.sh [VERSION]
+# Usage:  ./publish-linux.sh [VERSION [NOTES_FILE]]
+#
+# NOTES_FILE (or RELEASE_NOTES_FILE) is markdown passed to `vpk pack
+# --releaseNotes`. The updater reads release notes from the Velopack feed, not
+# from the GitHub release body, so write the notes BEFORE packing.
 # ─────────────────────────────────────────────────────────────────────────────
 
 VERSION="${1:-1.0.0}"
+NOTES_FILE="${2:-${RELEASE_NOTES_FILE:-}}"
+NOTES_ARGS=()
+if [ -n "$NOTES_FILE" ]; then
+  if [ ! -f "$NOTES_FILE" ]; then
+    echo "Release notes file not found: $NOTES_FILE" >&2
+    exit 1
+  fi
+  NOTES_ARGS=(--releaseNotes "$(cd "$(dirname "$NOTES_FILE")" && pwd)/$(basename "$NOTES_FILE")")
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Tools may not be on a non-interactive shell's PATH.
@@ -77,7 +90,8 @@ dotnet vpk pack \
   --packDir     "$STAGE_DIR" \
   --mainExe     "$MAIN_EXE" \
   --icon        "$ICON" \
-  --outputDir   "$RELEASES_DIR"
+  --outputDir   "$RELEASES_DIR" \
+  "${NOTES_ARGS[@]}"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""

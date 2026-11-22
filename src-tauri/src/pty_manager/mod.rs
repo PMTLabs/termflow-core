@@ -1,8 +1,15 @@
 mod cwd;
+#[path = "cwd/osc7.rs"]
+pub(crate) mod osc7;
 mod procinfo;
+pub(crate) use procinfo::native_process_birth;
 mod profiles;
 mod spawn;
+mod local_process;
 mod spawn_spec;
+pub mod ssh_helpers;
+pub(crate) mod ssh_shell;
+pub mod input_gate;
 
 pub(crate) use cwd::exit_cwd_for;
 pub use cwd::{get_process_cwd, get_process_cwd_with, parse_osc_cwd};
@@ -15,7 +22,8 @@ pub use profiles::{
     load_custom_profiles, save_custom_profiles, update_custom_profile, ProfilesConfig,
     ShellProfile,
 };
-pub use spawn::{kill_process_tree, spawn_terminal};
+pub use spawn::{ensure_bundled_conpty, spawn_terminal};
+pub use local_process::{kill_process_tree, LocalProcess};
 pub use spawn_spec::{
     build_spawn_spec, shell_emits_prompt_osc, FOREIGN_TERMINAL_ENV, HOST_CONTROL_ENV,
 };

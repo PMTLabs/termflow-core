@@ -35,6 +35,48 @@ beforeEach(() => {
   invokeMock.mockImplementation((_cmd: string, _args?: any) => Promise.resolve('mock-pid'));
 });
 
+describe('tauriBridge permission requests', () => {
+  it.each(['accessibility', 'screenRecording'] as const)('forwards %s and the displayed subject to the permission command', async kind => {
+    const expected = { target: 'host' as const, pid: 42, generation: 'generation-1', bundleId: 'app.termflow.host' };
+    const view = { epoch: 1, target: 'host', subject: expected, accessibility: 'unknown', screenRecording: 'unknown', otherHosts: [], appSessions: false, error: 'disconnected' };
+    invokeMock.mockResolvedValueOnce(view);
+    expect(await tauriBridge.requestMacosPermission(kind, expected)).toBe(view);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('request_macos_permission', { kind, expected });
+  });
+});
+
+describe('tauriBridge restore intent contract', () => {
+  it('forwards SSH readiness only on an explicitly opted-in legacy create', async () => {
+    await tauriBridge.createTerminal('default', undefined, undefined, 'tm-opted', 80, 24, 'tb-owner', undefined, false, 'saved-id');
+    expect(invokeMock).toHaveBeenLastCalledWith('create_terminal', expect.objectContaining({ sshLaunchConnectionId: 'saved-id' }));
+    await tauriBridge.createTerminal('default', undefined, undefined, 'tm-ordinary');
+    expect(invokeMock.mock.calls[1]?.[1]).not.toHaveProperty('sshLaunchConnectionId');
+  });
+  it('round-trips full process ids and exact recovered session overrides', async () => {
+    const processId = 'pc-0123456789ab4cde8fab0123456789ab';
+    const sessionKey = 'tm-original~0123456789ab4cde8fab0123456789ac';
+    invokeMock.mockResolvedValueOnce(processId);
+    await expect(tauriBridge.createTerminal('default', 'Recovered', undefined, 'tm-recovered', 80, 24, 'tb-owner', sessionKey)).resolves.toBe(processId);
+    const create = invokeMock.mock.calls.find(([cmd]) => cmd === 'create_terminal');
+    expect(create?.[1]).toMatchObject({ tabId: 'tm-recovered', sessionKey, owningTabId: 'tb-owner' });
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('has no hold-free label registration or forget endpoint', () => {
+    expect(tauriBridge).not.toHaveProperty('registerRestoringLeaves');
+    expect(tauriBridge).not.toHaveProperty('forgetRestoringLeaf');
+    expect(typeof tauriBridge.createTerminal).toBe('function');
+  });
+
+  it('never adds a per-mount restoring flag to a create request', async () => {
+    await tauriBridge.createTerminal('default', 'Restored', undefined, 'tm-modern');
+    const args = invokeMock.mock.calls.find(([cmd]) => cmd === 'create_terminal')![1];
+    expect(args).not.toHaveProperty('restoring');
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'register_restoring_leaves')).toBe(false);
+  });
+});
+
 describe('tauriBridge.createTerminal — fitted size forwarding', () => {
   it('forwards fitted cols/rows when provided', async () => {
     const pid = await tauriBridge.createTerminal('default', 'myterm', '/home', 'tab-1', 140, 37);

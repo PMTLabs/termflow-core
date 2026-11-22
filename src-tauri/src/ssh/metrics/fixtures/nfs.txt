@@ -1,0 +1,893 @@
+DERIVED, NOT CAPTURED: the real Ubuntu/WSL capture (ubuntu.txt) with only the mounts, dfLocal and dfNfs
+sections replaced by a modeled NFS host; see README.md. No NFS host was available (leader ruling D55).
+__TFM_1b29f714ffa84471a5ef491176b5545c_V1_BEGIN__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_platform_BEGIN__
+Linux
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_platform_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_hostname_BEGIN__
+tf-metrics-nfs
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_hostname_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_architecture_BEGIN__
+x86_64
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_architecture_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_stat_BEGIN__
+cpu  72525712 139 12419141 1658499522 8448405 0 7167439 0 1085468 0
+cpu0 2258613 0 658458 69270205 631143 0 4553854 0 29617 0
+cpu1 2767162 3 559044 68909606 747369 0 1000500 0 38852 0
+cpu2 2930079 6 546490 68626723 866811 0 420863 0 40870 0
+cpu3 3112114 0 545740 68395885 905090 0 247385 0 45383 0
+cpu4 2963658 11 541041 68542376 914899 0 182591 0 42582 0
+cpu5 2896440 5 534618 68620527 912682 0 147932 0 38129 0
+cpu6 2997205 11 524928 68959216 505590 0 67584 0 47956 0
+cpu7 2968103 22 511449 69184922 323293 0 55199 0 42535 0
+cpu8 3103060 2 507422 69124187 282274 0 48796 0 47947 0
+cpu9 3146934 0 502731 69141256 228282 0 42032 0 53966 0
+cpu10 3109967 11 499392 69208977 200872 0 38389 0 46096 0
+cpu11 3092216 0 504300 69241173 182005 0 35419 0 45742 0
+cpu12 3016195 0 505577 69321951 170927 0 33948 0 48048 0
+cpu13 3079477 1 503744 69267043 165575 0 32373 0 48236 0
+cpu14 3024153 0 499668 69332663 158635 0 30900 0 45851 0
+cpu15 3030915 0 500168 69329405 154716 0 30468 0 43888 0
+cpu16 2978265 1 494146 69387005 152625 0 28752 0 42056 0
+cpu17 3023202 6 498836 69351279 139348 0 27694 0 47882 0
+cpu18 3057544 0 502635 69311035 141990 0 27716 0 45633 0
+cpu19 2939074 6 493958 69442585 137564 0 27392 0 46184 0
+cpu20 3131186 7 496156 69254559 135720 0 25157 0 43336 0
+cpu21 3183743 0 492986 69209179 131492 0 24364 0 44378 0
+cpu22 3272455 9 495424 69120787 131125 0 19193 0 52108 0
+cpu23 3443942 32 500224 68946969 128369 0 18929 0 58183 0
+intr 7906719255 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 12034607 1 6 49 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+ctxt 12473476158
+btime 1794576529
+processes 27608315
+procs_running 4
+procs_blocked 1
+softirq 2084675139 0 139938522 14554 622689386 0 0 354382729 257205199 28411 710416338
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_stat_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_meminfo_BEGIN__
+MemTotal:       49327760 kB
+MemFree:        11991732 kB
+MemAvailable:   31540132 kB
+Buffers:         2058864 kB
+Cached:         17627972 kB
+SwapCached:       374468 kB
+Active:         17441132 kB
+Inactive:       17657572 kB
+Active(anon):    7569512 kB
+Inactive(anon):  8538808 kB
+Active(file):    9871620 kB
+Inactive(file):  9118764 kB
+Unevictable:          12 kB
+Mlocked:              12 kB
+SwapTotal:      16777216 kB
+SwapFree:        7243544 kB
+Dirty:             16548 kB
+Writeback:             0 kB
+AnonPages:      15083820 kB
+Mapped:          1184748 kB
+Shmem:            759524 kB
+KReclaimable:    1121000 kB
+Slab:            1487368 kB
+SReclaimable:    1121000 kB
+SUnreclaim:       366368 kB
+KernelStack:       51952 kB
+PageTables:       130724 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:    41441096 kB
+Committed_AS:   41831536 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:       93920 kB
+VmallocChunk:          0 kB
+Percpu:            20832 kB
+HardwareCorrupted:     0 kB
+AnonHugePages:    516096 kB
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+FileHugePages:    319488 kB
+FilePmdMapped:         0 kB
+Unaccepted:            0 kB
+Balloon:               0 kB
+HugePages_Total:       0
+HugePages_Free:        0
+HugePages_Rsvd:        0
+HugePages_Surp:        0
+Hugepagesize:       2048 kB
+Hugetlb:               0 kB
+DirectMap4k:       97280 kB
+DirectMap2M:    18776064 kB
+DirectMap1G:    40894464 kB
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_meminfo_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_netdev_BEGIN__
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 126751791050 305373181    0    0    0     0          0         0 126751791050 305373181    0    0    0     0       0          0
+  eth0: 13974770289 11644556    0    0    0     0          0     15900 9425976545 2126215    0    0    0     0       0          0
+br-3c3155846021:   31542     121    0    0    0     0          0         0    44985     323    0    7    0     0       0          0
+br-4f2cff925fbe:     168       6    0    0    0     0          0         0    27078     174    0    7    0     0       0          0
+br-c2c6e82c028a:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-c3283c0dcf50:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-ccc395c4bf09:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-d0a552a61899:   62443     147    0    0    0     0          0         0   114122     293    0    7    0     0       0          0
+br-42bbfd798829:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-587c2790c681:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-780a27fc8c70:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-ade0d498a5f9: 8841511950 30122790    0    0    0     0          0         0 11539610905 27196585    0    7    0     0       0          0
+br-ca635a13688e:      84       3    0    0    0     0          0         0    27080     174    0    7    0     0       0          0
+br-125ecf6aae35:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-1bbc3c3b087b: 536261064 2942224    0    0    0     0          0         0 3478352121 2757880    0    7    0     0       0          0
+docker0: 73057946837 121789120    0    0    0     0          0         0 110862021212 119617559    0    7    0     0       0          0
+br-45711035451e:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-4e7e2e767d63:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-fca82e92a01c:      84       3    0    0    0     0          0         0    27078     174    0    7    0     0       0          0
+veth4120078: 575840559 2939407    0    0    0     0          0         0 3477680101 2754689    0    0    0     0       0          0
+veth8c6efad:  435153     243    0    0    0     0          0         0    79600     743    0    0    0     0       0          0
+vethb1c0bdb: 28690416  329136    0    0    0     0          0         0 45884023  345562    0    0    0     0       0          0
+vethf76bb13:  873156     884    0    0    0     0          0         0   195926    1527    0    0    0     0       0          0
+veth0495dc4:     126       3    0    0    0     0          0         0    43632     396    0    0    0     0       0          0
+vethcfeff65:     126       3    0    0    0     0          0         0    43688     398    0    0    0     0       0          0
+vethe40375e:  303206    1687    0    0    0     0          0         0   549030    2424    0    0    0     0       0          0
+veth589df29:     126       3    0    0    0     0          0         0  1174015   21504    0    0    0     0       0          0
+veth1077e61:     126       3    0    0    0     0          0         0    43704     397    0    0    0     0       0          0
+vethfbfb263:   64501     147    0    0    0     0          0         0   130676     515    0    0    0     0       0          0
+veth54262c2:    4555      19    0    0    0     0          0         0    49914     413    0    0    0     0       0          0
+veth9920e25:     126       3    0    0    0     0          0         0    51403     505    0    0    0     0       0          0
+veth2bdfce8: 18099456   58560    0    0    0     0          0         0 12145906  102818    0    0    0     0       0          0
+vethb9c1b26:     126       3    0    0    0     0          0         0    43606     397    0    0    0     0       0          0
+veth21bd258:     126       3    0    0    0     0          0         0    45132     422    0    0    0     0       0          0
+vethbe37bdf:   28681     102    0    0    0     0          0         0    55577     536    0    0    0     0       0          0
+vethc310d8b:     126       3    0    0    0     0          0         0  1173665   21499    0    0    0     0       0          0
+veth4367d34: 9255390364 30093619    0    0    0     0          0         0 11515941610 27164293    0    0    0     0       0          0
+vethd6df6b1: 363148409 1884302    0    0    0     0          0         0 2267473125 1756068    0    0    0     0       0          0
+veth1b739b7: 15935177   49342    0    0    0     0          0         0  8261946   70494    0    0    0     0       0          0
+veth652841d: 6975554   22772    0    0    0     0          0         0  8180232   25622    0    0    0     0       0          0
+veth3a89cf1: 224207230 1186913    0    0    0     0          0         0 1364199903 1096766    0    0    0     0       0          0
+veth2ad38d5: 7416371   23721    0    0    0     0          0         0  4207813   34166    0    0    0     0       0          0
+veth9e4add5: 5939556   19869    0    0    0     0          0         0  7054119   22002    0    0    0     0       0          0
+veth0ee66aa:    2388      38    0    0    0     0          0         0     6428      89    0    0    0     0       0          0
+veth7cd2be8:  347654    3424    0    0    0     0          0         0  9712268    3328    0    0    0     0       0          0
+veth5b80b34:     126       3    0    0    0     0          0         0     2134      16    0    0    0     0       0          0
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_netdev_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_uptime_BEGIN__
+732604.51 16584995.26
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_uptime_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_bootId_BEGIN__
+b75b67b8-29e5-49d1-b98b-e797bbddfb8d
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_bootId_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_cpuinfo_BEGIN__
+processor	: 0
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 0
+cpu cores	: 24
+apicid		: 0
+initial apicid	: 0
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 1
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 1
+cpu cores	: 24
+apicid		: 1
+initial apicid	: 1
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 2
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 2
+cpu cores	: 24
+apicid		: 2
+initial apicid	: 2
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 3
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 3
+cpu cores	: 24
+apicid		: 3
+initial apicid	: 3
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 4
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 4
+cpu cores	: 24
+apicid		: 4
+initial apicid	: 4
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 5
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 5
+cpu cores	: 24
+apicid		: 5
+initial apicid	: 5
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 6
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 6
+cpu cores	: 24
+apicid		: 6
+initial apicid	: 6
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 7
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 7
+cpu cores	: 24
+apicid		: 7
+initial apicid	: 7
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 8
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 8
+cpu cores	: 24
+apicid		: 8
+initial apicid	: 8
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 9
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 9
+cpu cores	: 24
+apicid		: 9
+initial apicid	: 9
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 10
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 10
+cpu cores	: 24
+apicid		: 10
+initial apicid	: 10
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 11
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 11
+cpu cores	: 24
+apicid		: 11
+initial apicid	: 11
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 12
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 12
+cpu cores	: 24
+apicid		: 12
+initial apicid	: 12
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 13
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 13
+cpu cores	: 24
+apicid		: 13
+initial apicid	: 13
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 14
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 14
+cpu cores	: 24
+apicid		: 14
+initial apicid	: 14
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 15
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 15
+cpu cores	: 24
+apicid		: 15
+initial apicid	: 15
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 16
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 16
+cpu cores	: 24
+apicid		: 16
+initial apicid	: 16
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 17
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 17
+cpu cores	: 24
+apicid		: 17
+initial apicid	: 17
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 18
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 18
+cpu cores	: 24
+apicid		: 18
+initial apicid	: 18
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 19
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 19
+cpu cores	: 24
+apicid		: 19
+initial apicid	: 19
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 20
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 20
+cpu cores	: 24
+apicid		: 20
+initial apicid	: 20
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 21
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 21
+cpu cores	: 24
+apicid		: 21
+initial apicid	: 21
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 22
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 22
+cpu cores	: 24
+apicid		: 22
+initial apicid	: 22
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 23
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 23
+cpu cores	: 24
+apicid		: 23
+initial apicid	: 23
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_cpuinfo_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_nproc_BEGIN__
+24
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_nproc_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_loadavg_BEGIN__
+3.98 3.72 3.35 1/3221 2139206
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_loadavg_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_who_BEGIN__
+ubuntu   pts/1        Nov 11 09:49
+root     pts/3        Nov 11 10:01
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_who_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_osRelease_BEGIN__
+PRETTY_NAME="Ubuntu 24.04.3 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.3 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_osRelease_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_mounts_BEGIN__
+/dev/sda1 / ext4 rw,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+tmpfs /run tmpfs rw,nosuid,nodev,size=1630304k,mode=755 0 0
+tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0
+/dev/sdb1 /data\040disk xfs rw,relatime 0 0
+nas.example:/export/home /mnt/home nfs4 rw,relatime,vers=4.2,proto=tcp,sec=sys 0 0
+nas.example:/export/old /mnt/old nfs rw,relatime,vers=3,proto=tcp,sec=sys 0 0
+//nas.example/share /mnt/smb cifs rw,relatime,vers=3.1.1 0 0
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_mounts_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfLocal_BEGIN__
+Filesystem     Type  1024-blocks       Used Available Capacity Mounted on
+/dev/sda1      ext4    102687672   48291012  49137352      50% /
+tmpfs          tmpfs     1630304       1736   1628568       1% /run
+tmpfs          tmpfs     8151508          0   8151508       0% /dev/shm
+/dev/sdb1      xfs    2147483648 1653562368 493921280      77% /data disk
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfLocal_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfNfs_BEGIN__
+Filesystem               1024-blocks      Used Available Capacity Mounted on
+nas.example:/export/home   524288000 209715200 314572800      40% /mnt/home
+nas.example:/export/old    104857600  94371840  10485760      90% /mnt/old
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfNfs_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_V1_END__

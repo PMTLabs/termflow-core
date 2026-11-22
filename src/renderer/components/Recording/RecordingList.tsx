@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useDispatch } from 'react-redux';
 import { addToast } from '../../store/slices/uiSlice';
+import { getStoredApiToken } from '../../services/profileScope';
 // import { TerminalRecording } from '../../../types/recording';
 import './RecordingList.css';
 
@@ -43,7 +44,7 @@ export const RecordingList: React.FC<RecordingListProps> = ({ onPlayRecording, o
       // This would be replaced with actual API call
       const response = await fetch('/api/recordings', {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('api_token')}`
+          'Authorization': `Bearer ${getStoredApiToken()}`
         }
       });
 
@@ -69,7 +70,7 @@ export const RecordingList: React.FC<RecordingListProps> = ({ onPlayRecording, o
       const response = await fetch(`/api/recordings/${recordingId}`, {
         method: 'DELETE',
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('api_token')}`
+          'Authorization': `Bearer ${getStoredApiToken()}`
         }
       });
 
@@ -97,7 +98,7 @@ export const RecordingList: React.FC<RecordingListProps> = ({ onPlayRecording, o
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('api_token')}`
+          'Authorization': `Bearer ${getStoredApiToken()}`
         },
         body: JSON.stringify({ format })
       });

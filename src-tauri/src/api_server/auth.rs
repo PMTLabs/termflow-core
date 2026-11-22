@@ -273,6 +273,36 @@ mod tests {
         let _ = cors_layer();
     }
 
+    /// jsonwebtoken 10 has no default crypto backend: with neither `rust_crypto`
+    /// nor `aws_lc_rs` enabled, `encode` PANICS ("Could not automatically
+    /// determine the process-level CryptoProvider") instead of returning Err, so
+    /// the handler aborted mid-request and the API dropped the connection on
+    /// every `POST /api/auth/token` in 0.2.1. This is the exact call shape the
+    /// handler (and `commands::system::generate_api_token`) uses; it must not
+    /// panic and must round-trip.
+    #[test]
+    fn hs256_token_encoding_has_a_crypto_provider() {
+        use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+        let secret = b"test-secret";
+        let now = Utc::now();
+        let claims = Claims {
+            sub: "terminal-monitor".into(),
+            permissions: vec!["*".into()],
+            exp: (now + Duration::hours(1)).timestamp() as usize,
+            iat: now.timestamp() as usize,
+        };
+        let token = encode(&Header::default(), &claims, &EncodingKey::from_secret(secret))
+            .expect("encode must succeed with a crypto backend compiled in");
+        let decoded = decode::<Claims>(
+            &token,
+            &DecodingKey::from_secret(secret),
+            &Validation::new(Algorithm::HS256),
+        )
+        .expect("a token we just signed must validate");
+        assert_eq!(decoded.claims.sub, "terminal-monitor");
+        assert_eq!(decoded.claims.permissions, vec!["*".to_string()]);
+    }
+
     #[test]
     fn dns_rebinding_hosts_are_rejected() {
         assert!(!origin_allowed(None, Some("attacker.example")));

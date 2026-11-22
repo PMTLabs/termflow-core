@@ -27,7 +27,7 @@ export type InitialFocus =
   | 'cancel'
   | 'confirm'
   | 'first'
-  | React.RefObject<HTMLElement>;
+  | React.RefObject<HTMLElement | null>;
 
 export interface DialogA11yOptions {
   isOpen: boolean;
@@ -39,6 +39,8 @@ export interface DialogA11yOptions {
   mnemonics?: Mnemonic[];
   /** Where focus lands when the dialog opens. Defaults to 'first'. */
   initialFocus?: InitialFocus;
+  /** Stable invoker when the menu item that opened the modal will unmount. */
+  returnFocus?: HTMLElement | null;
   /**
    * Keep Tab inside the dialog. Defaults to `true`, which is every modal dialog in the app.
    *
@@ -49,6 +51,14 @@ export interface DialogA11yOptions {
    * the one part a non-modal dialog must not have.
    */
   trapFocus?: boolean;
+  /**
+   * Narrow opt-in veto on the close-time focus restore (068 F5, plan 070 T4). Omitted, which is
+   * every dialog but the SSH file dialogs: the trigger gets focus back (or the body, if the trigger
+   * is gone), as before. Given, it is asked at CLOSE time with the recorded trigger; `false` (or no
+   * trigger) leaves focus exactly where it is, with no body fallback either. For a dialog whose
+   * trigger may sit in a surface that has since stopped owning interaction but is still on screen.
+   */
+  restoreFocusIf?: (trigger: HTMLElement) => boolean;
 }
 
 /** Input types that accept free text (so bare-letter mnemonics must suppress). */
@@ -101,7 +111,8 @@ const FOCUSABLE_SELECTOR = [
 /** Ordered list of keyboard-focusable elements inside `container`. */
 export function getFocusable(container: HTMLElement | null): HTMLElement[] {
   if (!container) return [];
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter(el => el.getAttribute('tabindex') !== '-1');
 }
 
 /** Return the handler for a single-character key matching a mnemonic, else null. */
@@ -115,6 +126,30 @@ export function matchMnemonic(
     if (m.key && m.key.toLowerCase() === lower) return m.handler;
   }
   return null;
+}
+
+/**
+ * Pull focus back into an open modal when it has been stranded on the page body.
+ *
+ * Focus is stranded when the focused control is disabled or unmounted while the dialog stays open:
+ * a submit that disables its fields while pending, then reports an error and re-enables them (the
+ * SSH Permissions dialog did exactly this). The browser moves focus to <body>, and because the key
+ * handling is bound to the container, Escape and the Tab trap stop working with no visible cause.
+ *
+ * Only a stranded focus is moved: anything focused, inside or outside the dialog, is left alone, so
+ * this never steals focus from another surface. Returns the element focused, or null.
+ */
+export function recoverStrandedFocus(
+  container: HTMLElement | null,
+  active: Element | null = document.activeElement,
+): HTMLElement | null {
+  if (!container || !container.isConnected) return null;
+  if (active && active !== document.body && active !== document.documentElement) return null;
+  // The container itself is the steadiest target: it holds the key handlers, and it stays
+  // focusable while every field inside is disabled. Fall back to the first focusable control.
+  const target = container.hasAttribute('tabindex') ? container : getFocusable(container)[0] ?? null;
+  target?.focus();
+  return target && document.activeElement === target ? target : null;
 }
 
 function resolveInitialFocus(
@@ -157,7 +192,7 @@ export function useDialogA11y(
   useEffect(() => {
     if (!isOpen) return;
     const container = containerRef.current;
-    triggerRef.current = (document.activeElement as HTMLElement) ?? null;
+    triggerRef.current = optsRef.current.returnFocus ?? (document.activeElement as HTMLElement) ?? null;
 
     if (container) {
       const target = resolveInitialFocus(container, optsRef.current.initialFocus ?? 'first');
@@ -167,6 +202,8 @@ export function useDialogA11y(
     return () => {
       const trigger = triggerRef.current;
       triggerRef.current = null;
+      const restoreIf = optsRef.current.restoreFocusIf;
+      if (restoreIf && !(trigger && restoreIf(trigger))) return;
       // Guard against the trigger having been removed (e.g. its tab was closed):
       // restore focus to it if it's still in the DOM, else fall back to the body.
       if (trigger && trigger.isConnected && typeof trigger.focus === 'function') {
@@ -176,6 +213,14 @@ export function useDialogA11y(
       }
     };
   }, [isOpen, containerRef]);
+
+  // After every commit of an open modal: a re-render that disabled or removed the focused control
+  // leaves focus on <body>, outside the container's key handlers (see recoverStrandedFocus).
+  // Non-modal surfaces are skipped: the user may legitimately leave them.
+  useEffect(() => {
+    if (!isOpen || optsRef.current.trapFocus === false) return;
+    recoverStrandedFocus(containerRef.current);
+  });
 
   // Focus trap + Esc + Enter + mnemonics, scoped to the dialog container.
   useEffect(() => {

@@ -5,12 +5,17 @@ import { readSource } from '../../../utils/readSource';
 const SETTINGS = readSource(path.resolve(__dirname, '..', 'SettingsPage.tsx'));
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..', '..');
 const UPDATE_COMMANDS = readSource(path.resolve(ROOT, 'src-tauri', 'src', 'commands', 'update.rs'));
+const HOST_LIFECYCLE = readSource(path.resolve(ROOT, 'src-tauri', 'src', 'state', 'host_lifecycle.rs'));
 const TAURI_BRIDGE = readSource(path.resolve(ROOT, 'src', 'renderer', 'api', 'tauri-bridge.ts'));
 const PANEL_START = SETTINGS.indexOf('<label className="setting-label">Offload &amp; rebuild');
 const DIALOG_START = SETTINGS.indexOf('<ConfirmDialog', PANEL_START);
 const DIALOG_END = SETTINGS.indexOf('/>', DIALOG_START);
 const PANEL = SETTINGS.slice(PANEL_START, DIALOG_START);
 const DIALOG = SETTINGS.slice(DIALOG_START, DIALOG_END);
+
+const MCP_HELD_SENTENCE =
+  'MCP agents such as Claude Code stay connected and get a "TermFlow is restarting — wait and retry" reply until TermFlow is back, on hosts that support it; plain API clients still drop';
+const MCP_DROP_SENTENCE = 'MCP/API clients drop when TermFlow closes and may need to reconnect or reinitialize';
 
 describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
   it('gets policy from the connected client, not a mutable discovery record', () => {
@@ -19,9 +24,12 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
       UPDATE_COMMANDS.indexOf('\n}', UPDATE_COMMANDS.indexOf('pub fn connected_host_retention')) + 2,
     );
 
-    expect(command).toContain('pty_host_clone()');
-    expect(command).toContain('client.host_retention()');
+    expect(command).toContain('state.connected_retention()');
     expect(command).not.toContain('read_host_record');
+    const start = HOST_LIFECYCLE.indexOf('pub(super) fn connected_retention');
+    const policy = HOST_LIFECYCLE.slice(start, HOST_LIFECYCLE.indexOf('\n}', start) + 2);
+    expect(policy).toContain('PtyHostClient::host_retention');
+    expect(policy).not.toContain('read_host_record');
     expect(TAURI_BRIDGE).toContain("invoke<ConnectedHostRetention>('connected_host_retention')");
   });
 
@@ -31,8 +39,8 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
     expect(copy).toContain('5 minutes');
     expect(copy).toContain('within that grace period to reclaim everything');
     expect(copy).toContain('after it, the shells are closed');
-    expect(copy).toContain('MCP/API clients drop');
-    expect(copy).toContain('may need to reconnect or reinitialize');
+    expect(copy).toContain(MCP_HELD_SENTENCE);
+    expect(copy).not.toContain(MCP_DROP_SENTENCE);
     expect(PANEL).toContain('offloadRetentionCopy(hostRetention)');
     expect(DIALOG).toContain('message={offloadRetentionCopy(hostRetention)}');
   });
@@ -43,6 +51,8 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
     expect(copy).toContain('retention policy is unavailable (legacy host) — no bound promised');
     expect(copy).not.toMatch(/\d/);
     expect(copy).not.toContain('no time limit');
+    expect(copy).toContain(MCP_DROP_SENTENCE);
+    expect(copy).not.toContain(MCP_HELD_SENTENCE);
     expect(PANEL).toContain('offloadRetentionCopy(hostRetention)');
     expect(DIALOG).toContain('message={offloadRetentionCopy(hostRetention)}');
   });
@@ -52,7 +62,7 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
 
     expect(copy).toContain('promises no time limit');
     expect(copy).toContain('does not mean TermFlow will still be there');
-    expect(copy).toContain('MCP/API clients drop');
-    expect(copy).toContain('may need to reconnect or reinitialize');
+    expect(copy).toContain(MCP_HELD_SENTENCE);
+    expect(copy).not.toContain(MCP_DROP_SENTENCE);
   });
 });

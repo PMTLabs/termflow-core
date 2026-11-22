@@ -1,0 +1,88 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import type { RootState } from '../../../store';
+import { applyView, selectTree } from '../../../store/slices/sshSlice';
+import { addToast } from '../../../store/slices/uiSlice';
+import type { SshConnection, SshFolder, SshReply, SshFolderInput } from '../../../types/ssh';
+import { isSshEditorDirty, saveSshEditorDraft, discardSshEditorDraft } from '../../../services/sshEditorGuard';
+import { UnsavedChangesDialog } from '../../UI/UnsavedChangesDialog';
+import type { ConnectAllSummary, ConnectOutcome } from '../../../services/sshConnectAll';
+import { SshTree } from './SshTree';
+import { SshMenus, SshMenuTarget } from './SshMenus';
+import { SshFolderDialog } from './SshFolderDialog';
+import { SshConnectionEditor } from './SshConnectionEditor';
+import { refreshReadOnly, sshErrorMessage } from './sshErrors';
+import '../Automations/AutomationsPanel.css'; // house .au-btn / .au-seg button styles shared by Settings panels
+import './SshConnections.css';
+export function SshConnectionsPanel() {
+  const dispatch = useDispatch(); const state = useSelector((s: RootState) => s.ssh); const tree = useSelector(selectTree);
+  const [filter, setFilter] = useState(''); const [selection, setSelection] = useState<{ id:string; kind:'folder' | 'connection' } | null>(null);
+  const treePaneRef = useRef<HTMLDivElement>(null);
+  const selectedRow = selection?.kind === 'folder' ? state.view.folders.find(f => f.id === selection.id) : state.view.connections.find(c => c.id === selection?.id);
+  const selected = selection && selectedRow ? { row:selectedRow, kind:selection.kind } : null;
+  const setSelected = (value:{ row:SshConnection | SshFolder; kind:'folder' | 'connection' } | null) => setSelection(value ? { id:value.row.id, kind:value.kind } : null);
+  const [renameFocus, setRenameFocus] = useState(0);
+  const readOnly = !!state.view.loadError;
+  const [menu, setMenu] = useState<(SshMenuTarget & { key:number }) | null>(null);
+  const [folderDraft, setFolderDraft] = useState<SshFolderInput | null>(null);
+  useEffect(() => { if (readOnly) { setMenu(null); setFolderDraft(null); } }, [readOnly]);
+  const [draftFolder, setDraftFolder] = useState<string | null | undefined>(undefined);
+  const [pending, setPending] = useState<(() => void) | null>(null);
+  const api = window.electronAPI?.ssh;
+  const navigate = (action: () => void) => { if (isSshEditorDirty()) setPending(() => action); else action(); };
+  const closeEditor = () => { setSelected(null); setDraftFolder(undefined); };
+  const newFolder = (parentId:string | null) => { if (readOnly) return; setMenu(null); navigate(() => setFolderDraft({ parentId, name:'', icon:'folder', color:'grey' })); };
+  const newConnection = (folderId:string | null) => { if (readOnly) return; setMenu(null); navigate(() => { setSelected(null); setDraftFolder(folderId); }); };
+  const rename = (row:SshConnection | SshFolder, kind:'folder' | 'connection') => { if (readOnly) return; setMenu(null); navigate(() => { if (kind === 'folder') { const folder = row as SshFolder; setFolderDraft({ id:folder.id, parentId:folder.parentId, name:folder.name, icon:folder.icon, color:folder.color }); } else { setSelected({ row,kind }); setDraftFolder(undefined); setRenameFocus(value => value + 1); } }); };
+  const commit = async (operation: () => Promise<SshReply>) => {
+    if (readOnly) return false;
+    try { const reply = await operation(); dispatch(applyView(reply));
+      if (selection && !(selection.kind === 'folder' ? reply.view.folders : reply.view.connections).some(row => row.id === selection.id)) closeEditor();
+      return true;
+    } catch (error) { dispatch(addToast({ type:'error', message:sshErrorMessage(error) }));
+      try { await refreshReadOnly(error,api!,reply => dispatch(applyView(reply))); } catch (refreshError) { dispatch(addToast({ type:'error', message:sshErrorMessage(refreshError) })); }
+      return false; }
+  };
+  // Connect (plan 066 T8). The launch services load lazily so Settings itself stays light.
+  const [connectAsk, setConnectAsk] = useState<string | null>(null);
+  const report = (outcome: ConnectOutcome) => {
+    if (outcome.error) dispatch(addToast({ type:'error', message:outcome.error }));
+    else if (outcome.recentFailed) dispatch(addToast({ type:'warning', message:'Recent could not be updated.' }));
+  };
+  const showSummary = (summary: ConnectAllSummary | null) => {
+    if (summary) dispatch(addToast({ type:summary.failures.length || !summary.attempted ? 'warning' : 'info', message:summary.message }));
+  };
+  const launchSaved = (id: string) => { void import('../../../services/sshConnectAll').then(m => m.connectSavedInTab(id)).then(report); };
+  const connectAll = (folderId: string) => { setMenu(null); void import('../../../services/sshConnectAll').then(m => m.connectAllInTabs(folderId)).then(showSummary); };
+  // A dirty editor for THIS connection must be resolved first; the launch always uses the saved id.
+  const requestConnect = (id: string) => {
+    if (readOnly) return;
+    setMenu(null);
+    if (selection?.kind === 'connection' && selection.id === id && isSshEditorDirty()) setConnectAsk(id); else launchSaved(id);
+  };
+  const cancelConnect = () => setConnectAsk(null);
+  const discardThenConnect = () => { const id = connectAsk; setConnectAsk(null); discardSshEditorDraft(); if (id) launchSaved(id); };
+  const saveThenConnect = () => { const id = connectAsk; setConnectAsk(null); void saveSshEditorDraft().then(saved => { if (saved && id) launchSaved(id); }); };
+  if (!api || state.status === 'desktop-only') return <section className="settings-section" data-testid="ssh-connections-panel"><h2>SSH Connections</h2><p>SSH connections are available in the desktop app.</p></section>;
+  if (state.status === 'loading') return <section className="settings-section" data-testid="ssh-connections-panel">Loading SSH connections…</section>;
+  if (state.status === 'error') return <section className="settings-section" data-testid="ssh-connections-panel"><p role="alert">{state.error}</p><button className="au-btn" onClick={() => void api.reload().then(reply => dispatch(applyView(reply))).catch(error => dispatch(addToast({ type:'error', message:sshErrorMessage(error) })))}>Reload</button></section>;
+  return <section className="settings-section ssh-connections" data-testid="ssh-connections-panel"><div className="profiles-heading ssh-heading"><h2>SSH Connections</h2>
+      <div className="ssh-toolbar"><button className="au-btn" disabled={readOnly} aria-describedby={readOnly ? "ssh-read-only" : undefined} onClick={() => newFolder(null)}>New folder</button><button className="au-btn primary" disabled={readOnly} aria-describedby={readOnly ? "ssh-read-only" : undefined} onClick={() => newConnection(null)}>New SSH connection</button></div></div>
+    {state.view.loadError && <div className="ssh-read-only"><p id="ssh-read-only" role="alert">SSH connections couldn't be loaded because the saved file is damaged. Nothing has been changed. Fix or restore the file, then select Reload.</p> <button className="au-btn sm" onClick={() => void api.reload().then(reply => dispatch(applyView(reply))).catch(error => dispatch(addToast({ type:'error', message:sshErrorMessage(error) })))}>Reload</button><details><summary>Details</summary>{state.view.loadError.message} ({state.view.loadError.code})</details></div>}
+    <div className="ssh-columns"><div className="ssh-tree-pane" ref={treePaneRef}>
+      <label className="ssh-search">Filter connections<input type="search" value={filter} onChange={event => setFilter(event.target.value)} onKeyDown={event => { if (event.key !== 'ArrowDown') return; const first = treePaneRef.current?.querySelector<HTMLElement>('.ssh-tree-row'); if (first) { event.preventDefault(); first.focus(); } }} /></label>
+      {state.view.loadError ? <p className="ssh-tree-note">Your saved connections can't be shown while the file is unreadable. Nothing has been deleted: fix the file, then press Reload.</p> : <><div id="ssh-move-status" className="ssh-move-status" aria-live="polite" aria-atomic="true" /><div className="ssh-tree-scroll"><SshTree tree={tree} view={state.view} filter={filter} selectedId={selected?.row.id}
+      onSelect={(row,kind) => { if (selected?.row.id !== row.id) navigate(() => { setSelected({ row,kind }); setDraftFolder(undefined); }); }}
+      onMenu={(event,row,kind) => { if (!readOnly) setMenu({ x:event.clientX, y:event.clientY, row,kind,key:Date.now() }); }} onRename={rename} onDelete={(row,kind) => { if (!readOnly) setMenu({ x:0,y:0,row,kind,key:Date.now(),deleteRequested:true }); }}
+      onBookmark={(id,bookmarked) => void commit(() => api.setBookmark(id,bookmarked))} onMove={input => void commit(() => api.move(input))} /></div>
+      <footer>{state.view.folders.length} folders · {state.view.connections.length} connections</footer></>}</div>
+      <div className="ssh-editor-pane">{draftFolder !== undefined || selection?.kind === 'connection' ? <SshConnectionEditor focusName={renameFocus} key={selection?.kind === 'connection' ? selection.id : `new-${draftFolder}`} connectionId={selection?.kind === 'connection' ? selection.id : undefined} initialFolder={draftFolder ?? null} view={state.view} api={api} onClose={closeEditor} onConnect={requestConnect} onSaved={(reply,input) => {
+        dispatch(applyView(reply)); const row = input.id ? reply.view.connections.find(c => c.id === input.id) : reply.view.connections.find(c => !state.view.connections.some(old => old.id === c.id));
+        if (row) { setSelected({ row,kind:'connection' }); setDraftFolder(undefined); }
+      }} /> : selected ? selected.row.name : 'Select a connection to edit its details.'}</div></div>
+    {menu && !readOnly && <SshMenus key={menu.key} target={menu} view={state.view} api={api} commit={commit} onClose={() => setMenu(null)} onFolder={newFolder} onConnection={newConnection} onRename={rename} onConnect={requestConnect} onConnectAll={connectAll} />}
+    {folderDraft && !readOnly && <SshFolderDialog input={folderDraft} onSave={input => commit(() => api.upsertFolder(input))} onClose={() => setFolderDraft(null)} />}
+    <UnsavedChangesDialog isOpen={connectAsk !== null && !readOnly} saveLabel="Save and connect" body={<p>You have unsaved changes to <strong>{state.view.connections.find(c => c.id === connectAsk)?.name ?? 'this connection'}</strong>. Connect opens the last saved version. Save first, discard the changes, or cancel?</p>} onCancel={cancelConnect} onDiscard={discardThenConnect} onSave={saveThenConnect} />
+    <UnsavedChangesDialog isOpen={!!pending} stayLabel="Keep editing" body={<p>You have unsaved changes {selected?.kind === 'connection' ? <>to <strong>{selected.row.name}</strong></> : 'to this SSH connection'}. Save them, discard them, or keep editing?</p>} onCancel={() => setPending(null)} onDiscard={() => { discardSshEditorDraft(); const go = pending; setPending(null); go?.(); }} onSave={() => { void saveSshEditorDraft().then(saved => { if (saved) { const go = pending; setPending(null); go?.(); } }); }} />
+  </section>;
+}

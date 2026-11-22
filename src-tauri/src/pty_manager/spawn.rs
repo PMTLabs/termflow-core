@@ -3,9 +3,8 @@ use crate::tmux_manager::TerminalBackend;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::thread;
 use tauri::Emitter;
-use uuid::Uuid;
 use super::cwd::exit_cwd_for;
-use super::spawn_spec::{FOREIGN_TERMINAL_ENV, HOST_CONTROL_ENV, PS_CWD_INTEGRATION, identity_env_value};
+use super::spawn_spec::{FOREIGN_TERMINAL_ENV, HOST_CONTROL_ENV, PS_CWD_INTEGRATION, identity_env_value, loopback_no_proxy_env};
 
 /// Find the last valid UTF-8 boundary in a byte slice.
 /// Returns the index up to which the data is valid UTF-8.
@@ -65,56 +64,49 @@ fn find_utf8_boundary(data: &[u8]) -> usize {
     0
 }
 
+/// Sideload the modern ConPTY once per process, before the first pseudoconsole opens
+/// (`portable-pty` resolves its function table once). Public so a caller can ask what the
+/// in-process pseudoconsole will be able to do (`da1::inherit_cursor_supported`) BEFORE it
+/// calls [`spawn_terminal`]. A no-op off Windows.
+pub fn ensure_bundled_conpty() {
+    #[cfg(windows)]
+    {
+        static CONPTY_INIT: std::sync::Once = std::sync::Once::new();
+        CONPTY_INIT.call_once(|| {
+            let _ = termflow_pty_protocol::conpty::init_for_current_exe();
+        });
+    }
+}
+
+/// Open the pseudoconsole. `inherit_cursor` (Windows only; the caller already checked the
+/// bundled ConPTY is active) creates it with `PSEUDOCONSOLE_INHERIT_CURSOR`: ConPTY asks the
+/// terminal where the cursor is and starts the child there. `portable-pty` has no switch for it,
+/// hence the vendored crate (`vendor/portable-pty/VENDORED.md`).
+fn open_pty(size: PtySize, inherit_cursor: bool) -> Result<portable_pty::PtyPair, String> {
+    #[cfg(windows)]
+    if inherit_cursor {
+        return portable_pty::win::conpty::ConPtySystem::default()
+            .openpty_inheriting_cursor(size)
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(windows))]
+    let _ = inherit_cursor;
+    NativePtySystem::default().openpty(size).map_err(|e| e.to_string())
+}
+
+/// Build the ordinary local command before opening the PTY. The prompt flag
+/// describes the existing renderer cwd integration, not SSH readiness.
 #[allow(clippy::too_many_arguments)]
-pub fn spawn_terminal(
-    app_state: AppState,
-    cols: u16,
-    rows: u16,
+pub(super) fn build_local_shell_command(
+    id: &str,
+    shell_identity: &str,
     shell_path: Option<String>,
+    shell_name: &str,
     shell_args: Option<Vec<String>>,
     cwd: Option<String>,
-    shell_name: String,
-    terminal_name: String,
-    // The stable renderer LEAF id this terminal persists history under. Two id
-    // FORMS, describing who minted the leaf and NOT the pane's shape: `tb-*` for
-    // a renderer-created tab root, `tm-*` for split panes AND for every
-    // API-created terminal, including a solo root. Root/solo/split is determined
-    // only by the pane-tree structure, never by the prefix.
-    // Registered WITH the Terminal before the reader
-    // thread starts: a caller patching it in after spawn returns would race a
-    // fast-exiting shell's exit-path persist, which would then file the final
-    // scrollback under the ephemeral pc- id (review 062 agy F-01).
-    //
-    // `None` means NO renderer pane owns this PTY (headless API/fleet spawn).
-    // It must NOT fall back to `id`: a `Some(pc-*)` value is persisted like any
-    // other (`state.rs:642`), producing a history row keyed by an id that does
-    // not survive a restart, and violating the invariant that a renderer
-    // identity is always a `tb-*`/`tm-*` leaf (design 011 §5, corrected after
-    // review 086). Before P0-A this fallback made the field never-None at
-    // runtime (ground-truth correction C1).
-    renderer_terminal_id: Option<String>,
-    // The tab that owns the pane above; `None` when unknown. This is the ONLY
-    // source of ownership — never derive it from `renderer_terminal_id` or its
-    // prefix. It happens to equal the leaf for a renderer-created tab root that
-    // has not been moved, but an API-created solo root is a `tm-*` leaf owned by
-    // a different `tb-*` id, and any leaf keeps its id when reparented into
-    // another tab (`set_terminal_owning_tab` exists for exactly that).
-    owning_tab_id: Option<String>,
-    // Restored scrollback (blob + divider) to seed the fresh parser with, BEFORE
-    // the reader thread starts — so persisted history precedes live output and the
-    // next flush preserves it instead of overwriting the stored row with only this
-    // session's content (the scrollback-persistence "ratchet" bug).
-    history_seed: Option<String>,
-) -> Result<String, String> {
-    let pty_system = NativePtySystem::default();
-    
-    let size = PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    };
-
+    exempt_loopback_from_proxy: bool,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> (CommandBuilder, bool) {
     // Detect PowerShell/pwsh so we can inject cwd reporting below: PowerShell does
     // NOT keep its OS process cwd current on Set-Location, so sysinfo can't see a
     // `cd` (backlog 004). We make it emit OSC 9;9 each prompt instead.
@@ -153,12 +145,10 @@ pub fn spawn_terminal(
     // Stable per-terminal id, generated before the command is built so it can be
     // injected into the child env (TERMFLOW_TERMINAL_ID) — an in-terminal agent
     // reads it to identify its own terminal to the MCP server ("me" / get_my_terminal).
-    let raw_uuid = Uuid::new_v4().to_string().replace("-", "");
-    let id = format!("pc-{}", &raw_uuid[..9]);
 
     cmd_builder.env("TERM", "xterm-256color");
     cmd_builder.env("COLORTERM", "truecolor");
-    cmd_builder.env("TERMFLOW_TERMINAL_ID", identity_env_value(renderer_terminal_id.as_deref(), &id));
+    cmd_builder.env("TERMFLOW_TERMINAL_ID", shell_identity);
 
     // Identify ourselves — and stop leaking the identity of whatever terminal the
     // APP was launched from. Same inheritance mechanism as COLORTERM above, but
@@ -174,6 +164,17 @@ pub fn spawn_terminal(
     // (module consts shared with build_spawn_spec so the two paths never drift).
     for key in FOREIGN_TERMINAL_ENV.iter().chain(HOST_CONTROL_ENV.iter()) {
         cmd_builder.env_remove(key);
+    }
+    // Plan 047: loopback exemption from a configured proxy — the same derivation
+    // the sidecar path applies in build_spawn_spec, gated by the same toggle.
+    if exempt_loopback_from_proxy {
+        let no_proxy = loopback_no_proxy_env(lookup);
+        if !no_proxy.is_empty() {
+            log::debug!("[SPAWN] {id}: exempting loopback from the configured proxy: {no_proxy:?}");
+        }
+        for (key, value) in no_proxy {
+            cmd_builder.env(key, value);
+        }
     }
 
     let mut has_command_flag = false;
@@ -216,10 +217,135 @@ pub fn spawn_terminal(
         }
     }
 
-    let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
+    (cmd_builder, is_powershell && !has_command_flag)
+}
+
+/// Prepare both local identities before any PTY or child can be created. The
+/// shell reads the durable leaf when present, not the per-run process handle.
+fn local_identity(ids: &crate::state::IdAllocator, leaf: Option<&str>) -> Result<(String, String), String> {
+    let process = ids.mint_process_id()?;
+    let shell_identity = identity_env_value(leaf, &process).to_string();
+    Ok((process, shell_identity))
+}
+
+use super::{LocalProcess, kill_process_tree};
+
+struct UnpublishedChild(Option<LocalProcess>);
+impl Drop for UnpublishedChild {
+    fn drop(&mut self) {
+        if let Some(process) = self.0.take() { kill_process_tree(process); }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_terminal(
+    app_state: AppState,
+    cols: u16,
+    rows: u16,
+    shell_path: Option<String>,
+    shell_args: Option<Vec<String>>,
+    cwd: Option<String>,
+    shell_name: String,
+    terminal_name: String,
+    // The stable renderer LEAF id this terminal persists history under. Two id
+    // FORMS, describing who minted the leaf and NOT the pane's shape: `tb-*` for
+    // a renderer-created tab root, `tm-*` for split panes AND for every
+    // API-created terminal, including a solo root. Root/solo/split is determined
+    // only by the pane-tree structure, never by the prefix.
+    // Registered WITH the Terminal before the reader
+    // thread starts: a caller patching it in after spawn returns would race a
+    // fast-exiting shell's exit-path persist, which would then file the final
+    // scrollback under the ephemeral pc- id (review 062 agy F-01).
+    //
+    // `None` means NO renderer pane owns this PTY (headless API/fleet spawn).
+    // It must NOT fall back to `id`: a `Some(pc-*)` value is persisted like any
+    // other (`state.rs:642`), producing a history row keyed by an id that does
+    // not survive a restart, and violating the invariant that a renderer
+    // identity is always a `tb-*`/`tm-*` leaf (design 011 §5, corrected after
+    // review 086). Before P0-A this fallback made the field never-None at
+    // runtime (ground-truth correction C1).
+    renderer_terminal_id: Option<String>,
+    // The tab that owns the pane above; `None` when unknown. This is the ONLY
+    // source of ownership — never derive it from `renderer_terminal_id` or its
+    // prefix. It happens to equal the leaf for a renderer-created tab root that
+    // has not been moved, but an API-created solo root is a `tm-*` leaf owned by
+    // a different `tb-*` id, and any leaf keeps its id when reparented into
+    // another tab (`set_terminal_owning_tab` exists for exactly that).
+    owning_tab_id: Option<String>,
+    // Restored scrollback (blob + divider) to seed the fresh parser with, BEFORE
+    // the reader thread starts — so persisted history precedes live output and the
+    // next flush preserves it instead of overwriting the stored row with only this
+    // session's content (the scrollback-persistence "ratchet" bug).
+    history_seed: Option<String>,
+    // `Some(row)` opens the pseudoconsole inheriting the cursor, so the child starts on `row`
+    // instead of row 1 — what makes a restored terminal's prompt the row its replay put the
+    // cursor on (`state::restore_frame`). Honoured only when the bundled ConPTY is loaded; the
+    // caller decided `history_seed` on the same fact, so it asks only when it will be.
+    initial_cursor_row: Option<u16>,
+    admission: Option<u64>,
+    ssh_launch_connection_id: Option<&str>,
+) -> Result<String, String> {
+    let (id, shell_identity) = local_identity(&app_state.ids, renderer_terminal_id.as_deref())?;
+    let leaf = renderer_terminal_id.as_deref().unwrap_or(&id);
+    let cg = match admission {
+        Some(cg) => cg,
+        None => match app_state.host_table.keys().admit_create(leaf, crate::state::CreateMode::Mount)? {
+            crate::state::CreateAdmission::Run(cg) => cg,
+            crate::state::CreateAdmission::Existing(pc) => return Ok(pc),
+            crate::state::CreateAdmission::Join(_) => return Err("host-ownership-pending: local create already in flight".into()),
+        },
+    };
+    let _placement = crate::state::CreateGuard::new(&app_state, leaf, cg);
+    let keys = app_state.host_table.keys();
+    let restage = matches!(keys.owner_state(leaf), Some((_, crate::state::OwnerState::Placing { stage: Some(_), .. })));
+    let (_, _, old) = if restage { keys.restage_shell(leaf, cg, &id, None) } else { keys.stage_shell(leaf, cg, &id, None) }?;
+    if let Some(old) = old { app_state.dispose_staged(&old); }
+    let owner_leaf = leaf.to_string();
+    // Plan 049: sideload modern ConPTY once, before the first pseudoconsole opens.
+    ensure_bundled_conpty();
+    let cursor_row = termflow_pty_protocol::da1::inheritable_cursor_row(initial_cursor_row);
+    
+    let size = PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let proxy_exemption = app_state.exempt_loopback_from_proxy.load(std::sync::atomic::Ordering::Relaxed);
+    let (cmd_builder, prompt_hook, prepared) = if let Some(connection_id) = ssh_launch_connection_id {
+        let mut spec = super::build_spawn_spec(
+            &id, Some(&shell_identity), shell_path.as_deref(), &shell_name,
+            shell_args.as_deref(), cwd.as_deref(), cols, rows, proxy_exemption,
+        );
+        spec.args = shell_args.unwrap_or_default();
+        let prepared = super::ssh_shell::PreparedShell::register(&app_state.app_handle, keys, &id, cg, &mut spec, false, connection_id)?;
+        let mut builder = CommandBuilder::new(&spec.shell);
+        builder.args(&spec.args);
+        for key in &spec.env_remove { builder.env_remove(key); }
+        for (key, value) in &spec.env { builder.env(key, value); }
+        if let Some(dir) = &spec.cwd { builder.cwd(dir); }
+        (builder, super::ssh_shell::has_cwd_hook(&spec.shell), Some(prepared))
+    } else {
+        let (builder, prompt_hook) = build_local_shell_command(
+            &id, &shell_identity, shell_path, &shell_name, shell_args, cwd,
+            proxy_exemption, |k| std::env::var(k).ok(),
+        );
+        (builder, prompt_hook, None)
+    };
+
+    let pair = open_pty(size, cursor_row.is_some())?;
     
     let child = pair.slave.spawn_command(cmd_builder).map_err(|e| e.to_string())?;
     let pid = child.process_id().unwrap_or(0);
+    let process = if prepared.is_some() { LocalProcess::with_exit_probe(child) } else { LocalProcess::new(child) };
+    let mut unpublished = UnpublishedChild(Some(process.clone()));
+    if let Some(prepared) = prepared {
+        let shell = process.clone();
+        let adapter = prepared.submitted();
+        super::ssh_shell::bind_spawned_shell(app_state.host_table.keys(), &id, &adapter.spec.shell, pid);
+        super::ssh_shell::retain_until_quiescent(adapter, move || shell.child_exited());
+    }
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     // Note: taking the writer might make the master unusable for writing if not cloned? 
@@ -227,51 +353,63 @@ pub fn spawn_terminal(
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
     // Store writer
-    app_state.shell_writer_channels.insert(id.clone(), std::sync::Arc::new(std::sync::Mutex::new(writer)));
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(writer));
+    let published = app_state.host_table.keys().publish_shell_projection(&id, || {
+        app_state.shell_writer_channels.insert(id.clone(), writer.clone());
 
-    // Store master
-    app_state.ptys.insert(id.clone(), std::sync::Mutex::new(pair.master));
+        // Store master
+        app_state.ptys.insert(id.clone(), std::sync::Mutex::new(pair.master));
 
-    // Initialize the authoritative screen parser (source of truth for hydration)
-    app_state.init_screen(&id, rows, cols);
+        // Initialize the authoritative screen parser (source of truth for hydration)
+        app_state.init_screen(&id, rows, cols);
 
-    // Seed restored scrollback into the fresh parser now — after init_screen,
-    // before the reader thread below can deliver any live output.
-    if let Some(seed) = &history_seed {
-        app_state.feed_screen(&id, seed.as_bytes());
-    }
+        // Seed restored scrollback into the fresh parser now — after init_screen,
+        // before the reader thread below can deliver any live output.
+        if let Some(seed) = &history_seed {
+            app_state.feed_screen(&id, seed.as_bytes());
+        }
 
-    // Register the terminal LAST: `terminals` is the existence gate for the
-    // close/delete paths, so nothing may be observable until the writer, pty
-    // master, and screen parser are all in place — otherwise a concurrent
-    // delete could clean up half-constructed state and the remaining inserts
-    // would resurrect orphaned entries no cleanup path ever removes.
-    // Index alongside registration so a `tm-` lookup resolves for in-process
-    // terminals too (design 014 §A3). This path never reaches the pty-host, so
-    // its session key is its own id.
-    app_state.identity.index(&id, renderer_terminal_id.as_deref(), &id);
-    app_state.terminals.insert(id.clone(), Terminal {
-        id: id.clone(),
-        pid,
-        shell: shell_name,
-        name: terminal_name,
-        created_at: chrono::Local::now().to_rfc3339(),
-        cols,
-        rows,
-        backend: TerminalBackend::PortablePty,
-        renderer_terminal_id,
-        owning_tab_id,
-        // In-process: there is no pty-host session, so the key this terminal is
-        // known by IS its own id. Task 4 (design 014 §A2) splits the host path's
-        // three identities; this path has no host to disagree with.
-        session_key: id.clone(),
-        last_input_source: None,
-        last_input_at: None,
-        // Mirrors the injected-hook decision above, so reattach can re-arm the
-        // command-suggest prompt gate (see shell_emits_prompt_osc).
-        prompt_hook: is_powershell && !has_command_flag,
-        display_label: None,
-        title_color: None,
+        // Register the terminal LAST: `terminals` is the existence gate for the
+        // close/delete paths, so nothing may be observable until the writer, pty
+        // master, and screen parser are all in place — otherwise a concurrent
+        // delete could clean up half-constructed state and the remaining inserts
+        // would resurrect orphaned entries no cleanup path ever removes.
+        // Index alongside registration so a `tm-` lookup resolves for in-process
+        // terminals too (design 014 §A3). This path never reaches the pty-host, so
+        // its session key is its own id.
+        app_state.identity.index(&id, renderer_terminal_id.as_deref(), &id);
+        app_state.terminals.insert(id.clone(), Terminal {
+            id: id.clone(),
+            pid,
+            shell: shell_name,
+            name: terminal_name,
+            created_at: chrono::Local::now().to_rfc3339(),
+            cols,
+            rows,
+            backend: TerminalBackend::PortablePty,
+            renderer_terminal_id,
+            owning_tab_id,
+            // In-process: there is no pty-host session, so the key this terminal is
+            // known by IS its own id. Task 4 (design 014 §A2) splits the host path's
+            // three identities; this path has no host to disagree with.
+            session_key: id.clone(),
+            last_input_source: None,
+            last_input_at: None,
+            // Mirrors the injected-hook decision above, so reattach can re-arm the
+            // command-suggest prompt gate (see shell_emits_prompt_osc).
+            prompt_hook,
+            display_label: None,
+            title_color: None,
+        });
+
+        app_state.local_processes.insert(id.clone(), process);
+    });
+    if published.is_none() { return Err("host-ownership-pending: local placement changed before publication; retry".into()); }
+    unpublished.0 = None;
+    let mut ssh_prompt = app_state.host_table.keys().ssh_prompt_nonce(&id)
+        .map(termflow_pty_protocol::ssh_prompt::PromptParser::new);
+    app_state.complete_create(&owner_leaf, cg, &crate::state::StagedShell {
+        process: id.clone(), stage: crate::state::ShellStage::Local,
     });
 
     // Spawn thread to read output
@@ -280,57 +418,43 @@ pub fn spawn_terminal(
 
     thread::spawn(move || {
         let mut reader = reader;
-        // Use 4KB buffer to reduce chance of splitting UTF-8 sequences
-        // Also keeps a pending buffer for incomplete UTF-8 at chunk boundaries
-        let mut buffer = [0u8; 4096];
-        let mut pending: Vec<u8> = Vec::new();
-
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(n) if n > 0 => {
-                    // Combine pending bytes with new data
-                    let mut data = if pending.is_empty() {
-                        buffer[0..n].to_vec()
-                    } else {
-                        let mut combined = std::mem::take(&mut pending);
-                        combined.extend_from_slice(&buffer[0..n]);
-                        combined
-                    };
-
-                    // Find the last valid UTF-8 boundary
-                    // Check if we might have an incomplete UTF-8 sequence at the end
-                    let valid_end = find_utf8_boundary(&data);
-
-                    if valid_end < data.len() {
-                        // Save incomplete bytes for next iteration
-                        pending = data[valid_end..].to_vec();
-                        data.truncate(valid_end);
-                    }
-
-                    if !data.is_empty() {
-                        // Producer heartbeat for the pipeline watchdog (lib.rs):
-                        // "produced advances while consumed doesn't" = stalled consumer.
-                        app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // Send to channel (broadcast::Sender::send returns Result<usize, SendError>)
-                        // We ignore error if no receivers
-                        let _ = output_tx.send(ChannelPayload {
-                            id: thread_id.clone(),
-                            data,
-                        });
-                    }
+        // The read loop is shared with the pty-host session reader (plan 050): it applies
+        // the ConPTY startup-handshake filter, the 4KB-read UTF-8 carry (an incomplete
+        // trailing scalar waits for the next read) and the ordered EOF/error tail.
+        let mut da1 = termflow_pty_protocol::da1::StartupDa1::for_spawn(cursor_row);
+        let reply_keys = app_state.host_table.keys().clone();
+        let reply_process = thread_id.clone();
+        let mut replies = termflow_pty_protocol::da1::StartupReplies::new(writer.clone(), thread_id.clone())
+            .with_admission(move |writer, bytes| {
+                reply_keys.admit_protocol_input(&reply_process, |_permit| {
+                    Ok(super::input_gate::InputDispatch::local(move || {
+                        termflow_pty_protocol::da1::write_reply(writer, bytes)
+                    }))
+                })
+            });
+        let drain = ssh_prompt.as_ref().map(|_| replies.drain());
+        let emit = |data| {
+            app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = output_tx.send(ChannelPayload { id: thread_id.clone(), data });
+        };
+        termflow_pty_protocol::pump::pump_output(
+            &mut reader,
+            find_utf8_boundary,
+            &mut da1,
+            |reply| replies.send(reply),
+            |data| {
+                let data = super::ssh_shell::filter_local_output(
+                    &mut ssh_prompt, app_state.host_table.keys(), &thread_id, drain.as_ref(), data, |_| {},
+                );
+                if !data.is_empty() {
+                    emit(data);
                 }
-                Ok(_) => {
-                    // EOF - send any remaining pending data
-                    if !pending.is_empty() {
-                        app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = output_tx.send(ChannelPayload {
-                            id: thread_id.clone(),
-                            data: pending,
-                        });
-                    }
-                    break;
-                }
-                Err(_) => break, // Error
+            },
+        );
+        if let Some(parser) = &mut ssh_prompt {
+            let tail = parser.finish();
+            if !tail.is_empty() {
+                emit(tail);
             }
         }
         // Spec 045 §3.3: capture the cwd BEFORE cleanup — cleanup_terminal_state
@@ -344,11 +468,8 @@ pub fn spawn_terminal(
         // never reach the history store. Harmless for explicit closes: close_terminal
         // deletes the row afterwards (a sub-ms interleave could leave an orphan row,
         // which the startup prune sweeps).
-        app_state.persist_terminal_history(&thread_id, chrono::Utc::now().timestamp_millis());
-
-        // Cleanup on exit
+        if !app_state.exit_process(&thread_id) { return; }
         log::info!("Terminal {} process exited, cleaning up state", thread_id);
-        app_state.cleanup_terminal_state(&thread_id);
 
         // Notify UI
         if let Err(e) = app_state.app_handle.emit("terminal:exit", serde_json::json!({
@@ -369,42 +490,74 @@ pub fn spawn_terminal(
     Ok(id)
 }
 
-/// Kill a shell process tree (taskkill /T /F on Windows; kill -9 on the
-/// process group on Unix). No-op for pid 0 (unknown).
-///
-/// Backgrounded on its own thread: every caller (`commands::close_terminal`,
-/// `api_server::delete_terminal`, `api_server::fleet_close`) invokes this
-/// inline from an async Tauri command / Axum handler. `taskkill /T /F` can
-/// run 1-3s+ for a shell's whole process tree, and `.output()`/`.status()`
-/// blocks synchronously — which stalls that specific tokio task (and the
-/// worker thread running it) for the duration, same class of bug fixed for
-/// the pty-host sidecar's `Session::kill()` (PR #61). None of the three
-/// callers use the process's death as a signal before proceeding to
-/// `cleanup_terminal_state`, so firing this off and returning immediately is
-/// safe.
-pub fn kill_process_tree(pid: u32) {
-    if pid == 0 {
-        return;
+#[cfg(test)]
+mod reader_wiring_tests {
+    #[test]
+    fn local_identity_creation_preserves_injected_uuid_bits_and_durable_shell_identity() {
+        let uuid = uuid::Uuid::parse_str("01234567-89ab-4cde-8fab-0123456789ab").unwrap();
+        let ids = crate::state::IdAllocator::new(move || Ok(uuid));
+        let (process, shell) = super::local_identity(&ids, Some("tm-leaf")).unwrap();
+        assert_eq!(process, "pc-0123456789ab4cde8fab0123456789ab");
+        assert_eq!(shell, "tm-leaf");
+        let (headless_process, headless_shell) = super::local_identity(&ids, None).unwrap();
+        assert_eq!(headless_process, process);
+        assert_eq!(headless_shell, headless_process);
     }
-    std::thread::spawn(move || kill_process_tree_blocking(pid));
-}
 
-fn kill_process_tree_blocking(pid: u32) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: spawn taskkill without allocating a console, so a
-        // GUI app doesn't flash a command-line window on every tab close.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
+    #[test]
+    fn local_identity_creation_returns_no_identity_on_rng_failure() {
+        let ids = crate::state::IdAllocator::new(|| Err("random source failed".into()));
+        assert_eq!(super::local_identity(&ids, Some("tm-leaf")), Err("random source failed".into()));
+        assert_eq!(super::local_identity(&ids, None), Err("random source failed".into()));
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &format!("-{}", pid)])
-            .output();
+
+    /// Spellings that drain a reader without going through the pump.
+    fn private_read_spellings(code: &str) -> Vec<&'static str> {
+        [".read(", ".read_exact(", ".read_to_end(", ".read_to_string(", ".bytes()", "io::copy("]
+            .into_iter()
+            .filter(|s| code.contains(s))
+            .collect()
+    }
+
+    fn word_count(code: &str, word: &str) -> usize {
+        code.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| *w == word).count()
+    }
+
+    /// Plan 050: the fallback reader must run the SAME pump as the pty-host reader, or it keeps the
+    /// ~3 s ConPTY handshake stall. The pump's behaviour is covered in `termflow-pty-protocol`.
+    ///
+    /// This is a SOURCE-PRESENCE check, not a behavioural one (no test drives this function's reader
+    /// with a fake PTY; the real-ConPTY route is exercised for the pty-host reader only). It fixes
+    /// the PTY reader handle's whole life: bound from `try_clone_reader`, moved into the thread, and
+    /// passed to the pump with the platform filter and this file's writer clone for the reply; the
+    /// name appears nowhere else, and no other read spelling exists in the file.
+    #[test]
+    fn the_fallback_reader_runs_the_shared_pump_with_the_platform_filter() {
+        let src = include_str!("spawn.rs").replace("\r\n", "\n");
+        let cut = src.find("#[cfg(test)]\nmod reader_wiring_tests").expect("test module marker");
+        let code: String = src[..cut]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;",
+            "let mut reader = reader;",
+            "da1::StartupDa1::for_spawn(cursor_row)",
+            "da1::StartupReplies::new(writer.clone(), thread_id.clone())",
+            "pump::pump_output( &mut reader, find_utf8_boundary, &mut da1,",
+            "|reply| replies.send(reply),",
+            "let cursor_row = termflow_pty_protocol::da1::inheritable_cursor_row(initial_cursor_row);",
+            "let pair = open_pty(size, cursor_row.is_some())?;",
+        ] {
+            assert!(flat.contains(needle), "spawn.rs must contain `{needle}` outside comments");
+        }
+        assert_eq!(word_count(&code, "reader"), 4, "the PTY reader handle is bound, moved and passed, nothing else");
+        assert_eq!(flat.matches("try_clone_reader").count(), 1, "a second cloned PTY reader could drain output outside the pump");
+        assert_eq!(private_read_spellings(&code), Vec::<&str>::new(), "a private read loop bypasses the pump");
+        // Calibration: the detector does go dirty.
+        assert_eq!(private_read_spellings("let n = r.read(&mut b)?;"), vec![".read("]);
+        assert_eq!(word_count("let reader = 1; reader.len()", "reader"), 2);
     }
 }

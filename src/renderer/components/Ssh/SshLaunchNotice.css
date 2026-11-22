@@ -1,0 +1,70 @@
+.terminal-pane:has(> .ssh-launch-notice),
+.canvas-surface:has(> .ssh-launch-notice) {
+  /* Both hosts have explicit dimensions; bound the overlay to this host. */
+  container-type: size;
+}
+
+.ssh-launch-notice {
+  flex: none;
+  min-width: 0;
+  position: relative;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+/* The terminal surface relocates into Canvas; keep the same notice in that node. */
+.canvas-surface > .ssh-launch-notice {
+  position: absolute;
+  z-index: 2;
+  inset: 0 0 auto;
+}
+
+.ssh-launch-strip {
+  box-sizing: border-box;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.ssh-launch-strip > [role="status"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-launch-strip > button {
+  flex: none;
+  padding-block: 3px;
+}
+
+.ssh-launch-overlay {
+  position: absolute;
+  z-index: 7;
+  inset: 100% 0 auto;
+  box-sizing: border-box;
+  max-height: min(65cqh, max(0px, calc(100cqh - 72px)));
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.ssh-launch-overlay:empty {
+  display: none;
+}
+
+.light-theme .ssh-launch-notice .au-btn {
+  background: var(--bg-primary);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+.light-theme .ssh-launch-notice .au-btn:hover:not(:disabled) {
+  background: var(--bg-secondary);
+}

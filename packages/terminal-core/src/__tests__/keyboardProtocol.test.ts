@@ -82,6 +82,51 @@ describe('KeyboardProtocolState', () => {
     screen = 'main';
     expect(s.activeFlags()).toBe(1); // main untouched
   });
+
+  // Cross-window detach: the state is carried as plain data into another
+  // renderer and restored into THAT window's (fresh) instance.
+  test('serialize()/restore() round-trips both stacks and modifyOtherKeys', () => {
+    const src = new KeyboardProtocolState();
+    let screen: 'main' | 'alt' = 'main';
+    src.getScreen = () => screen;
+    src.pushFlags(1);
+    src.pushFlags(3);
+    screen = 'alt';
+    src.pushFlags(2);
+    src.setModifyOtherKeys(2);
+
+    const data = JSON.parse(JSON.stringify(src.serialize())); // it crosses IPC
+    const dst = new KeyboardProtocolState();
+    dst.getScreen = () => screen;
+    dst.restore(data);
+
+    expect(dst.activeFlags()).toBe(2); // alt stack
+    screen = 'main';
+    expect(dst.activeFlags()).toBe(3); // main top
+    dst.popFlags();
+    expect(dst.activeFlags()).toBe(1); // main history intact, not just the top
+    expect(dst.snapshot().modifyOtherKeys).toBe(2);
+  });
+
+  test('restore() overwrites in place and re-applies the flag mask and stack bound', () => {
+    const s = new KeyboardProtocolState();
+    s.pushFlags(3); // pre-existing local state must not survive a restore
+    s.restore({
+      mainStack: Array.from({ length: 40 }, () => 31), // over-long, unsupported bits
+      altStack: [],
+      modifyOtherKeys: 7 as unknown as 0 | 1 | 2, // out of range
+    });
+    expect(s.activeFlags()).toBe(SUPPORTED_KITTY_MASK);
+    expect(s.serialize().mainStack).toHaveLength(32);
+    expect(s.snapshot().modifyOtherKeys).toBe(0);
+  });
+
+  test('restore() with empty data clears a previously pushed stack', () => {
+    const s = new KeyboardProtocolState();
+    s.pushFlags(1);
+    s.restore({ mainStack: [], altStack: [], modifyOtherKeys: 0 });
+    expect(s.activeFlags()).toBe(0);
+  });
 });
 
 const KITTY1 = { kittyFlags: 1, modifyOtherKeys: 0 } as const;

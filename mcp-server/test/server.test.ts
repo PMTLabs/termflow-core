@@ -44,6 +44,65 @@ function called(calls: Call[], method: Call["method"], url: string): boolean {
 }
 
 describe("createMcpServer tool wiring", () => {
+    it("public create never forwards sshLaunchConnectionId to REST", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => undefined }));
+        try {
+            const result = await client.callTool({ name: "create_terminal", arguments: {
+                name: "ordinary", sshLaunchConnectionId: "saved-id",
+            } });
+            const call = calls.find((item) => item.method === "post" && item.url === "/terminals");
+            if (result.isError) expect(call).toBeUndefined();
+            else {
+                expect(call?.body).toHaveProperty("name", "ordinary");
+                expect(call?.body).not.toHaveProperty("sshLaunchConnectionId");
+            }
+        } finally {
+            await client.close();
+        }
+    });
+    it("all_api_create_modes_and_mcp_commands_leave_new_leaf_local (MCP transport)", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "tm-parent" }));
+        const command = "ssh user@example.invalid";
+        try {
+            expect((await client.callTool({ name: "create_terminal", arguments: {
+                name: command, profile: "default", owningTabId: "tb-parent", paneId: "pn-parent",
+            } })).isError).not.toBe(true);
+            expect((await client.callTool({ name: "execute_command", arguments: {
+                terminalId: "tm-new", command, cliType: "default",
+            } })).isError).not.toBe(true);
+            expect((await client.callTool({ name: "execute_command", arguments: {
+                terminalId: "tm-new", command, targetOS: "linux",
+            } })).isError).not.toBe(true);
+            expect(calls.map(call => call.url)).toEqual(["/terminals", "/terminals/tm-new/execute", "/fleet/execute"]);
+            const [create, local, fleet] = calls;
+            expect(create.body).toMatchObject({ name: command, profile_id: "default", parentTerminalId: "tm-parent" });
+            expect(local.body).toEqual({ prompt: command, cliType: "default" });
+            expect(fleet.body).toEqual({ command, targetOS: "linux", terminalId: "tm-new" });
+            for (const key of ["ssh", "sshLaunchConnectionId", "connectionId", "hiddenMetrics"]) {
+                expect(create.body).not.toHaveProperty(key);
+            }
+        } finally {
+            await client.close();
+        }
+    });
+    it("round-trips opaque process and session identities through terminal detail", async () => {
+        const processId = "pc-0123456789ab4cde8fab0123456789ab";
+        const sessionKey = "tm-original~0123456789ab4cde8fab0123456789ac";
+        const detail = { id: processId, processId, terminalId: "tm-recovered", sessionKey };
+        const { api, calls } = makeFakeApi({ [`/terminals/${processId}`]: detail });
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => processId }));
+        try {
+            const result: any = await client.callTool({ name: "get_terminal_detail", arguments: { terminalId: "me" } });
+            expect(result.isError).toBeFalsy();
+            expect(JSON.parse(result.content[0].text)).toEqual(detail);
+            expect(calls).toEqual([{ method: "get", url: `/terminals/${processId}` }]);
+        } finally {
+            await client.close();
+        }
+    });
+
     it("get_my_terminal proxies GET /terminals/<callerId>", async () => {
         const { api, calls } = makeFakeApi();
         const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
@@ -138,6 +197,37 @@ describe("createMcpServer tool wiring", () => {
         expect(call).toBeTruthy();
         // Nothing appended, nothing wrapped — a bare CR must arrive as a bare CR.
         expect((call!.body as any).data).toBe("\r");
+    });
+
+    it("send_keys decodes escape sequence \\u0015 to byte 0x15 (Ctrl+U)", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "\\u0015" } });
+        expect(res.isError).toBeFalsy();
+        const call = calls.find((c) => c.method === "post" && c.url === "/terminals/pc-self/input");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).data).toBe("\x15");
+        expect(((call!.body as any).data as string).charCodeAt(0)).toBe(0x15);
+    });
+
+    it("send_keys decodes Ctrl+U and ^U to byte 0x15", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "Ctrl+U" } });
+        await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "^U" } });
+        const inputCalls = calls.filter((c) => c.method === "post" && c.url === "/terminals/pc-self/input");
+        expect(inputCalls.length).toBe(2);
+        expect((inputCalls[0].body as any).data).toBe("\x15");
+        expect((inputCalls[1].body as any).data).toBe("\x15");
+    });
+
+    it("send_keys rejects empty keys with an actionable error", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "" } });
+        expect(res.isError).toBe(true);
+        expect(res.content[0].text).toContain('"keys" must not be empty');
+        expect(calls.some((c) => c.url.includes("input"))).toBe(false);
     });
 
     it("forwards an empty command as a bare submit instead of rejecting it", async () => {

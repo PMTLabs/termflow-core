@@ -1,3 +1,4 @@
+export * from './broadcast';
 export { TerminalEngine, DEFAULT_THEME } from './TerminalEngine';
 export type { RelocationResult } from './TerminalEngine';
 /** The URL matcher shared by `WebLinksAddon` and `getLinkAt`, and the two line scanners built
@@ -22,10 +23,21 @@ export {
   applyColorSchemaGlobally,
   applyColorSchemaToTerminals,
   setAgentColorLock,
+  getTerminalScreenFingerprint,
+  areTerminalScreenFingerprintsEqual,
+  hasTerminalPendingWrites,
+  flushTerminalLiveWrites,
+  drainTerminalWrites,
 } from './cache';
+export type { TerminalScreenFingerprint } from './cache';
 export { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
 export { isWebGLGloballyDisabled } from './webgl';
 export { redactSecrets } from './redactSecrets';
+/** Scrollbar ▲/▼ buttons (plan 046): the patched xterm scrollbar emits this event; the engine
+ *  wires it per mount, and any OTHER host that opens its own `Terminal` (PlaybackViewer) must
+ *  wire it too or its arrows are inert. */
+export { wireScrollbarArrows, SCROLLBAR_ARROW_EVENT } from './scrollbarArrows';
+export type { ScrollbarArrowTerminal } from './scrollbarArrows';
 export {
   HeuristicCapture,
   decideSuggestKey,
@@ -45,7 +57,10 @@ export type {
   ContextMenuActions,
   TerminalLinkHit,
   PromptGate,
+  PromptMarkKind,
+  PromptMarkState,
 } from './types';
+export type { KeyboardProtocolStateData } from './keyboardProtocol';
 export {
   EndedRegionTracker,
   setEndedRegionColorsFor,

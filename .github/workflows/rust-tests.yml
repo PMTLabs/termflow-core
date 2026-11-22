@@ -16,9 +16,7 @@ name: Rust Tests
 
 on:
   push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
+    branches: [ master, main, develop ]
 
 jobs:
   rust-test:
@@ -45,6 +43,9 @@ jobs:
             # compiled by the release build. Unit suite only, same as Windows.
             runs-on: macos-latest
             test-args: ""
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +63,38 @@ jobs:
             librsvg2-dev \
             libayatana-appindicator3-dev \
             build-essential \
-            pkg-config
+            pkg-config \
+            zsh \
+            fish \
+            tcsh
+
+      # Ubuntu's global /etc/zsh/zshrc runs compinit. When an fpath directory on
+      # the image is group/world-writable or not owned by root, every login zsh
+      # stops on "insecure directories ... [y]/[n]?" before its first prompt,
+      # with or without TermFlow's helpers. Print what compaudit refuses, make it
+      # root-owned and not group/world-writable, and fail if anything is still
+      # refused. The launch gate's handling of that question has its own test
+      # (zsh_compinit_question_holds_the_gate_and_helper_dirs_pass_compaudit).
+      # GitHub-hosted runners only: they are ephemeral. Never chown or chmod a
+      # self-hosted runner's system directories.
+      - name: Make the zsh completion dirs pass compaudit (Linux)
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          insecure=$(zsh -fc 'autoload -Uz compaudit; compaudit' 2>/dev/null || true)
+          printf 'compaudit refused: %s\n' "${insecure:-nothing}"
+          if [ -n "$insecure" ]; then
+            printf '%s\n' "$insecure" | xargs -d '\n' ls -ld
+            printf '%s\n' "$insecure" | xargs -d '\n' sudo chown root:root
+            printf '%s\n' "$insecure" | xargs -d '\n' sudo chmod g-w,o-w
+          fi
+          zsh -fc 'autoload -Uz compaudit; compaudit'
+
+      # The SSH metrics collector test runs the collector under every login
+      # shell it supports (collector_runs_identically_under_each_login_shell).
+      # macOS ships sh/bash/dash/zsh/tcsh but not fish.
+      - name: Install fish for the login-shell matrix (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -102,8 +134,48 @@ jobs:
         working-directory: mcp-server
         run: bun install --frozen-lockfile
 
+      # cargo test does not build the normal host executable needed by Layer A.
+      - name: Build real PTY host for MCP hold Layer A
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        run: cargo build --manifest-path src-tauri/pty-host/Cargo.toml
+
+      - name: Require MCP hold real processes (Linux and Windows only)
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          suffix=''
+          if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
+          echo "TERMFLOW_PTY_HOST_BIN=$GITHUB_WORKSPACE/src-tauri/target/debug/termflow-pty-host$suffix" >> "$GITHUB_ENV"
+          echo 'TERMFLOW_E2E_REQUIRED=1' >> "$GITHUB_ENV"
+
+      - name: Measure Bun bind failures and test MCP sidecar (Linux)
+        if: runner.os == 'Linux'
+        working-directory: mcp-server
+        run: bun test
+
       # Linux: unit + integration (--features integration-tests).
       # Windows/macOS: unit suite only (test-args empty).
       - name: Run Rust tests
+        if: runner.os != 'Windows'
         working-directory: src-tauri
         run: cargo test ${{ matrix.test-args }}
+
+      # Cargo itself puts Windows tests in a non-breakaway kill-on-close job.
+      # Build through Cargo, then run its exact test artifact outside Cargo's job;
+      # otherwise the real host correctly refuses ArmDetach. No after-setup skip.
+      - name: Run Windows Rust tests including real MCP hold processes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src-tauri
+        run: |
+          $artifacts = cargo test --lib --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $executables = @($artifacts | ForEach-Object {
+            try { $item = $_ | ConvertFrom-Json } catch { return }
+            if ($item.reason -eq 'compiler-artifact' -and $item.profile.test -and $item.executable) {
+              $item.executable
+            }
+          })
+          if ($executables.Count -ne 1) { throw "Expected one library test executable, got $($executables.Count)" }
+          & $executables[0] --nocapture
+          exit $LASTEXITCODE

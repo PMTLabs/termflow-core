@@ -25,13 +25,20 @@ import * as path from 'path';
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { readSource } from '../../../utils/readSource';
+import { FolderIconPicker } from '../../Settings/SshConnections/FolderIconPicker';
 
 // jest has no CSS transform (the moduleNameMapper stub covers it too, but the
 // explicit mock keeps this file readable next to the other component suites).
 jest.mock('../ContextMenu.css', () => ({}));
 
 // eslint-disable-next-line import/first
-import { ContextMenu, ContextMenuItem, ContextMenuFlyoutRow, TOOLTIP_DWELL_MS } from '../ContextMenu';
+import {
+    ContextMenu,
+    ContextMenuItem,
+    ContextMenuFlyoutRow,
+    TOOLTIP_DWELL_MS,
+    SUBMENU_HOVER_OPEN_DELAY_MS,
+} from '../ContextMenu';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -80,6 +87,46 @@ const rows = (depth = 0) =>
 const labels = (depth = 0) =>
     rows(depth).map((r) => r.querySelector('.context-menu-flyout-label')!.textContent);
 const activeIndex = (depth = 0) => rows(depth).findIndex((r) => r.classList.contains('is-active'));
+
+it('wraps arrow navigation past disabled items and restores the invoker on Escape', async () => {
+    const invoker = document.createElement('textarea');
+    container.before(invoker);
+    try {
+        invoker.focus();
+        onClose.mockImplementation(() => root.render(null));
+        await render([{ label: 'First' }, { label: 'Disabled', enabled: false }, { label: 'Last' }]);
+        expect(menu().getAttribute('role')).toBe('menu');
+        expect(document.activeElement).toBe(menu());
+        await key(menu(), 'ArrowDown');
+        expect(document.activeElement).toBe(menuItem('First'));
+        await key(menuItem('First'), 'ArrowDown');
+        expect(document.activeElement).toBe(menuItem('Last'));
+        await key(menuItem('Last'), 'ArrowDown');
+        expect(document.activeElement).toBe(menuItem('First'));
+        await key(menuItem('First'), 'Escape');
+        expect(menu()).toBeNull();
+        expect(document.activeElement).toBe(invoker);
+    } finally {
+        invoker.remove();
+    }
+});
+
+it('Tab closes the menu and returns focus to the invoker', async () => {
+    const invoker = document.createElement('textarea');
+    container.before(invoker);
+    try {
+        invoker.focus();
+        onClose.mockImplementation(() => root.render(null));
+        await render([{ label: 'First' }, { label: 'Last' }]);
+        await key(menu(), 'ArrowDown');
+        await key(menuItem('First'), 'Tab');
+        expect(onClose).toHaveBeenCalledTimes(1);
+        expect(menu()).toBeNull();
+        expect(document.activeElement).toBe(invoker);
+    } finally {
+        invoker.remove();
+    }
+});
 
 describe('dismissal suppression and action flashes', () => {
     const flyout = (actions: NonNullable<ContextMenuItem['submenu']>['headerActions'] = []) => ({
@@ -193,6 +240,15 @@ const hover = (el: EventTarget, from: EventTarget | null = null) => {
     const { on, ev } = hoverMove(el, from);
     return fire(on, ev);
 };
+/** `hover`, plus the hover-open debounce — for a real-timer test that means to actually see a
+ *  submenu parent's flyout appear rather than just assert the delay itself (that lives in the
+ *  fake-timer `hovering away` suite below). */
+const hoverOpen = async (el: EventTarget, from: EventTarget | null = null) => {
+    await hover(el, from);
+    await act(async () => {
+        await new Promise((resolve) => { setTimeout(resolve, SUBMENU_HOVER_OPEN_DELAY_MS); });
+    });
+};
 /** Synchronous twin, for the fake-timer suite: React's async `act` flushes through
  *  timer APIs that `jest.useFakeTimers()` has replaced, and can hang there. */
 const hoverSync = (el: EventTarget, from: EventTarget | null = null) => {
@@ -235,6 +291,19 @@ function menuWith(
     ];
 }
 
+/** `menuWith`'s `customFlyout` twin — a submenu parent whose panel is arbitrary content
+ *  rather than a row list, the shape `TerminalDisplay`'s "Color scheme for X" item uses. */
+function menuWithCustomFlyout(
+    customFlyout: ContextMenuItem['customFlyout'],
+    plainClick = jest.fn(),
+): ContextMenuItem[] {
+    return [
+        { label: 'Copy', icon: '📋', click: plainClick },
+        { type: 'separator' },
+        { label: 'Color scheme', icon: '🎨', customFlyout },
+    ];
+}
+
 /* ── Trap 2: the parent item toggles, it does not close ───────────────────── */
 
 describe('submenu parent item', () => {
@@ -262,7 +331,7 @@ describe('submenu parent item', () => {
     it('opens on HOVER, with no click at all', async () => {
         await render(menuWith({ rows: [row('a', 'kubectl get pods')] }));
         expect(panels()).toHaveLength(0);
-        await hover(menuItem('Snippets'));
+        await hoverOpen(menuItem('Snippets'));
         expect(panels()).toHaveLength(1);
         expect(labels()).toEqual(['kubectl get pods']);
         expect(onClose).not.toHaveBeenCalled();
@@ -273,7 +342,7 @@ describe('submenu parent item', () => {
         // toggling click would make "click the item you are pointing at" the gesture
         // that HIDES the thing you were reaching for.
         await render(menuWith({ rows: [row('a', 'x')] }));
-        await hover(menuItem('Snippets'));
+        await hoverOpen(menuItem('Snippets'));
         expect(panels()).toHaveLength(1);
         await click(menuItem('Snippets'));
         expect(panels()).toHaveLength(1);
@@ -339,6 +408,116 @@ describe('submenu parent item', () => {
     });
 });
 
+/**
+ * `customFlyout`'s own trap: it must behave EXACTLY like `submenu` for the two things this
+ * repo has already broken once each (Trap 1 and Trap 2 in this file's header) — never
+ * closing the menu, and opening beside the row rather than replacing what's on screen — even
+ * though its panel is caller content, not a `FlyoutPanel` row list. The regression this
+ * covers by name: the terminal's old "Color scheme for X" item ran a plain `click` that
+ * opened a SEPARATE `ContextMenu`, and every plain item's `onClick` unconditionally ran
+ * `onClose()` first — so opening the picker always closed the menu behind it.
+ */
+describe('customFlyout parent item', () => {
+    const panel = () => document.querySelector('.probe-flyout');
+
+    it('opens beside the row and does NOT close the menu', async () => {
+        await render(menuWithCustomFlyout({
+            content: <div className="probe-flyout">grid content</div>,
+            panelClassName: 'probe-flyout',
+        }));
+        expect(panel()).toBeNull();
+        await click(menuItem('Color scheme'));
+        expect(panel()).not.toBeNull();
+        expect(panel()!.textContent).toBe('grid content');
+        expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('opens on HOVER too, past the debounce, and still does not close the menu', async () => {
+        await render(menuWithCustomFlyout({
+            content: <div className="probe-flyout">grid content</div>,
+            panelClassName: 'probe-flyout',
+        }));
+        await hoverOpen(menuItem('Color scheme'));
+        expect(panel()).not.toBeNull();
+        expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('a click on the parent OPENS it and never toggles it shut', async () => {
+        await render(menuWithCustomFlyout({
+            content: <div className="probe-flyout" />,
+            panelClassName: 'probe-flyout',
+        }));
+        await click(menuItem('Color scheme'));
+        expect(panel()).not.toBeNull();
+        await click(menuItem('Color scheme'));
+        expect(panel()).not.toBeNull();
+    });
+
+    it('never calls the parent item\'s own click handler', async () => {
+        const parentClick = jest.fn();
+        await render([{
+            label: 'Color scheme',
+            click: parentClick,
+            customFlyout: { content: <div className="probe-flyout" />, panelClassName: 'probe-flyout' },
+        }]);
+        await click(menuItem('Color scheme'));
+        expect(parentClick).not.toHaveBeenCalled();
+    });
+
+    it('fires its own onOpen once, on open — same contract as `submenu.onOpen`', async () => {
+        const onOpen = jest.fn();
+        await render(menuWithCustomFlyout({
+            content: <div className="probe-flyout" />,
+            panelClassName: 'probe-flyout',
+            onOpen,
+        }));
+        expect(onOpen).not.toHaveBeenCalled();
+        await click(menuItem('Color scheme'));
+        expect(onOpen).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves plain items closing the menu as before', async () => {
+        const plainClick = jest.fn();
+        await render(menuWithCustomFlyout(
+            { content: <div className="probe-flyout" />, panelClassName: 'probe-flyout' },
+            plainClick,
+        ));
+        await click(menuItem('Copy'));
+        expect(plainClick).toHaveBeenCalledTimes(1);
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    // Live pass FINAL-P2-1: the menu's native keydown listener stopped every key, so a custom
+    // flyout's own React onKeyDown (the SSH folder icon grid) never ran and arrows did nothing.
+    it('lets keys reach the flyout content, while Escape still returns to the parent item', async () => {
+        const pick = jest.fn();
+        const seen = jest.fn();
+        window.addEventListener('keydown', seen);
+        try {
+            await render(menuWithCustomFlyout({
+                content: <FolderIconPicker icon="server" color="sky" onPick={pick} />,
+                panelClassName: 'ssh-picker-flyout',
+            }));
+            await click(menuItem('Color scheme'));
+            const icons = Array.from(document.querySelectorAll<HTMLButtonElement>('.ssh-icon-grid button'));
+            const selected = icons.findIndex((b) => b.getAttribute('aria-pressed') === 'true');
+            expect(document.activeElement).toBe(icons[selected]);
+            await key(icons[selected], 'ArrowRight');
+            expect(document.activeElement).toBe(icons[selected + 1]);
+            await key(icons[selected + 1], 'ArrowLeft');
+            expect(document.activeElement).toBe(icons[selected]);
+            await key(icons[selected], 'x'); // unhandled by the grid: still contained by the menu
+            expect(seen).not.toHaveBeenCalled();
+            await key(icons[selected], 'Escape');
+            expect(document.activeElement).toBe(menuItem('Color scheme'));
+            expect(onClose).not.toHaveBeenCalled();
+            expect(pick).not.toHaveBeenCalled();
+        } finally {
+            window.removeEventListener('keydown', seen);
+        }
+    });
+});
+
 /* -- hover: retiring the flyout again ------------------------------------- */
 
 /**
@@ -371,6 +550,7 @@ describe('hovering away', () => {
     it('closes the flyout once the pointer has sat on a plain item', () => {
         renderSync(menuWith({ rows: [row('a', 'x')] }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         expect(panels()).toHaveLength(1);
 
         hoverSync(menuItem('Copy'), menuItem('Snippets'));
@@ -386,6 +566,7 @@ describe('hovering away', () => {
     it('cancels the pending close when the pointer reaches the PANEL', () => {
         renderSync(menuWith({ rows: [row('a', 'x')] }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         const host = menuItem('Snippets').parentElement!;
 
         // Cross a neighbouring item, then arrive in the panel - the diagonal this exists for.
@@ -403,9 +584,17 @@ describe('hovering away', () => {
             { label: 'Snippets', submenu: { searchPlaceholder: 'snippets', rows: [row('s', 'docker ps')] } },
         ]);
         hoverSync(menuItem('Command History'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         expect(search().placeholder).toBe('history');
 
+        // Hovering the second parent arms its own (debounced) open — the FIRST panel stays up
+        // the whole time it is pending, so there is still no gap: it is never absent, it is
+        // Command History's panel for one more moment and then Snippets' the next.
         hoverSync(menuItem('Snippets'), menuItem('Command History'));
+        expect(panels()).toHaveLength(1);
+        expect(search().placeholder).toBe('history');
+
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         expect(panels()).toHaveLength(1);
         expect(search().placeholder).toBe('snippets');
 
@@ -413,6 +602,35 @@ describe('hovering away', () => {
         tick(400);
         expect(panels()).toHaveLength(1);
         expect(search().placeholder).toBe('snippets');
+    });
+
+    /**
+     * The hover-OPEN debounce's own regression test (the ask, 2026-09-16): "a quick mouse move
+     * over it does not trigger the submenu". The mirror of the tests above, which pin the CLOSE
+     * side of the same shape.
+     */
+    it('does NOT open on a quick sweep across the parent — only on a hover that outlasts the delay', () => {
+        renderSync(menuWith({ rows: [row('a', 'x')] }));
+        hoverSync(menuItem('Snippets'));
+        // One millisecond short of the debounce: still swept, not aimed at.
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS - 1);
+        expect(panels()).toHaveLength(0);
+
+        // Moves on before the delay elapses — the pending open must not fire behind it.
+        hoverSync(menuItem('Copy'), menuItem('Snippets'));
+        tick(1);
+        expect(panels()).toHaveLength(0);
+        tick(1000);
+        expect(panels()).toHaveLength(0);
+    });
+
+    it('opens once the pointer has actually rested on the parent for the full delay', () => {
+        renderSync(menuWith({ rows: [row('a', 'x')] }));
+        hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS - 1);
+        expect(panels()).toHaveLength(0);
+        tick(1);
+        expect(panels()).toHaveLength(1);
     });
 
     it('a timer armed before the menu unmounts is torn down with it', () => {
@@ -584,6 +802,7 @@ describe('tooltip dwell', () => {
             emptyRow: row('none', 'No snippets match', { disabled: true }),
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         hoverSync(rows()[0], menuItem('Snippets'));
         tick(TOOLTIP_DWELL_MS);
         expect(titleOf(rows()[0])).toBe('the snippet text');
@@ -633,6 +852,7 @@ describe('tooltip dwell', () => {
             emptyRow: row('none', 'No command history yet', { disabled: true }),
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         hoverSync(rows()[0], menuItem('Snippets'));
         tick(TOOLTIP_DWELL_MS);
         expect(titleOf(rows()[0])).toBe('git status');
@@ -688,6 +908,7 @@ describe('tooltip dwell', () => {
             rows: [row('a', 'unavailable', { disabled: true, title: 'Nothing to run here yet' })],
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         expect(titleOf(rows()[0])).toBe('Nothing to run here yet');
     });
 
@@ -699,6 +920,7 @@ describe('tooltip dwell', () => {
             ],
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         const detail = (i: number) => rows()[i].querySelector('.context-menu-flyout-detail')!;
         expect(titleOf(rows()[0])).toBeNull();
         expect(titleOf(detail(0))).toBeNull();
@@ -733,6 +955,7 @@ describe('tooltip dwell', () => {
             rows: [row('a', 'one', { title: 'the whole snippet' }), row('b', 'two', { title: 'the other one' })],
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         expect(titleOf(rows()[0])).toBeNull();
 
         act(() => {
@@ -751,6 +974,7 @@ describe('tooltip dwell', () => {
             rows: [row('a', 'one', { title: 'the whole snippet' }), row('b', 'two', { title: 'the other one' })],
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         act(() => {
             search().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
         });
@@ -794,6 +1018,7 @@ describe('tooltip dwell', () => {
             rows: [row('a', 'one', { title: 'first' }), row('b', 'two', { title: 'second' })],
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         hoverSync(rows()[0], menuItem('Snippets'));
         tick(TOOLTIP_DWELL_MS);
         expect(titleOf(rows()[0])).toBe('first');
@@ -840,6 +1065,7 @@ describe('tooltip dwell', () => {
             );
         });
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         // No dwell served and no keyboard used — the flag alone has to be doing this.
         expect(titleOf(rows()[0])).toBe('the whole snippet');
 
@@ -901,6 +1127,7 @@ describe('tooltip dwell', () => {
             headerActions: [{ id: 'view-mode', icon: '📁', title: 'Group by folder', pressed: false, onSelect: () => {} }],
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         const toggle = panel()!.querySelector('.context-menu-flyout-toggle')!;
         expect(titleOf(toggle)).toBe('Group by folder');
     });
@@ -915,6 +1142,7 @@ describe('tooltip dwell', () => {
             ],
         }));
         hoverSync(menuItem('Snippets'));
+        tick(SUBMENU_HOVER_OPEN_DELAY_MS);
         const toggle = panel()!.querySelector('[data-action-id="toggle"]')!;
         const plain = panel()!.querySelector('[data-action-id="plain"]')!;
         expect(toggle.getAttribute('aria-pressed')).toBe('true');
@@ -929,16 +1157,18 @@ describe('tooltip dwell', () => {
         // **Asserted on the timer, not on a console warning** — React 18 removed the
         // set-state-after-unmount warning, so that version passed with the cleanup deleted.
         //
-        // **And on a DELTA of exactly one, over a fixture where nothing else can arm.** Counting
+        // **And on a DELTA of exactly two, over a fixture where nothing else can arm.** Counting
         // `getTimerCount() > 0` was the second vacuous oracle here: hovering a PLAIN item also
         // arms `scheduleCloseSubmenu`'s 260ms timer, so the count was satisfied by that alone and
         // the test stayed green against a `useTooltipDwell` with no timer in it at all. A submenu
-        // parent takes the `openSubmenuAt` branch instead, which cancels rather than arms — so the
-        // one timer that appears here is the dwell, and this test can only be about the dwell.
+        // parent instead arms TWO of its own: the dwell (this test's actual subject) and the
+        // hover-open debounce (`scheduleSubmenuOpen`'s `SUBMENU_HOVER_OPEN_DELAY_MS`) — both must
+        // be torn down with the menu, or an open timer left running would set state on an
+        // unmounted component the moment it fired.
         renderSync([{ label: 'Snippets', title: 'Browse snippets.', submenu: { rows: [row('a', 'x')] } }]);
         const before = jest.getTimerCount();
         hoverSync(menuItem('Snippets'));
-        expect(jest.getTimerCount()).toBe(before + 1);
+        expect(jest.getTimerCount()).toBe(before + 2);
 
         act(() => root.unmount());
         expect(jest.getTimerCount()).toBe(0);
@@ -1893,6 +2123,48 @@ describe('snippet row context actions', () => {
         }
     });
 
+    it('positions actions at the mouse click coordinates when right-clicked', async () => {
+        const previousWidth = window.innerWidth;
+        const previousHeight = window.innerHeight;
+        const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+        const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1000 });
+        Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 });
+        Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+            configurable: true,
+            get() { return this.classList.contains('context-menu-flyout-row-actions') ? 120 : 0; },
+        });
+        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+            configurable: true,
+            get() { return this.classList.contains('context-menu-flyout-row-actions') ? 100 : 0; },
+        });
+        try {
+            await render(menuWith({
+                rows: [row('a', 'alpha', {
+                    contextActions: [{ id: 'copy', label: 'Copy', onSelect: jest.fn() }],
+                })],
+            }));
+            await click(menuItem('Snippets'));
+            const rowEl = rows()[0];
+            const flyout = panel()!;
+            jest.spyOn(flyout, 'getBoundingClientRect').mockReturnValue({
+                top: 100, left: 100, right: 300, bottom: 400, width: 200, height: 300,
+                x: 100, y: 100, toJSON: () => ({}),
+            });
+            await fire(rowEl, new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 250, clientY: 180 }));
+            const actions = document.querySelector<HTMLElement>('.context-menu-flyout-row-actions')!;
+            expect(actions).not.toBeNull();
+            // Mouse click (250, 180) minus panel top-left (100, 100) = (150, 80)
+            expect(actions.style.left).toBe('150px');
+            expect(actions.style.top).toBe('80px');
+        } finally {
+            Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+            Object.defineProperty(window, 'innerHeight', { configurable: true, value: previousHeight });
+            if (offsetWidth) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', offsetWidth);
+            if (offsetHeight) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight);
+        }
+    });
+
     it('opens from the active row by keyboard, navigates actions, activates, and returns focus on Escape', async () => {
         const copy = jest.fn();
         const insert = jest.fn();
@@ -1924,7 +2196,7 @@ describe('snippet row context actions', () => {
         expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
 
         await fire(input, new KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true, cancelable: true }));
-        const reopened = document.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
+        const reopened = document.querySelector<HTMLButtonElement>('.context-menu-flyout-row-actions [role="menuitem"]')!;
         await fire(reopened, new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
         expect(copy).toHaveBeenCalledTimes(1);
         expect(insert).not.toHaveBeenCalled();

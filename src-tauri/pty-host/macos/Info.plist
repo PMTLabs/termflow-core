@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.termflow.desktop.pty-host</string>
+<key>CFBundleName</key><string>TermFlow Host</string>
+<key>CFBundleDisplayName</key><string>TermFlow Host</string>
+<key>CFBundleExecutable</key><string>termflow-pty-host</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleIconFile</key><string>icon.icns</string>
+<key>CFBundleVersion</key><string>@VERSION@</string>
+<key>CFBundleShortVersionString</key><string>@VERSION@</string>
+<key>LSUIElement</key><true/>
+</dict></plist>

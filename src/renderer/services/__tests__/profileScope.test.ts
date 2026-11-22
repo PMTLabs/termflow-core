@@ -1,7 +1,12 @@
+/**
+ * @jest-environment jsdom
+ */
 import {
   stateKeyFor,
   layoutsKeyFor,
   apiTokenKeyFor,
+  getStoredApiToken,
+  setStoredApiToken,
   initProfileScope,
   currentProfile,
   __setProfileForTests,
@@ -85,6 +90,48 @@ describe('profileScope', () => {
       expect(isForeignInstance('', 'rel')).toBe(false);
       // And we may not know our own key (browser/monitor build).
       expect(isForeignInstance('rel', '')).toBe(false);
+    });
+  });
+
+  describe('token storage isolation (D5)', () => {
+    beforeEach(() => {
+      localStorage.clear();
+      setStoredApiToken('');
+    });
+
+    it('stores token in localStorage for standard (non-elevated) instances', () => {
+      __setProfileForTests({ elevated: false, scope: 'default' });
+      setStoredApiToken('normal-secret');
+      expect(getStoredApiToken()).toBe('normal-secret');
+      expect(localStorage.getItem(apiTokenKeyFor('default'))).toBe('normal-secret');
+    });
+
+    it('keeps token strictly in memory and never writes to localStorage for elevated instances', () => {
+      __setProfileForTests({ elevated: true, scope: 'elevated.high' });
+      setStoredApiToken('elevated-secret');
+      expect(getStoredApiToken()).toBe('elevated-secret');
+      // Must not be in localStorage
+      expect(localStorage.getItem(apiTokenKeyFor('elevated.high'))).toBeNull();
+      expect(localStorage.getItem('api_token')).toBeNull();
+    });
+
+    it('purges any legacy persisted token when setting an elevated token or initializing scope', async () => {
+      // Plant a legacy token on disk
+      localStorage.setItem(apiTokenKeyFor('work.high'), 'stale-leaked-token');
+      __setProfileForTests({ elevated: true, scope: 'work.high' });
+      // __setProfileForTests should have purged it
+      expect(localStorage.getItem(apiTokenKeyFor('work.high'))).toBeNull();
+
+      // Plant again and test initProfileScope
+      localStorage.setItem(apiTokenKeyFor('work.high'), 'stale-leaked-token');
+      await initProfileScope(async () => ({
+        name: 'work',
+        elevated: true,
+        scope: 'work.high',
+        isDefault: false,
+        key: 'rel.work.high',
+      }));
+      expect(localStorage.getItem(apiTokenKeyFor('work.high'))).toBeNull();
     });
   });
 });

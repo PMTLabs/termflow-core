@@ -1,4 +1,10 @@
+import { paneIncarnations, acceptsTransferNotice, describePanes, type PaneCapture } from './services/paneIncarnations';
+import { captureWorkspace, isCurrentWorkspace } from './services/workspaceReplacement';
 import React, { useEffect, useRef, useState } from 'react';
+import { hydrateSsh } from './services/sshHydration';
+import { refenceSshMetricsOnSystemResume } from './services/sshMetricsWatch';
+import { installInputBroadcast } from './services/inputBroadcast';
+import { BroadcastOverlay } from './components/Broadcast/BroadcastOverlay';
 import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
@@ -7,9 +13,11 @@ import { PaneDragProvider } from './components/Panes/dnd/PaneDragController';
 import { isDetachWindow, reconstructDetachedWindow, applyReattachByToken } from './components/Panes/dnd/detach';
 import { LayoutManager } from './components/LayoutManager';
 import { GlobalDialog } from './components/UI/GlobalDialog';
+import { SshConnectionsDialogHost } from './components/Ssh/AllSshConnectionsDialog';
 import { ConfirmDialog } from './components/UI/ConfirmDialog';
 import { ToastContainer } from './components/UI/ToastContainer';
 import { GlobalPeerRequests } from './components/GlobalPeerRequests';
+import { GlobalHostNotices } from './components/GlobalHostNotices';
 import { EulaAcceptModal } from './components/EulaAcceptModal';
 import { GlobalAutomationEditor } from './components/Automation/GlobalAutomationEditor';
 import {
@@ -33,6 +41,7 @@ import {
   setCommandSuggestions,
   setCanvasWheelMode,
   setCanvasBusyCue,
+  setTabRunningCue,
   setColorSchema,
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
@@ -44,6 +53,7 @@ import {
   isSnippetSortMode,
   setCustomKeybindings,
   setKeepRunningInBackground,
+  setExemptLoopbackFromProxy,
   setNotifySoundEnabled,
   setNotifyToastEnabled,
   setNotifyOsEnabled,
@@ -52,6 +62,7 @@ import {
 } from './store/slices/settingsSlice';
 import type { TerminalFontWeight } from './store/slices/settingsSlice';
 import { isCanvasBusyCue } from './components/Canvas/canvasBusyCue';
+import { isTabRunningCue } from './components/Tabs/tabRunningCue';
 import { openSettingsTab, installSettingsRouting } from './services/openSettings';
 import { SHORTCUT_ACTIONS, findConflict } from './services/shortcutActions';
 import { applyEffectiveThemes, applyActivePaneBackground } from './store/terminalTheme';
@@ -62,7 +73,7 @@ import { terminalTitleColor } from './store/titleColor';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
 import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
-import { buildApiCreatedTab, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
+import { buildApiCreatedTab, buildApiFallbackPane, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
 import { notificationService } from './services/NotificationService';
 import { resolveActivation } from './services/notificationRouting';
@@ -73,9 +84,10 @@ import { StateManager } from './services/StateManager';
 import { resolvePostRestoreAction } from './services/postRestoreAction';
 import { terminalService } from './services/TerminalService';
 import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapshot';
-import { setInitialCwd } from './services/initialCwd';
 import './styles/App.css';
 import { generateId } from './utils/id';
+import { addTabRootedAt } from './services/folderTab';
+import { noteUserSplitOf } from './services/paneActions';
 
 // config.json is hand-editable, so hydration validates against the known
 // weight set rather than trusting the string straight into xterm's option.
@@ -124,6 +136,7 @@ const App: React.FC = () => {
   // When the last cwd refresh STARTED, to throttle the visibilitychange trigger
   // (see handleVisibilityChange). A ref, not state: it must not re-render.
   const lastCwdRefreshAt = useRef(0);
+  const sshHydration = useRef<ReturnType<typeof hydrateSsh> | null>(null);
 
   // The native window close is intercepted in Rust (prevent_close) and forwarded
   // as `app:close-requested`; show an in-app confirm before actually closing. The
@@ -213,7 +226,10 @@ const App: React.FC = () => {
           const p = event?.payload;
           if (!p || typeof p !== 'object') return;
           if (p.target !== myLabel || typeof p.token !== 'string') return;
-          void applyReattachByToken(p.token);
+          void acceptsTransferNotice(p).then(matches => {
+            if (matches) return applyReattachByToken(p.token);
+            return undefined;
+          }).catch(error => console.error('Tab transfer failed', error));
         });
       } catch {
         // Not under Tauri — cross-window reattach unavailable.
@@ -272,8 +288,10 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // Initialize app
-    initializeApp();
+    // Own the SSH listener synchronously, including teardown while getConfig is pending.
+    const ssh = hydrateSsh(window.electronAPI?.ssh, store.dispatch);
+    sshHydration.current = ssh;
+    initializeApp(ssh.ready);
 
     // Save state when window is about to close
     const handleBeforeUnload = () => {
@@ -365,6 +383,8 @@ const App: React.FC = () => {
     let resumeAlive = true;
     let unlistenResume: (() => void) | undefined;
     listen('system:resume', () => {
+      if (!resumeAlive) return;
+      refenceSshMetricsOnSystemResume();
       refreshGlyphAtlases();
     })
       .then(fn => { if (resumeAlive) unlistenResume = fn; else fn(); })
@@ -418,6 +438,8 @@ const App: React.FC = () => {
       StateManager.saveState();
 
       // Cleanup IPC listeners
+      sshHydration.current?.stop();
+      sshHydration.current = null;
       cleanupIPCListeners();
       inputHandler.destroy();
 
@@ -437,7 +459,7 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const initializeApp = async () => {
+  const initializeApp = async (sshReady: Promise<void>) => {
     console.log('Initializing app...');
 
     // Fetch config exactly once; every consumer below reads this same snapshot
@@ -465,6 +487,7 @@ const App: React.FC = () => {
     await Promise.all([
       loadConfigSettings(config),
       initializeShellProfiles(config),
+      sshReady,
     ]);
 
     // Detached windows reconstruct a handed-off tab/pane (reattaching to the
@@ -541,7 +564,7 @@ const App: React.FC = () => {
     // StateManager has finished restoring this window's complete persisted pane
     // tree. Report completion so Rust can release this window from the sweep.
     try {
-      await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label);
+      await paneIncarnations.send({ kind: 'settle' });
     } catch (error) {
       console.warn('Failed to report host restore completion:', error);
     }
@@ -697,8 +720,14 @@ const App: React.FC = () => {
         if (isCanvasBusyCue(config.canvasBusyCue)) {
           dispatch(setCanvasBusyCue(config.canvasBusyCue));
         }
+        if (isTabRunningCue(config.tabRunningCue)) {
+          dispatch(setTabRunningCue(config.tabRunningCue));
+        }
         if (config.keepRunningInBackground !== undefined) {
           dispatch(setKeepRunningInBackground(config.keepRunningInBackground));
+        }
+        if (config.exemptLoopbackFromProxy !== undefined) {
+          dispatch(setExemptLoopbackFromProxy(config.exemptLoopbackFromProxy));
         }
         // Notification preferences (Stream 1) — all opt-in, default off.
         if (config.notifySoundEnabled !== undefined) {
@@ -816,13 +845,9 @@ const App: React.FC = () => {
         icon: '🖥️',
       };
 
-      // "Open in TermFlow": root this default terminal at the requested folder. The root
-      // pane's terminalId === the tab id (TerminalContainer seeds it that way), so set the
-      // initial cwd BEFORE dispatching addTab so the pane spawns in that directory.
-      if (folderPath) setInitialCwd(newTab.id, folderPath);
-
       console.log('Dispatching addTab with:', newTab);
-      dispatch(addTab(newTab));
+      if (folderPath) addTabRootedAt(dispatch, newTab, folderPath);
+      else dispatch(addTab(newTab));
     }
   };
 
@@ -840,8 +865,7 @@ const App: React.FC = () => {
       shellType: defaultShell.id,
       icon: '🖥️',
     };
-    setInitialCwd(newTab.id, folderPath);
-    dispatch(addTab(newTab));
+    addTabRootedAt(dispatch, newTab, folderPath);
   };
 
   const handleExternalActivity = (event: CustomEvent) => {
@@ -1026,6 +1050,7 @@ const App: React.FC = () => {
     const state = (window as any).__REDUX_STORE__?.getState();
     const activePaneId = state?.panes?.activePaneId;
     if (activePaneId) {
+      noteUserSplitOf(activePaneId);
       dispatch(splitPane({ paneId: activePaneId, direction: 'horizontal' }));
     }
   };
@@ -1035,6 +1060,7 @@ const App: React.FC = () => {
     const state = (window as any).__REDUX_STORE__?.getState();
     const activePaneId = state?.panes?.activePaneId;
     if (activePaneId) {
+      noteUserSplitOf(activePaneId);
       dispatch(splitPane({ paneId: activePaneId, direction: 'vertical' }));
     }
   };
@@ -1078,6 +1104,7 @@ const App: React.FC = () => {
         // A live pty-host session which has no app tab. Mode 0 creates a pane
         // for it, whose normal createTerminal call consumes this pending key.
         sessionKey?: string;
+        elevated?: boolean;
         // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
         // the edge itself was already written by the backend before this event was emitted.
         parentTerminalId?: string;
@@ -1092,6 +1119,16 @@ const App: React.FC = () => {
       const { processId, leafId, owningTabId } = resolveApiCreateIds(options);
       const tabId = owningTabId;
       const terminalId = processId;
+      const workspace = captureWorkspace();
+      const originalTree = tabId ? store.getState().panes.treesByTabId[tabId] : undefined;
+      let installed: { leaf: string; paneId: string; pi?: PaneCapture } | undefined;
+      const current = () => isCurrentWorkspace(workspace) && !paneIncarnations.ended
+        && (installed ? (!paneIncarnations.enabled || paneIncarnations.isCurrent(installed.leaf, installed.paneId, installed.pi))
+          : !tabId || store.getState().panes.treesByTabId[tabId] === originalTree);
+      const captureInstalled = (owner: string, leaf?: string) => {
+        const pane = describePanes(store.getState().panes.treesByTabId[owner] ?? null).find(p => p.leaf === leaf);
+        if (pane) installed = { leaf: pane.leaf, paneId: pane.paneId, pi: paneIncarnations.capture(pane.leaf, pane.paneId) };
+      };
 
       // Fan the new node out from its caller, BEFORE the pane exists.
       //
@@ -1103,6 +1140,7 @@ const App: React.FC = () => {
         const { planAgentPlacement } = await import('./components/Canvas/agentSpawnPlacement');
         const { buildCanvasModel } = await import('./components/Canvas/canvasSelectors');
         const { setNodeGeom, setEdges } = await import('./store/slices/canvasSlice');
+        if (!current()) return;
         const state = store.getState();
         const plan = planAgentPlacement(
           buildCanvasModel(state),
@@ -1117,11 +1155,12 @@ const App: React.FC = () => {
         // not appear until the user toggles the canvas off and on — which is precisely the
         // thing Task 20's acceptance check says must not be necessary.
         const { fetchGraph } = await import('./services/canvasGraph');
-        void fetchGraph().then((graph) => { if (graph) dispatch(setEdges(graph.edges)); });
+        void fetchGraph().then((graph) => { if (graph && current()) dispatch(setEdges(graph.edges)); });
       }
 
       // `store` is the file-scoped Redux store import (the same instance as
       // window.__REDUX_STORE__) — always defined, so no local alias/shadow.
+      if (!current()) return;
       const activateOnApiCreate = !!store.getState()?.settings?.activateTabOnApiCreate;
       const tabCount = store.getState()?.tabs?.tabs?.length ?? 0;
 
@@ -1139,6 +1178,15 @@ const App: React.FC = () => {
       // "not my window", so a not-yet-cleared payload can still win. Inheritance
       // is a one-time copy either way: the new tab keeps whatever it is given.
       const titleColorForTerminal = (id?: string) => terminalTitleColor(store.getState(), id);
+      // Colour a SPLIT pane must wear to match the agent that asked for it. Omitted when the
+      // tab already wears that colour (the pane falls back to it) so no redundant pane-level
+      // colour is pinned; omitted when there is no caller colour so the split target's applies.
+      const splitTitleColor = (splitTabId?: string): string | undefined => {
+        const c = titleColorForTerminal(options.parentTerminalId) || options.parentTitleColor || undefined;
+        if (!c) return undefined;
+        const tabColor = store.getState().tabs.tabs.find((t: any) => t.id === splitTabId)?.titleColor;
+        return c === tabColor ? undefined : c;
+      };
 
       if (terminalId && !paneId && (!tabId || !tabExists(tabId))) {
         // Mode 0: Create a NEW tab for a backend-spawned terminal that has no
@@ -1153,6 +1201,7 @@ const App: React.FC = () => {
         const { setActiveTab } = await import('./store/slices/tabsSlice');
         const { addTabTree, setActiveTabId } = await import('./store/slices/panesSlice');
 
+        if (!current()) return;
         runApiCreateMode0(options, {
           dispatch,
           generateId,
@@ -1222,6 +1271,7 @@ const App: React.FC = () => {
 
         // Add the pane to the target tab directly — never activate it.
         const { splitPaneInTab } = await import('./store/slices/panesSlice');
+        if (!current()) return;
         dispatch(splitPaneInTab({
           tabId: tabId,
           paneId: paneId,
@@ -1229,12 +1279,16 @@ const App: React.FC = () => {
           shellType: profile || defaultProfile || 'cmd',
           name: name,
           terminalId: leafId, // the tm- leaf the backend minted
+          apiCreated: true, // plan 048 — Canvas Mode's Main only filter
+          titleColor: splitTitleColor(tabId),
         }));
 
+        captureInstalled(tabId, leafId);
         // The new terminal will be created automatically by TerminalPane
         // Wait for it to be created
         await new Promise(resolve => setTimeout(resolve, 1000));
 
+        if (!current()) return;
         // Find the newly created terminal. Read the updated tree for THIS tab
         // from the authoritative per-tab store, and keep window.tabPanes in sync.
         const paneTree = store?.getState()?.panes?.treesByTabId?.[tabId] ?? null;
@@ -1243,30 +1297,9 @@ const App: React.FC = () => {
           (window as any).tabPanes[tabId] = paneTree;
         }
 
-        // Find the newest terminal pane (the one that wasn't in the tree before)
-        let newestTerminalId: string | null = null;
-        let newestPaneId: string | null = null;
-
-        const findNewestTerminal = (node: any) => {
-          if (node.type === 'terminal' && node.terminalId) {
-            if (!existingTerminalIds.has(node.terminalId)) {
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-              return;
-            }
-            if (!newestTerminalId) {
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-            }
-          }
-          if (node.children) {
-            node.children.forEach(findNewestTerminal);
-          }
-        };
-
-        if (paneTree) {
-          findNewestTerminal(paneTree);
-        }
+        // A concurrent split is not the subject of this request.
+        const newestTerminalId = installed?.leaf;
+        const newestPaneId = installed?.paneId;
 
         const terminalService = (window as any).terminalService;
         let processId = newestTerminalId ? terminalService?.getProcessId(newestTerminalId) : null;
@@ -1292,7 +1325,7 @@ const App: React.FC = () => {
         }
 
         // Send confirmation back - only include process ID if we actually have one
-        if (window.electronAPI) {
+        if (current() && window.electronAPI) {
           const response: any = {
             terminalId: newestTerminalId || 'unknown',
             tabId: tabId,
@@ -1364,21 +1397,25 @@ const App: React.FC = () => {
           // Seed a single terminal in THIS tab without activating it.
           const { splitPaneInTab } = await import('./store/slices/panesSlice');
           const newTerminalId = leafId || generateId('tm');
+          if (!current()) return;
           dispatch(splitPaneInTab({
             tabId: tabId,
             direction: direction || 'vertical',
             shellType: profile || tab.shellType || defaultProfile || 'cmd',
             name: name || tab.title,
             terminalId: newTerminalId,
+            apiCreated: true, // plan 048
+            titleColor: splitTitleColor(tabId),
           }));
 
+          captureInstalled(tabId, newTerminalId);
           // Mirror to the legacy window map for persistence/readers.
           const seededTree = store?.getState()?.panes?.treesByTabId?.[tabId] ?? null;
           if (seededTree) {
             if (!(window as any).tabPanes) (window as any).tabPanes = {};
             (window as any).tabPanes[tabId] = seededTree;
           }
-          const newPaneId = store?.getState()?.panes?.activePaneByTabId?.[tabId] ?? generateId('pn');
+          const newPaneId = installed?.paneId;
 
           console.log('API: Created new terminal in empty tab:', (window as any).tabPanes?.[tabId]);
 
@@ -1406,7 +1443,7 @@ const App: React.FC = () => {
           }
 
           // Send response
-          if (window.electronAPI) {
+          if (current() && window.electronAPI) {
             const response: any = {
               terminalId: newTerminalId,
               tabId: tabId,
@@ -1559,20 +1596,25 @@ const App: React.FC = () => {
 
         // Split that pane in the target tab — never activate it.
         const { splitPaneInTab } = await import('./store/slices/panesSlice');
+        if (!current()) return;
         dispatch(splitPaneInTab({
           tabId: tabId,
           paneId: targetPaneId,
           direction: autoDirection,
           shellType: profile || defaultProfile || 'cmd',
           name: name,
-          terminalId: leafId // the leaf the backend minted for this pane
+          terminalId: leafId, // the leaf the backend minted for this pane
+          apiCreated: true, // plan 048
+          titleColor: splitTitleColor(tabId),
         }));
 
+        captureInstalled(tabId, leafId);
         console.log('API: Dispatched splitPaneInTab action');
 
         // Wait for the pane tree to update in Redux
         await new Promise(resolve => setTimeout(resolve, 100));
 
+        if (!current()) return;
         // Read the updated tree for THIS tab (source of truth) and mirror it.
         const updatedTree = store.getState().panes.treesByTabId?.[tabId] ?? null;
         if (updatedTree) {
@@ -1588,20 +1630,7 @@ const App: React.FC = () => {
         // Wait for terminal creation with smart polling
         console.log('API: Waiting for terminal to be created...');
 
-        // First, find the new terminal ID from the updated pane tree
-        let expectedTerminalId: string | null = null;
-        const findNewTerminalId = (node: any) => {
-          if (node.type === 'terminal' && node.terminalId && !existingTerminalIds.has(node.terminalId)) {
-            expectedTerminalId = node.terminalId;
-          }
-          if (node.children) {
-            node.children.forEach((child: any) => findNewTerminalId(child));
-          }
-        };
-
-        if (updatedTree) {
-          findNewTerminalId(updatedTree);
-        }
+        const expectedTerminalId = installed?.leaf;
 
         // Poll for the terminal to be created (max 2 seconds)
         const terminalSvc = (window as any).terminalService;
@@ -1633,36 +1662,8 @@ const App: React.FC = () => {
           console.log('API: Terminal service terminals:', Object.keys(terminalServiceState.terminals || {}));
         }
 
-        // Find the newly created terminal
-        let newestTerminalId: string | null = null;
-        let newestPaneId: string | null = null;
-
-        const findNewestTerminal = (node: any) => {
-          console.log('API: Checking node:', node);
-          if (node.type === 'terminal' && node.terminalId) {
-            console.log(`API: Found terminal node with ID: ${node.terminalId}`);
-            if (!existingTerminalIds.has(node.terminalId)) {
-              console.log(`API: Identified new terminal ID: ${node.terminalId}`);
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-              return;
-            }
-            if (!newestTerminalId) {
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-            }
-          }
-          if (node.children) {
-            node.children.forEach((child: any) => findNewestTerminal(child));
-          }
-        };
-
-        // Use the Redux pane tree to find the newest terminal
-        if (finalPaneTree) {
-          findNewestTerminal(finalPaneTree);
-        } else {
-          console.log('API: WARNING - No pane tree found after split!');
-        }
+        const newestTerminalId = installed?.leaf;
+        const newestPaneId = installed?.paneId;
 
         console.log('API: Found newest terminal:', newestTerminalId, 'in pane:', newestPaneId);
 
@@ -1706,7 +1707,7 @@ const App: React.FC = () => {
         console.log('API: Terminal process ID:', processId);
 
         // Send response - only include process ID if we actually have one
-        if (window.electronAPI) {
+        if (current() && window.electronAPI) {
           const response: any = {
             terminalId: newestTerminalId || 'unknown',
             tabId: tabId,
@@ -1753,21 +1754,15 @@ const App: React.FC = () => {
         }
 
         const newPaneId = generateId('pn');
-        const paneTree = {
-          id: newPaneId,
-          type: 'terminal' as const,
-          terminalId: newTabId,
-          name: name || 'API Terminal', // Add name to the pane
-          shellType: profile || defaultProfile || 'cmd' // Include shell type
-        };
-
-        (window as any).tabPanes[newTabId] = paneTree;
+        const paneTree = buildApiFallbackPane(newPaneId, newTabId, name, profile || defaultProfile || 'cmd');
 
         // Seed the authoritative per-tab tree and add the tab. Default: do NOT
         // steal focus (same rule as Mode 0). Activate only when the user opted in
         // or there is no tab at all.
         const { setActiveTab } = await import('./store/slices/tabsSlice');
         const { addTabTree, setActiveTabId } = await import('./store/slices/panesSlice');
+        if (!current()) return;
+        (window as any).tabPanes[newTabId] = paneTree;
         const shouldActivate = activateOnApiCreate || tabCount === 0;
         dispatch(addTab({ ...newTab, isActive: shouldActivate }));
         dispatch(addTabTree({ tabId: newTabId, tree: paneTree }));
@@ -1776,6 +1771,7 @@ const App: React.FC = () => {
           dispatch(setActiveTabId(newTabId));
         }
 
+        captureInstalled(newTabId, newTabId);
         // Wait for terminal to be created
         await new Promise(resolve => setTimeout(resolve, 500));
 
@@ -1784,7 +1780,7 @@ const App: React.FC = () => {
         const processId = terminalService?.getProcessId(newTabId);
 
         // Send confirmation back to main process
-        if (window.electronAPI) {
+        if (current() && window.electronAPI) {
           window.electronAPI.sendToMain('api:terminalTabCreated', {
             terminalId: newTabId,
             processId: processId || null,
@@ -1871,23 +1867,29 @@ const App: React.FC = () => {
     }
   };
 
+  useEffect(() => installInputBroadcast(store), []);
+
   return (
     <div className="app">
-      <PaneDragProvider>
-        <TitleBar />
-        <div className="app-body">
-          {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
-              by TerminalContainer alongside every other tab — see services/openCanvas.ts
-              and backlog/007 §4. */}
-          <TerminalContainer />
-        </div>
-      </PaneDragProvider>
+      <SshConnectionsDialogHost>
+        <PaneDragProvider>
+          <TitleBar />
+          <BroadcastOverlay />
+          <div className="app-body">
+            {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
+                by TerminalContainer alongside every other tab — see services/openCanvas.ts
+                and backlog/007 §4. */}
+            <TerminalContainer />
+          </div>
+        </PaneDragProvider>
+      </SshConnectionsDialogHost>
       <LayoutManager />
       <GlobalDialog />
       <ToastContainer />
       {/* App-level incoming-pairing consent dialog — reachable even when Settings
           is closed (the tray/background scenario peering targets). */}
       <GlobalPeerRequests />
+      <GlobalHostNotices />
 
       {/* First-run EULA acceptance gate (renders only until accepted). */}
       <EulaAcceptModal />

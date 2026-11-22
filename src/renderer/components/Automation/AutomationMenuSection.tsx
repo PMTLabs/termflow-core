@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
     getArmedAutomations,
     getAutomationOrigin,
@@ -18,6 +18,7 @@ import { blankDraft } from '../Settings/Automations/automationTemplates';
 // `PaneContextMenu` or `CanvasNodeMenu` with it. That is why the dwell lives in `hooks/` at all.
 import { useTooltipDwell } from '../../hooks/useTooltipDwell';
 import { AUTOMATION_GLYPH, armedEntryViews, armedMenuLabel } from './automationArmedSummary';
+import { SubmenuFlyoutHost } from '../UI/SubmenuFlyoutHost';
 import './automationSurfaces.css';
 // Type-only, so no part of `Terminal/ContextMenu` — least of all its stylesheet — is pulled into
 // `PaneContextMenu` or `CanvasNodeMenu`, which import this module for the component above and have
@@ -197,6 +198,16 @@ async function addTerminalToRule(
     void refreshAutomationArmed();
 }
 
+export interface AutomationFlyoutControl {
+    open: boolean;
+    onTriggerEnter: () => void;
+    onTriggerClick: () => void;
+    onHostEnter: () => void;
+    onHostLeave: () => void;
+    openDelayMs: number;
+    closeDelayMs: number;
+}
+
 /**
  * The `Automation ▸` section of a terminal's context menu (`plan/028` item D; extended by Tam's
  * follow-up: *"Update the terminal right-click context menu so that Automation is always
@@ -209,6 +220,9 @@ async function addTerminalToRule(
  * imports `PaneContextMenu.css`, so `context-menu-item`, `context-menu-expand-arrow` and
  * `context-menu-subpanel` all mean the same thing in both hosts — the two menus already share their
  * markup vocabulary, and this section just uses it.
+ *
+ * **Update:** `PaneContextMenu` now passes `flyout` and gets a hover flyout like its other
+ * submenus; only `CanvasNodeMenu` still renders the accordion described next.
  *
  * **An accordion in THESE two hosts, a hover flyout in the terminal's own menu.** The app has two
  * menu systems and they answer "a section with children" differently. `PaneContextMenu` and
@@ -260,12 +274,40 @@ export const AutomationMenuSection: React.FC<{
      * host ran backwards for a round with a green suite.
      */
     onDismiss: () => void;
-}> = ({ terminalId, onDismiss }) => {
+    /**
+     * When given, the section is a hover FLYOUT instead of an accordion: `PaneContextMenu` passes
+     * it so all of its submenus behave like the tab menu's. The host owns the single-slot open
+     * state and the hover timers (they must agree with its sibling flyouts), so they arrive as
+     * callbacks. `openDelayMs` / `closeDelayMs` are its debounce and grace, passed in rather than
+     * imported because this module deliberately takes only a TYPE from `Terminal/ContextMenu`.
+     * The nested "Add to an existing automation" list is a second flyout whose open state is local.
+     * Omitted (the Canvas node menu), the section stays the accordion it always was.
+     */
+    flyout?: AutomationFlyoutControl;
+}> = ({ terminalId, onDismiss, flyout }) => {
     const [expanded, setExpanded] = useState(false);
     // A second, nested toggle for "Add to an existing automation" — this host has no folder/flyout
     // machinery, so the list it would otherwise open in a submenu is a second collapsible level of
     // the same accordion instead.
     const [addExpanded, setAddExpanded] = useState(false);
+    // The flyout form's nested list: local open state with the host's own delays.
+    const [addOpen, setAddOpen] = useState(false);
+    const addOpenTimer = useRef<number | null>(null);
+    const addCloseTimer = useRef<number | null>(null);
+    const clearAddTimers = useCallback(() => {
+        if (addOpenTimer.current !== null) window.clearTimeout(addOpenTimer.current);
+        if (addCloseTimer.current !== null) window.clearTimeout(addCloseTimer.current);
+        addOpenTimer.current = null;
+        addCloseTimer.current = null;
+    }, []);
+    const flyoutOpen = flyout?.open ?? false;
+    useEffect(() => {
+        if (!flyoutOpen) {
+            clearAddTimers();
+            setAddOpen(false);
+        }
+    }, [flyoutOpen, clearAddTimers]);
+    useEffect(() => clearAddTimers, [clearAddTimers]);
     // LIVE rather than read once when the menu opened: a rule can be switched on, complete, or stop
     // matching this terminal while the menu is up, and a row that outlives its rule opens an editor
     // on something the engine has already dropped. Same reasoning as `useSurfaceChromeAvailable`
@@ -321,98 +363,189 @@ export const AutomationMenuSection: React.FC<{
         onBlur: () => tip.onBlur(key),
     });
 
-    return (
+    // An armed row also retires a nested flyout the pointer has left behind.
+    const armedRowTip = (key: string, title: string) => {
+        const t = rowTip(key, title);
+        return { ...t, onMouseEnter: () => { scheduleAddClose(); t.onMouseEnter(); } };
+    };
+
+    // A row that is not the nested parent retires a nested flyout that is open or about to open.
+    const scheduleAddClose = () => {
+        if (!flyout) return;
+        clearAddTimers();
+        addCloseTimer.current = window.setTimeout(() => {
+            addCloseTimer.current = null;
+            setAddOpen(false);
+        }, flyout.closeDelayMs);
+    };
+    const scheduleAddOpen = () => {
+        if (!flyout) return;
+        clearAddTimers();
+        if (addOpen) return;
+        addOpenTimer.current = window.setTimeout(() => {
+            addOpenTimer.current = null;
+            setAddOpen(true);
+        }, flyout.openDelayMs);
+    };
+
+    const addList = (
         <>
+            {addable.length === 0 && (
+                <div className="au-menu-empty">{NO_PINNED_RULES_MESSAGE}</div>
+            )}
+            {addable.map((rule) => (
+                <button
+                    type="button"
+                    key={rule.id}
+                    className="context-menu-item au-menu-rule"
+                    onClick={() => {
+                        onDismiss();
+                        void addTerminalToRule(rule.id, terminalId, rule.name);
+                    }}
+                    {...rowTip(`add-${rule.id}`, `Add this terminal to “${rule.name}”`)}
+                >
+                    {/* Same head wrapper as an armed row above, for the same
+                        column-layout reason — and the same icon, because these are
+                        the same kind of thing: a rule, offered by name. */}
+                    <span className="au-menu-rule-head">
+                        <span className="menu-icon">{AUTOMATION_GLYPH}</span>
+                        <span className="au-menu-rule-name">{rule.name}</span>
+                    </span>
+                </button>
+            ))}
+        </>
+    );
+
+    const addSection = flyout ? (
+        <SubmenuFlyoutHost
+            open={addOpen}
+            onMouseEnter={() => {
+                if (addCloseTimer.current !== null) {
+                    window.clearTimeout(addCloseTimer.current);
+                    addCloseTimer.current = null;
+                }
+            }}
+            onMouseLeave={scheduleAddClose}
+            trigger={
+                <button
+                    type="button"
+                    className={`context-menu-item au-menu-action${addOpen ? ' is-submenu-open' : ''}`}
+                    onMouseEnter={scheduleAddOpen}
+                    onClick={() => {
+                        clearAddTimers();
+                        setAddOpen(true);
+                    }}
+                    aria-expanded={addOpen}
+                >
+                    <span className="menu-icon">📌</span>
+                    {ADD_TO_EXISTING_LABEL}
+                    <span className="context-menu-expand-arrow">▸</span>
+                </button>
+            }
+        >
+            {addList}
+        </SubmenuFlyoutHost>
+    ) : (
+        <>
+            <button
+                type="button"
+                className="context-menu-item au-menu-action"
+                onClick={() => setAddExpanded((v) => !v)}
+                aria-expanded={addExpanded}
+            >
+                <span className="menu-icon">📌</span>
+                {ADD_TO_EXISTING_LABEL}
+                <span className="context-menu-expand-arrow">{addExpanded ? '▾' : '▸'}</span>
+            </button>
+            {addExpanded && <div className="context-menu-subpanel">{addList}</div>}
+        </>
+    );
+
+    const body = (
+        <>
+            {views.length === 0 && (
+                <div className="au-menu-empty">No automation is armed on this terminal.</div>
+            )}
+            {views.map((view) => (
+                <button
+                    type="button"
+                    key={view.ruleId}
+                    className="context-menu-item au-menu-rule"
+                    onClick={() => {
+                        onDismiss();
+                        openAutomationEditorFor(view.ruleId);
+                    }}
+                    {...armedRowTip(`armed-${view.ruleId}`, `Edit “${view.name}”`)}
+                >
+                    {/* The icon and the name share a LINE, which is why they are wrapped:
+                        `.au-menu-rule` is `flex-direction: column` so that a rule can be a
+                        name over its state, and an icon dropped in as a third child of that
+                        would stack on top of the name rather than sit before it. The state
+                        line is indented to match by the stylesheet, so the two lines read
+                        as one row. */}
+                    <span className="au-menu-rule-head">
+                        <span className="menu-icon">{AUTOMATION_GLYPH}</span>
+                        <span className="au-menu-rule-name">{view.name}</span>
+                    </span>
+                    <span className="au-menu-rule-state">{view.stateLabel}</span>
+                </button>
+            ))}
             <div className="context-menu-divider" />
             <button
                 type="button"
-                className="context-menu-item"
-                onClick={() => setExpanded((v) => !v)}
-                aria-expanded={expanded}
+                className="context-menu-item au-menu-action"
+                onMouseEnter={scheduleAddClose}
+                onClick={() => {
+                    onDismiss();
+                    openAutomationEditorForDraft(newDraftFor(terminalId));
+                }}
             >
-                <span className="menu-icon">{AUTOMATION_GLYPH}</span>
-                {armedMenuLabel(views.length)}
-                <span className="context-menu-expand-arrow">{expanded ? '▾' : '▸'}</span>
+                <span className="menu-icon">➕</span>
+                {newAutomationLabel(terminalId)}
             </button>
-            {expanded && (
-                <div className="context-menu-subpanel">
-                    {views.length === 0 && (
-                        <div className="au-menu-empty">No automation is armed on this terminal.</div>
-                    )}
-                    {views.map((view) => (
+            {addSection}
+        </>
+    );
+
+    return (
+        <>
+            <div className="context-menu-divider" />
+            {flyout ? (
+                <SubmenuFlyoutHost
+                    open={flyout.open}
+                    panelClassName="submenu-flyout-panel--automation"
+                    onMouseEnter={flyout.onHostEnter}
+                    onMouseLeave={flyout.onHostLeave}
+                    trigger={
                         <button
                             type="button"
-                            key={view.ruleId}
-                            className="context-menu-item au-menu-rule"
-                            onClick={() => {
-                                onDismiss();
-                                openAutomationEditorFor(view.ruleId);
-                            }}
-                            {...rowTip(`armed-${view.ruleId}`, `Edit “${view.name}”`)}
+                            className={`context-menu-item${flyout.open ? ' is-submenu-open' : ''}`}
+                            onMouseEnter={flyout.onTriggerEnter}
+                            onClick={flyout.onTriggerClick}
+                            aria-expanded={flyout.open}
                         >
-                            {/* The icon and the name share a LINE, which is why they are wrapped:
-                                `.au-menu-rule` is `flex-direction: column` so that a rule can be a
-                                name over its state, and an icon dropped in as a third child of that
-                                would stack on top of the name rather than sit before it. The state
-                                line is indented to match by the stylesheet, so the two lines read
-                                as one row. */}
-                            <span className="au-menu-rule-head">
-                                <span className="menu-icon">{AUTOMATION_GLYPH}</span>
-                                <span className="au-menu-rule-name">{view.name}</span>
-                            </span>
-                            <span className="au-menu-rule-state">{view.stateLabel}</span>
+                            <span className="menu-icon">{AUTOMATION_GLYPH}</span>
+                            {armedMenuLabel(views.length)}
+                            <span className="context-menu-expand-arrow">▸</span>
                         </button>
-                    ))}
-                    <div className="context-menu-divider" />
+                    }
+                >
+                    {body}
+                </SubmenuFlyoutHost>
+            ) : (
+                <>
                     <button
                         type="button"
-                        className="context-menu-item au-menu-action"
-                        onClick={() => {
-                            onDismiss();
-                            openAutomationEditorForDraft(newDraftFor(terminalId));
-                        }}
+                        className="context-menu-item"
+                        onClick={() => setExpanded((v) => !v)}
+                        aria-expanded={expanded}
                     >
-                        <span className="menu-icon">➕</span>
-                        {newAutomationLabel(terminalId)}
+                        <span className="menu-icon">{AUTOMATION_GLYPH}</span>
+                        {armedMenuLabel(views.length)}
+                        <span className="context-menu-expand-arrow">{expanded ? '▾' : '▸'}</span>
                     </button>
-                    <button
-                        type="button"
-                        className="context-menu-item au-menu-action"
-                        onClick={() => setAddExpanded((v) => !v)}
-                        aria-expanded={addExpanded}
-                    >
-                        <span className="menu-icon">📌</span>
-                        {ADD_TO_EXISTING_LABEL}
-                        <span className="context-menu-expand-arrow">{addExpanded ? '▾' : '▸'}</span>
-                    </button>
-                    {addExpanded && (
-                        <div className="context-menu-subpanel">
-                            {addable.length === 0 && (
-                                <div className="au-menu-empty">{NO_PINNED_RULES_MESSAGE}</div>
-                            )}
-                            {addable.map((rule) => (
-                                <button
-                                    type="button"
-                                    key={rule.id}
-                                    className="context-menu-item au-menu-rule"
-                                    onClick={() => {
-                                        onDismiss();
-                                        void addTerminalToRule(rule.id, terminalId, rule.name);
-                                    }}
-                                    {...rowTip(`add-${rule.id}`, `Add this terminal to “${rule.name}”`)}
-                                >
-                                    {/* Same head wrapper as an armed row above, for the same
-                                        column-layout reason — and the same icon, because these are
-                                        the same kind of thing: a rule, offered by name. */}
-                                    <span className="au-menu-rule-head">
-                                        <span className="menu-icon">{AUTOMATION_GLYPH}</span>
-                                        <span className="au-menu-rule-name">{rule.name}</span>
-                                    </span>
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
+                    {expanded && <div className="context-menu-subpanel">{body}</div>}
+                </>
             )}
         </>
     );

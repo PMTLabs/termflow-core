@@ -28,6 +28,8 @@ pub(super) fn graph() -> AutomationGraph {
             submit: true,
             cli_type: "claude".to_string(),
             substitute: false,
+            masked: false,
+            message_cipher: None,
         }),
         webhook: None,
     }

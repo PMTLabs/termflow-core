@@ -49,6 +49,11 @@ pub trait TerminalWriter: Send + Sync {
     /// treats all reasons alike (§10.8: a closed terminal and a failed write produce the same one log
     /// entry and the same arm-state rollback), so the error deliberately has no variants to match on.
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String>;
+    /// Multi-write submissions retain this lease across awaits; ordinary test ports need none.
+    fn input_lease(&self, _pc: &str) -> Result<Option<crate::pty_manager::input_gate::InputLease>, String> { Ok(None) }
+    fn write_leased(&self, pc: &str, bytes: &[u8], _lease: Option<&crate::pty_manager::input_gate::InputLease>) -> Result<(), String> {
+        self.write(pc, bytes)
+    }
 }
 
 /// The two strings that submit a prompt: an optional `separator` written first, then the
@@ -131,13 +136,22 @@ pub async fn deliver(
     message: &str,
     submit: bool,
 ) -> Result<(), String> {
+    let lease = writer.input_lease(pc)?;
+    deliver_leased(writer, pc, cli_type, pattern, message, submit, lease.as_ref()).await
+}
+
+pub async fn deliver_leased(
+    writer: &dyn TerminalWriter, pc: &str, cli_type: &str,
+    pattern: SubmitPattern<'_>, message: &str, submit: bool,
+    lease: Option<&crate::pty_manager::input_gate::InputLease>,
+) -> Result<(), String> {
     if !message.is_empty() {
         let inner = message.replace("\r\n", "\r").replace('\n', "\r");
-        writer.write(pc, format!("\x1b[200~{}\x1b[201~", inner).as_bytes())?;
+        writer.write_leased(pc, format!("\x1b[200~{}\x1b[201~", inner).as_bytes(), lease)?;
         tokio::time::sleep(Duration::from_millis(PASTE_SUBMIT_GAP_MS)).await;
     }
 
-    let _ = writer.write(pc, b"\x1b[I");
+    preserve_gate_refusal(writer.write_leased(pc, b"\x1b[I", lease))?;
 
     if !submit {
         return Ok(());
@@ -153,15 +167,24 @@ pub async fn deliver(
     // The difference between an agent submitting and an agent receiving a stray keystroke is one
     // `separator`, so it is pinned by a test rather than left to a reader to re-derive.
     if cli_type == "gemini" || cli_type == "claude" || cli_type == "copilot" {
-        writer.write(pc, pattern.end_indicator.as_bytes())?;
+        writer.write_leased(pc, pattern.end_indicator.as_bytes(), lease)?;
         return Ok(());
     }
 
     if !pattern.separator.is_empty() {
-        let _ = writer.write(pc, pattern.separator.as_bytes());
+        preserve_gate_refusal(writer.write_leased(pc, pattern.separator.as_bytes(), lease))?;
     }
-    writer.write(pc, pattern.end_indicator.as_bytes())?;
+    writer.write_leased(pc, pattern.end_indicator.as_bytes(), lease)?;
     Ok(())
+}
+
+// Preserve legacy best-effort I/O semantics for focus/separator, but never swallow an
+// input-admission refusal and send a delayed Enter into a successor SSH attempt.
+fn preserve_gate_refusal(result: Result<(), String>) -> Result<(), String> {
+    match result {
+        Err(e) if e.starts_with("InputLocked:") || e.starts_with("StaleAttempt:") => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// The one production implementation of the port.
@@ -180,22 +203,22 @@ pub async fn deliver(
 /// cannot log `failed` and roll an arm state back on a send it was told succeeded.
 impl<R: tauri::Runtime> TerminalWriter for crate::state::AppState<R> {
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
-        use std::io::Write as _;
-        // Local writer first, matching the order `send_prompt_to_terminal` used. Clone the Arc out so
-        // the shard guard is released before the inner Mutex is locked.
-        let local = self.shell_writer_channels.get(pc).map(|r| r.clone());
-        if let Some(wm) = local {
-            let mut writer = wm
-                .lock()
-                .map_err(|_| "terminal writer mutex poisoned".to_string())?;
-            writer.write_all(bytes).map_err(|e| e.to_string())?;
-            let _ = writer.flush();
-            return Ok(());
+        self.write_leased(pc, bytes, None)
+    }
+    fn input_lease(&self, pc: &str) -> Result<Option<crate::pty_manager::input_gate::InputLease>, String> {
+        self.host_table.keys().input_lease(pc).map(Some).map_err(|e| {
+            if e == crate::pty_manager::input_gate::Refusal::NotFound {
+                format!("terminal {} has no writer", pc)
+            } else { e.to_string() }
+        })
+    }
+    fn write_leased(&self, pc: &str, bytes: &[u8], lease: Option<&crate::pty_manager::input_gate::InputLease>) -> Result<(), String> {
+        if crate::state::ingress::registered_target(self.host_table.keys(), pc).is_none() {
+            return Err(format!("terminal {} has no writer", pc));
         }
-        if self.host_write(pc, bytes) {
-            return Ok(());
-        }
-        Err(format!("terminal {} has no writer", pc))
+        crate::pty_manager::input_gate::write_input(self, pc,
+            crate::pty_manager::input_gate::InputSource::Automation, lease, bytes)
+            .map_err(|e| e.message)
     }
 }
 

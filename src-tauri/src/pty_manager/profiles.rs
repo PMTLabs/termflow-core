@@ -17,6 +17,13 @@ pub struct ShellProfile {
     pub is_default: bool,
     #[serde(default)]
     pub is_custom: bool,
+    /// True only for an auto-detected WSL distro profile (plan 045). A
+    /// custom user profile that happens to launch `wsl.exe` is NOT flagged —
+    /// this covers detection, not the launch target. `#[serde(default)]` so
+    /// an existing `~/.auto-terminal/profiles.json` (which predates this
+    /// field) still loads.
+    #[serde(default)]
+    pub is_wsl: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
@@ -65,78 +72,54 @@ pub fn save_custom_profiles(profiles: &[ShellProfile]) -> Result<(), String> {
     Ok(())
 }
 
-/// Decode UTF-16LE output from Windows commands (like wsl.exe)
-#[cfg(target_os = "windows")]
-fn decode_utf16le_output(bytes: &[u8]) -> String {
-    // Windows wsl.exe outputs UTF-16LE with BOM
-    // Convert pairs of bytes to u16 values, then to String
-    if bytes.len() < 2 {
-        return String::new();
-    }
-
-    // Skip BOM if present (0xFF 0xFE)
-    let start = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        2
-    } else {
-        0
-    };
-
-    let u16_values: Vec<u16> = bytes[start..]
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect();
-
-    String::from_utf16_lossy(&u16_values)
-}
-
-/// Detect WSL distributions on Windows
+/// Detect WSL distributions on Windows via the Windows Registry.
+///
+/// Querying `wsl.exe -l -v` executes a child process and initializes the WSL hypervisor /
+/// VM subsystem, which blocks for 4–12+ seconds (especially when distributions are stopped).
+/// Reading `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` directly reads the registered
+/// distribution metadata in <1ms without launching any external processes or VMs.
 #[cfg(target_os = "windows")]
 fn detect_wsl_distributions() -> Vec<ShellProfile> {
-    use std::process::Command;
+    use windows_registry::CURRENT_USER;
 
     let mut profiles = Vec::new();
 
-    // Check if wsl.exe exists. CREATE_NO_WINDOW so this detection spawn doesn't
-    // flash a console window at startup (this fn is Windows-only).
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut cmd = Command::new("wsl.exe");
-    cmd.args(["-l", "-v"]).creation_flags(CREATE_NO_WINDOW);
-    if let Ok(output) = cmd.output() {
-        if output.status.success() {
-            // Parse WSL output - it's UTF-16LE on Windows
-            let stdout = decode_utf16le_output(&output.stdout);
+    let lxss = match CURRENT_USER.open(r"Software\Microsoft\Windows\CurrentVersion\Lxss") {
+        Ok(key) => key,
+        Err(_) => return profiles,
+    };
 
-            for line in stdout.lines().skip(1) {
-                // Skip header line
-                let line = line.trim();
-                if line.is_empty() { continue; }
+    let subkeys = match lxss.keys() {
+        Ok(keys) => keys,
+        Err(_) => return profiles,
+    };
 
-                // Parse: "* Ubuntu    Running    2" or "  Debian    Stopped    2"
-                // Note: The '*' indicates WSL's default distro, NOT the terminal's default profile
-                let line = line.trim_start_matches('*').trim();
-
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 1 {
-                    let distro_name = parts[0];
-                    let version = parts.get(2).unwrap_or(&"2");
-
-                    profiles.push(ShellProfile {
-                        id: format!("wsl-{}", distro_name.to_lowercase()),
-                        name: format!("WSL - {} (v{})", distro_name, version),
-                        path: "wsl.exe".to_string(),
-                        args: vec!["-d".to_string(), distro_name.to_string()],
-                        env: HashMap::new(),
-                        cwd: None,
-                        icon: Some("terminal-linux".to_string()),
-                        is_default: false, // WSL default != terminal default profile
-                        is_custom: false,
-                    });
+    for subkey_name in subkeys {
+        if let Ok(subkey) = lxss.open(&subkey_name) {
+            if let Ok(distro_name) = subkey.get_string("DistributionName") {
+                let distro_name = distro_name.trim();
+                if distro_name.is_empty() {
+                    continue;
                 }
+                let version = subkey.get_u32("Version").unwrap_or(2);
+
+                profiles.push(ShellProfile {
+                    id: format!("wsl-{}", distro_name.to_lowercase()),
+                    name: format!("WSL - {} (v{})", distro_name, version),
+                    path: "wsl.exe".to_string(),
+                    args: vec!["-d".to_string(), distro_name.to_string()],
+                    env: HashMap::new(),
+                    cwd: None,
+                    icon: Some("terminal-linux".to_string()),
+                    is_default: false, // WSL default != terminal default profile
+                    is_custom: false,
+                    is_wsl: true,
+                });
             }
         }
     }
-    
+
+    profiles.sort_by(|a, b| a.name.cmp(&b.name));
     profiles
 }
 
@@ -145,11 +128,68 @@ fn detect_wsl_distributions() -> Vec<ShellProfile> {
     Vec::new()
 }
 
-/// TTL for the get_available_shells() cache. Long enough to absorb the boot-time
-/// burst (profile list at boot + first tab spawn) and rapid new-tab creation;
-/// short enough that an out-of-band change to detected system shells (e.g. a WSL
-/// distro added/removed) is reflected on its own within a few seconds.
-const SHELL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+/// True when `path` names a file, including a Microsoft Store app execution
+/// alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`). An alias is a
+/// reparse point that cannot be opened as a file, so `Path::exists()` may say
+/// false for it; reading the link itself still succeeds. Directories never count.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn file_present(path: &Path) -> bool {
+    path.is_file() || fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir())
+}
+
+/// Where PowerShell 7 can live, most specific first: the MSI install under
+/// Program Files, then every PATH entry (winget/scoop/portable installs, the
+/// Store alias, `dotnet tool install -g PowerShell`), then the Store alias
+/// directory itself in case PATH was trimmed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn pwsh_candidates(
+    program_files: &[std::path::PathBuf],
+    path_var: Option<&std::ffi::OsStr>,
+    local_app_data: Option<&Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = program_files
+        .iter()
+        .map(|pf| pf.join("PowerShell").join("7").join("pwsh.exe"))
+        .collect();
+    if let Some(path_var) = path_var {
+        candidates.extend(
+            std::env::split_paths(path_var)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .map(|dir| dir.join("pwsh.exe")),
+        );
+    }
+    if let Some(local) = local_app_data {
+        candidates.push(local.join("Microsoft").join("WindowsApps").join("pwsh.exe"));
+    }
+    candidates
+}
+
+/// Locate PowerShell 7 (`pwsh.exe`). Only checks file presence — no process
+/// is spawned, so detection stays instant.
+#[cfg(target_os = "windows")]
+fn find_pwsh() -> Option<String> {
+    let mut program_files: Vec<std::path::PathBuf> = ["ProgramW6432", "ProgramFiles"]
+        .iter()
+        .filter_map(|var| std::env::var_os(var).map(std::path::PathBuf::from))
+        .collect();
+    program_files.push(std::path::PathBuf::from(r"C:\Program Files"));
+    let path_var = std::env::var_os("PATH");
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+
+    pwsh_candidates(&program_files, path_var.as_deref(), local_app_data.as_deref())
+        .into_iter()
+        .find(|p| file_present(p))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_pwsh() -> Option<String> {
+    None
+}
+
+/// TTL for the get_available_shells() cache. Long enough to absorb rapid
+/// shell queries; custom profile edits immediately call invalidate_shell_cache().
+const SHELL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Cache state: a generation counter plus the last computed entry, both behind
 /// ONE mutex so bumping the generation and clearing the entry (invalidation)
@@ -181,10 +221,10 @@ fn invalidate_shell_cache() {
 
 pub fn get_available_shells() -> Vec<ShellProfile> {
     // get_available_shells() never holds the cache lock across
-    // compute_available_shells() (which blocks on a subprocess spawn) — every
-    // caller here is an async Tauri/Axum handler calling this sync function
-    // directly, so holding a lock across the spawn would let one slow wsl.exe
-    // serialize every concurrent caller behind it instead of each only
+    // compute_available_shells() (which does blocking disk and registry I/O) —
+    // every caller here is an async Tauri/Axum handler calling this sync
+    // function directly, so holding a lock across that I/O would let one slow
+    // read serialize every concurrent caller behind it instead of each only
     // blocking its own worker, as happens today. Instead, snapshot the
     // generation while checking for a cache hit, release the lock, compute,
     // then only write back if the generation hasn't moved — an invalidation
@@ -223,19 +263,33 @@ fn compute_available_shells() -> Vec<ShellProfile> {
     let mut profiles = Vec::new();
 
     if cfg!(target_os = "windows") {
-        // 1. PowerShell (Prefer v7 if available)
-        let pwsh_7_path = r"C:\Program Files\PowerShell\7\pwsh.exe";
-        if Path::new(pwsh_7_path).exists() {
+        // 1. PowerShell (Prefer v7 if available). PowerShell 7 keeps the
+        // `powershell` id (saved defaults and tabs reference it); Windows
+        // PowerShell 5.1 is then still offered under its own id.
+        if let Some(pwsh_7_path) = find_pwsh() {
             profiles.push(ShellProfile {
                 id: "powershell".to_string(),
                 name: "PowerShell 7".to_string(),
-                path: pwsh_7_path.to_string(),
+                path: pwsh_7_path,
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
                 icon: Some("terminal-powershell".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
+            });
+            profiles.push(ShellProfile {
+                id: "windows-powershell".to_string(),
+                name: "Windows PowerShell".to_string(),
+                path: "powershell.exe".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+                icon: Some("terminal-powershell".to_string()),
+                is_default: false,
+                is_custom: false,
+                is_wsl: false,
             });
         } else {
             profiles.push(ShellProfile {
@@ -248,6 +302,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-powershell".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
             });
         }
 
@@ -262,6 +317,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
             icon: Some("terminal-cmd".to_string()),
             is_default: false,
             is_custom: false,
+            is_wsl: false,
         });
         
         // 3. Git Bash (Check multiple locations)
@@ -285,11 +341,12 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                     icon: Some("terminal-bash".to_string()),
                     is_default: false,
                     is_custom: false,
+                    is_wsl: false,
                 });
                 break;
             }
         }
-        
+
         // 4. Cygwin
         let cygwin_path = r"C:\cygwin64\bin\bash.exe";
         if Path::new(cygwin_path).exists() {
@@ -303,9 +360,10 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-bash".to_string()),
                 is_default: false,
                 is_custom: false,
+                is_wsl: false,
             });
         }
-        
+
         // 5. WSL distributions
         profiles.extend(detect_wsl_distributions());
         
@@ -325,6 +383,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-zsh".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
             });
             has_default = true;
         } else if Path::new("/usr/bin/zsh").exists() {
@@ -338,6 +397,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-zsh".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
             });
             has_default = true;
         }
@@ -357,6 +417,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                     icon: Some("terminal-bash".to_string()),
                     is_default: !has_default,
                     is_custom: false,
+                    is_wsl: false,
                 });
                 break;
             }
@@ -375,6 +436,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                     icon: Some("terminal-fish".to_string()),
                     is_default: false,
                     is_custom: false,
+                    is_wsl: false,
                 });
                 break;
             }
@@ -395,12 +457,28 @@ pub fn get_profile(profile_id: &str) -> Option<ShellProfile> {
 
 /// Add a custom profile
 pub fn add_custom_profile(mut profile: ShellProfile) -> Result<String, String> {
-    profile.is_custom = true;
-    if profile.id.is_empty() {
-        profile.id = format!("custom-{}", chrono::Utc::now().timestamp_millis());
+    profile.name = profile.name.trim().to_string();
+    profile.path = profile.path.trim().to_string();
+    if profile.name.is_empty() {
+        return Err("Profile name is required".to_string());
     }
-    
+    if profile.path.is_empty() {
+        return Err("Profile executable path is required".to_string());
+    }
+    profile.is_custom = true;
+    profile.is_wsl = false;
     let mut custom = load_custom_profiles();
+    if profile.id.is_empty() {
+        // Millisecond ids collide when two adds land together; suffix until unique.
+        let base = format!("custom-{}", chrono::Utc::now().timestamp_millis());
+        let mut id = base.clone();
+        let mut n = 1;
+        while custom.iter().any(|p| p.id == id) {
+            n += 1;
+            id = format!("{base}-{n}");
+        }
+        profile.id = id;
+    }
     custom.push(profile.clone());
     save_custom_profiles(&custom)?;
     invalidate_shell_cache();
@@ -440,4 +518,160 @@ pub fn delete_custom_profile(profile_id: &str) -> Result<(), String> {
     save_custom_profiles(&custom)?;
     invalidate_shell_cache();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_available_shells_speed() {
+        // Invalidate cache first to test uncached compute speed
+        invalidate_shell_cache();
+        let start = std::time::Instant::now();
+        let shells = get_available_shells();
+        let elapsed = start.elapsed();
+
+        // Finding shells must be practically instantaneous (< 200ms, never 4-12s)
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "get_available_shells took too long: {:?}",
+            elapsed
+        );
+        assert!(!shells.is_empty(), "expected at least one default shell profile");
+    }
+
+    #[test]
+    fn pwsh_candidates_cover_program_files_path_and_store_alias() {
+        // Built from temp_dir so the paths are absolute on every OS and hold no
+        // PATH separator (a `C:\...` literal splits at its colon on Unix).
+        let root = std::env::temp_dir().join("tf-pwsh-candidates");
+        let pf = root.join("Program Files");
+        let shims = root.join("scoop").join("shims");
+        let dotnet = root.join("dev").join(".dotnet").join("tools");
+        let path_var = std::env::join_paths([&shims, &dotnet]).unwrap();
+        let local = root.join("dev").join("AppData").join("Local");
+
+        let got = pwsh_candidates(std::slice::from_ref(&pf), Some(path_var.as_os_str()), Some(&local));
+
+        assert_eq!(
+            got,
+            vec![
+                pf.join("PowerShell").join("7").join("pwsh.exe"),
+                shims.join("pwsh.exe"),
+                dotnet.join("pwsh.exe"),
+                local.join("Microsoft").join("WindowsApps").join("pwsh.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_present_sees_files_and_rejects_missing_paths() {
+        let dir = std::env::temp_dir().join(format!("tf-pwsh-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("pwsh.exe");
+        fs::write(&exe, b"").unwrap();
+
+        let found = pwsh_candidates(&[], Some(dir.as_os_str()), None)
+            .into_iter()
+            .find(|p| file_present(p));
+        assert_eq!(found, Some(exe.clone()));
+        assert!(!file_present(&dir.join("missing.exe")));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_custom_profile_rejects_blank_name_or_path() {
+        let blank = |name: &str, path: &str| ShellProfile {
+            id: String::new(),
+            name: name.to_string(),
+            path: path.to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd: None,
+            icon: None,
+            is_default: false,
+            is_custom: true,
+            is_wsl: false,
+        };
+        assert!(add_custom_profile(blank("  ", "pwsh.exe")).is_err());
+        assert!(add_custom_profile(blank("Nu", "   ")).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn find_pwsh_matches_a_where_lookup() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+        // Live check on the build machine: if `where pwsh` finds one, so must we.
+        let where_found = std::process::Command::new("where")
+            .arg("pwsh")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if where_found {
+            let found = find_pwsh().expect("`where pwsh` found pwsh but find_pwsh() did not");
+            let found = std::path::PathBuf::from(found);
+            assert_eq!(
+                found.file_name().and_then(|f| f.to_str()).map(|f| f.to_ascii_lowercase()).as_deref(),
+                Some("pwsh.exe")
+            );
+            assert!(file_present(&found), "{} is not a file or alias", found.display());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_profiles_follow_pwsh_detection() {
+        let shells = compute_available_shells();
+        let ps = shells.iter().find(|p| p.id == "powershell").expect("powershell profile");
+        let win_ps = shells.iter().find(|p| p.id == "windows-powershell");
+        assert!(ps.is_default);
+        match find_pwsh() {
+            Some(pwsh) => {
+                assert_eq!(ps.name, "PowerShell 7");
+                assert_eq!(ps.path, pwsh);
+                let win_ps = win_ps.expect("Windows PowerShell kept beside PowerShell 7");
+                assert_eq!(win_ps.path, "powershell.exe");
+                assert!(!win_ps.is_default);
+            }
+            None => {
+                assert_eq!(ps.path, "powershell.exe");
+                assert!(win_ps.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn file_present_rejects_a_directory_named_like_the_exe() {
+        let dir = std::env::temp_dir().join(format!("tf-pwsh-dir-{}", std::process::id()));
+        let fake = dir.join("pwsh.exe");
+        fs::create_dir_all(&fake).unwrap();
+        assert!(!file_present(&fake));
+        let found = pwsh_candidates(&[], Some(dir.as_os_str()), None).into_iter().find(|p| file_present(p));
+        assert_eq!(found, None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_detect_wsl_distributions_speed() {
+        let start = std::time::Instant::now();
+        let distros = detect_wsl_distributions();
+        let elapsed = start.elapsed();
+
+        // Reading WSL distros from registry must take < 100ms, never blocking on wsl.exe (4-12s)
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "detect_wsl_distributions took {:?}, should be under 100ms",
+            elapsed
+        );
+
+        for d in &distros {
+            assert!(d.id.starts_with("wsl-"));
+            assert_eq!(d.path, "wsl.exe");
+            assert!(d.is_wsl);
+            assert!(!d.is_default);
+        }
+    }
 }

@@ -27,7 +27,7 @@ import {
 } from '../AutomationArmedBadge';
 import { AutomationMenuSection, automationMenuItems } from '../AutomationMenuSection';
 import { TOOLTIP_DWELL_MS } from '../../../hooks/useTooltipDwell';
-import { ContextMenu } from '../../Terminal/ContextMenu';
+import { ContextMenu, SUBMENU_HOVER_OPEN_DELAY_MS } from '../../Terminal/ContextMenu';
 import type { ContextMenuFlyoutRow, ContextMenuItem } from '../../Terminal/ContextMenu';
 import {
     __resetAutomationArmedForTest,
@@ -452,6 +452,11 @@ describe('the shared indicator and menu section', () => {
             parentRow.dispatchEvent(
                 new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }),
             );
+        });
+        // The hover-open debounce (design ask, 2026-09-16): a rest on the row, not a sweep past
+        // it, is what opens the panel — see `SUBMENU_HOVER_OPEN_DELAY_MS` on `ContextMenu`.
+        await act(async () => {
+            await new Promise((resolve) => { setTimeout(resolve, SUBMENU_HOVER_OPEN_DELAY_MS); });
         });
 
         // The two footer actions ("New automation…", "Add to an existing automation") now render

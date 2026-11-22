@@ -14,7 +14,11 @@ describe('hidden canvas consumers', () => {
   it('keeps hidden membership and the paintable node list memoised on the hot path', () => {
     expect(MODE).toContain('const hiddenNodeIds = useMemo(');
     expect(MODE).toContain('const paintedNodes = useMemo(');
-    expect(MODE).toContain('hiddenNodeIds.has(id)');
+    // plan 048: the wire/paint predicate reads the memoised UNPAINTED set, which is built from
+    // `paintedNodes` and so covers user-hidden AND Main-only-filtered nodes in one lookup.
+    expect(MODE).toContain('const unpaintedNodeIds = useMemo(');
+    expect(MODE).toContain('unpaintedNodeIds.has(id)');
+    expect(MODE).toContain('model.nodes.filter((n) => isNodePainted(n, revealHidden))');
     expect(MODE).not.toContain("model.nodes.find((n) => n.terminalId === id)?.hidden");
   });
 
@@ -32,7 +36,8 @@ describe('hidden canvas consumers', () => {
   });
 
   it('keeps the toolbar and its recovery action after the final node is hidden', () => {
-    expect(MODE).toContain('{!overlayId && (model.groups.length > 0 || hiddenCount > 0) && (');
+    // plan 048 added `apiCount`: the toolbar also stays up to offer Main only.
+    expect(MODE).toContain('{!overlayId && (model.groups.length > 0 || hiddenCount > 0 || apiCount > 0) && (');
     expect(MODE).toContain('Hidden{hiddenCount > 0 ? ` (${hiddenCount})` : \'\'}');
     expect(MODE).toContain('{!model.nodes.length && !model.groups.length && (');
   });

@@ -21,6 +21,20 @@ export interface KittyKeySnapshot {
 }
 
 /**
+ * The WHOLE negotiated state as plain data — both Kitty stacks, not just the
+ * active flags `snapshot()` hands the encoder — for carrying a session's
+ * protocol history across a boundary the live object cannot cross (a cross-window
+ * detach hands the PTY to another renderer's JS heap). An app pushes its Kitty
+ * flags once per session and never re-announces them, so a destination that
+ * starts from an empty state has no way to recover them by itself.
+ */
+export interface KeyboardProtocolStateData {
+  mainStack: number[];
+  altStack: number[];
+  modifyOtherKeys: 0 | 1 | 2;
+}
+
+/**
  * Tracks the keyboard protocols an application has enabled. Kitty flags use a
  * per-screen stack (the Kitty spec mandates independent main/alt-screen stacks);
  * modifyOtherKeys is a single per-terminal level. Pure state — no I/O.
@@ -89,6 +103,33 @@ export class KeyboardProtocolState {
 
   snapshot(): KittyKeySnapshot {
     return { kittyFlags: this.activeFlags(), modifyOtherKeys: this.modifyOtherKeysLevel };
+  }
+
+  /** Plain-data copy of the full state (see KeyboardProtocolStateData). */
+  serialize(): KeyboardProtocolStateData {
+    return {
+      mainStack: [...this.mainStack],
+      altStack: [...this.altStack],
+      modifyOtherKeys: this.modifyOtherKeysLevel,
+    };
+  }
+
+  /**
+   * Overwrite this state IN PLACE from `serialize()` output. In place, never a
+   * new instance: the engine's cache-lifetime CSI handlers and every later mount
+   * hold a reference to THIS object (see TerminalEngine.mount's adoption note).
+   * Re-applies the same bounds as the live setters, since the data crossed an IPC
+   * boundary.
+   */
+  restore(data: KeyboardProtocolStateData): void {
+    const clamp = (s: unknown): number[] =>
+      (Array.isArray(s) ? s : [])
+        .filter((f): f is number => typeof f === 'number')
+        .map((f) => f & SUPPORTED_KITTY_MASK)
+        .slice(-KITTY_STACK_LIMIT);
+    this.mainStack = clamp(data.mainStack);
+    this.altStack = clamp(data.altStack);
+    this.setModifyOtherKeys(data.modifyOtherKeys);
   }
 }
 

@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { resolveTerminalId } from "./identity.js";
+import { parseKeys } from "./keys.js";
 
 /** Minimal shape of the backend HTTP client the tools need (an AxiosInstance satisfies this). */
 export interface ApiLike {
@@ -16,6 +17,15 @@ export interface McpServerDeps {
     getCallerId: () => string | undefined;
 }
 
+// Only the two fixed admission refusals may cross from an HTTP error body. Do not
+// reflect arbitrary response text (which can include command/private-path details).
+function inputWriteError(error: unknown): string {
+    const body = (error as { response?: { data?: { error?: unknown } } } | null)?.response?.data?.error;
+    if (typeof body === "string" && body.startsWith("InputLocked:")) return "InputLocked: SSH launch is preparing";
+    if (typeof body === "string" && body.startsWith("StaleAttempt:")) return "StaleAttempt: terminal input lease expired";
+    return error instanceof Error ? error.message : String(error);
+}
+
 const ME_HINT = 'Use "me" for your own terminal, or pass an explicit id (e.g. $TERMFLOW_TERMINAL_ID).';
 
 /**
@@ -25,7 +35,7 @@ const ME_HINT = 'Use "me" for your own terminal, or pass an explicit id (e.g. $T
  */
 export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer {
     const server = new McpServer({
-        name: "auto-terminal-mcp",
+        name: "termflow-mcp",
         version: "0.2.0",
     });
 
@@ -132,8 +142,8 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 command: z.string().describe(
                     "The command string to execute. Pass an EMPTY string for a bare submit: it skips the paste and sends only the submit keystroke, which presses Enter on a composer that already holds text (use it when a TUI left your prompt sitting unsubmitted)."
                 ),
-                cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot", "codex", "opencode"]).optional().describe(
-                    "The CLI personality/keystroke pattern. Defaults to copilot if omitted. Use `codex` or `opencode` for those TUIs — they submit on a plain Enter, whereas the copilot default prefixes a Down-Arrow that navigates message history in them."
+                cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot", "codex", "opencode", "pi", "agy"]).optional().describe(
+                    "The CLI personality/keystroke pattern. Defaults to copilot if omitted. Every agent TUI listed here submits on a single Enter (CR); `default` is a shell."
                 ),
                 submissionSignal: z.string().optional().describe("Raw escape sequence to use as the submit keystroke, overriding cliType's pattern (e.g. \"\\r\"). For TUIs with no built-in pattern."),
                 useBracketedPaste: z.boolean().optional().describe("Whether to use bracketed paste mode for the prompt (more reliable for long inputs)"),
@@ -168,7 +178,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 const extras = {
                     cliType: cliType || "copilot",
                     ...(useBracketedPaste !== undefined && { useBracketedPaste }),
-                    ...(submissionSignal !== undefined && { submissionSignal }),
+                    ...(submissionSignal !== undefined && { submissionSignal: parseKeys(submissionSignal) }),
                 };
                 if (Array.isArray(terminalId)) {
                     const resolved = [...new Set(terminalId.map((t) => resolveTerminalId(t, getCallerId())))];
@@ -195,7 +205,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
+                const msg = inputWriteError(error);
                 return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
             }
         }
@@ -208,19 +218,20 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         "send_keys",
         {
             description:
-                "Write raw bytes/escape sequences straight to a terminal's PTY — no paste wrapper, no submit keystroke appended. Use for keys rather than text: Enter \"\\r\", Ctrl+C \"\\u0003\", Esc \"\\u001b\", Up \"\\u001b[A\", Down \"\\u001b[B\". Prefer execute_command for sending a prompt; use this to submit a composer a TUI left unsubmitted, or to answer an interactive y/n prompt.",
+                "Write raw bytes or keystroke escape sequences straight to a terminal's PTY — no paste wrapper, no submit keystroke appended. Supports escape sequences (e.g. \"\\r\" for Enter, \"\\u0003\" or \"\\x03\" for Ctrl+C, \"\\u0015\" or \"\\x15\" for Ctrl+U, \"\\u001b\" or \"\\e\" for Esc, \"\\u001b[A\" for Up, \"\\u001b[B\" for Down), caret notation (\"^C\", \"^U\"), and named keys (\"Enter\", \"Ctrl+C\", \"Ctrl+U\", \"Esc\", \"Up\", \"Down\"). Prefer execute_command for sending a prompt; use this to submit a composer a TUI left unsubmitted, or to answer an interactive y/n prompt.",
             inputSchema: {
                 terminalId: z.string().describe(`The ID of the terminal to write to. ${ME_HINT}`),
-                keys: z.string().describe("Raw bytes to write, verbatim. Sent exactly as given — nothing is appended."),
+                keys: z.string().describe("Keystroke(s) or escape sequences to write. Supports escape strings (\"\\r\", \"\\u0015\", \"\\x15\", \"\\u001b[A\"), named keys (\"Ctrl+U\", \"Ctrl+C\", \"Enter\", \"Esc\"), caret notation (\"^U\", \"^C\"), or raw bytes. Must not be empty."),
             },
         },
         async ({ terminalId, keys }) => {
             try {
+                const parsed = parseKeys(keys);
                 const id = resolveTerminalId(terminalId, getCallerId());
-                const response = await api.post(`/terminals/${id}/input`, { data: keys });
+                const response = await api.post(`/terminals/${id}/input`, { data: parsed });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
+                const msg = inputWriteError(error);
                 return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
             }
         }

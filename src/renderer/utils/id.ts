@@ -1,4 +1,4 @@
-export const generateId = (prefix: 'tb' | 'pn' | 'tm' | 'pc'): string => {
+export const generateId = (prefix: 'tb' | 'pn' | 'tm'): string => {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
   for (let i = 0; i < 9; i++) {

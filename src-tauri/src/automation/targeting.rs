@@ -528,6 +528,8 @@ mod tests {
                     submit: true,
                     cli_type: "default".into(),
                     substitute: false,
+            masked: false,
+            message_cipher: None,
                 }),
                 webhook: None,
             },

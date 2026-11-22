@@ -39,8 +39,9 @@ pub(crate) async fn create_profile(Json(payload): Json<CreateProfileReq>) -> imp
         icon: payload.icon,
         is_default: false,
         is_custom: true,
+        is_wsl: false,
     };
-    
+
     match pty_manager::add_custom_profile(profile) {
         Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id, "status": "created" }))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))),
@@ -61,8 +62,9 @@ pub(crate) async fn update_profile(
         icon: payload.icon,
         is_default: false,
         is_custom: true,
+        is_wsl: false,
     };
-    
+
     match pty_manager::update_custom_profile(&id, profile) {
         Ok(()) => (StatusCode::OK, Json(json!({ "status": "updated" }))),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({ "error": e }))),

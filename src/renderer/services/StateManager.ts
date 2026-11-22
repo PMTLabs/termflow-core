@@ -1,3 +1,5 @@
+import { paneIncarnations, describePanes, accepted } from './paneIncarnations';
+import { replaceWorkspace } from './workspaceReplacement';
 import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs, updateTabMeta } from '../store/slices/tabsSlice';
@@ -8,13 +10,14 @@ import { findTabIdByTerminalId, getAllTerminalIds, findLeaf } from '../store/sli
 import { setDefaultProfile } from '../store/slices/settingsSlice';
 import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
+import { sanitizePaneSshFields, sanitizePaneTreeMapSshFields, sanitizePaneTreeSshFields } from './sshPanePersistence';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
 import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
-import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { layoutsKey, getStoredApiToken, currentProfile, isForeignInstance } from './profileScope';
 import { apiBase } from '../api/apiBase';
 import { isVirtualTab } from './tabKinds';
 // `stateKey` is deliberately NOT imported: the session key is per WINDOW now
@@ -37,6 +40,14 @@ import { setLayoutBaseline, clearLayoutBaseline } from './layoutBaseline';
 
 /** Beyond this the fit/minimap maths degenerates; finite is not the same as sane. */
 const WORLD_LIMIT = 1e6;
+
+class RestoreRegistrationError extends Error {}
+
+// Create IPC metadata is not workspace intent, even if a caller accidentally
+// includes it in a tab, pane, or imported snapshot.
+function omitInternalCreateFields(key: string, value: unknown): unknown {
+  return key === 'sshLaunchConnectionId' ? undefined : value;
+}
 
 const isRect = (r: any): boolean =>
   !!r
@@ -117,6 +128,7 @@ export function sanitizeCanvasState(
     // Off by default (plan/039 P0: must be explicitly enabled) — same fallback shape as
     // `sidebarOpen`, just the opposite default value.
     dynamicSpacing: typeof c.dynamicSpacing === 'boolean' ? c.dynamicSpacing : false,
+    mainOnly: typeof c.mainOnly === 'boolean' ? c.mainOnly : false,
   };
 }
 
@@ -180,6 +192,8 @@ export interface SavedLayout {
    *  falls back to the old single-tree behavior per tab when it is missing
    *  (an old-format layout, or one saved before this field was introduced). */
   treesByTabId?: Record<string, any>;
+  /** Legacy window mirror, accepted on import but not written by named-layout save. */
+  tabPanes?: Record<string, any>;
   /** plan/025 §2.4. Absent means 'workspace' — every layout saved before this
    *  field existed, and every ordinary (whole-workspace) save going forward,
    *  loads exactly as it always has. */
@@ -343,10 +357,11 @@ class StateManagerClass {
           sidebarZoom: state.canvas.sidebarZoom,
           hidden: state.canvas.hidden,
           dynamicSpacing: state.canvas.dynamicSpacing,
+          mainOnly: state.canvas.mainOnly,
         },
       };
 
-      localStorage.setItem(this.STATE_KEY, JSON.stringify(appState));
+      localStorage.setItem(this.STATE_KEY, JSON.stringify(appState, omitInternalCreateFields));
       console.log('State saved successfully:', {
         tabCount: appState.tabs.length,
         tabs: appState.tabs.map(t => ({ id: t.id, title: t.title })),
@@ -379,7 +394,7 @@ class StateManagerClass {
       // Leaf renames performed by sanitisation — chiefly the design-014
       // migration of a pre-014 `tb-` root leaf to a minted `tm-`.
       const leafRenames = new Map<string, string>();
-      const appState: AppState = this.sanitizeLayoutData(rawState, leafRenames);
+      const appState: AppState = this.sanitizeLayoutData(rawState, leafRenames, true);
       // Move the persisted scrollback to follow the renamed leaves, BEFORE any
       // tab, pane or reattach exists. `terminal_history` is keyed by the leaf,
       // so a pane whose leaf moved would otherwise come back blank — silently,
@@ -389,7 +404,9 @@ class StateManagerClass {
       // the OLD key and restores nothing. Failures are logged and swallowed —
       // losing one pane's scrollback is bad, but aborting restore over it would
       // leave the session unopened, which is worse.
+      const beforeMigration = this.loadGeneration;
       await this.migrateHistoryForRenamedLeaves(leafRenames);
+      if (beforeMigration !== this.loadGeneration) return false;
       console.log(`Restoring state from ${new Date(appState.timestamp).toLocaleString()}`);
       
       // Check if state is not too old (24 hours)
@@ -411,7 +428,10 @@ class StateManagerClass {
       seedRestoredCwds(appState.terminalCwds);
 
       // Clear any existing state first
+      const generation = ++this.loadGeneration;
       this.clearCurrentState(dispatch);
+      if (!await this.registerRestoringTrees(appState, () => generation === this.loadGeneration)) return false;
+      if (generation !== this.loadGeneration) return false;
 
       // Reattach to any PTYs that survived this reload BEFORE creating tabs/panes.
       // The backend (Rust) keeps PTYs alive across a renderer reload; without this,
@@ -422,7 +442,8 @@ class StateManagerClass {
       // spawning. Best-effort: any failure falls through to the normal spawn path.
       // Reads appState directly (not the global tabPanes map), so it doesn't need
       // restoreTabPanesInPlace to have run yet.
-      await this.reconcileExistingTerminals(appState);
+      await this.reconcileExistingTerminals(appState, () => generation === this.loadGeneration);
+      if (generation !== this.loadGeneration) return false;
 
       // Orphan sweep: drop persisted scrollback for any terminal no longer in a
       // saved layout (closed tabs, crashed sessions, force-kills).
@@ -445,6 +466,7 @@ class StateManagerClass {
         // Skips itself if the backend cannot say which windows are live.
         try {
           const liveIds = (await window.electronAPI?.listWindowSessionIds?.()) ?? [];
+          if (generation !== this.loadGeneration) return false;
           sweepOrphanSessions(localStorage, liveIds);
         } catch (e) {
           console.warn('StateManager: orphan session sweep skipped:', e);
@@ -461,6 +483,7 @@ class StateManagerClass {
             );
           } else {
             await window.electronAPI?.pruneTerminalHistory?.([...keep.ids]);
+            if (generation !== this.loadGeneration) return false;
           }
         } catch (e) {
           console.warn('StateManager: history prune skipped:', e);
@@ -562,8 +585,9 @@ class StateManagerClass {
       return true;
     } catch (error) {
       console.error('Failed to restore state:', error);
-      // Clear corrupted state
-      localStorage.removeItem(this.STATE_KEY);
+      // A transport failure is not corrupt saved data, so it is kept rather than deleted. Nothing
+      // offers to retry: the caller opens a default tab, and the next periodic save replaces it.
+      if (!(error instanceof RestoreRegistrationError)) localStorage.removeItem(this.STATE_KEY);
       return false;
     }
   }
@@ -584,7 +608,9 @@ class StateManagerClass {
   // already gets) and a `WorkspaceSnapshot` has no `shellProfiles` /
   // `defaultProfile` / `timestamp` to offer. The body below only ever reads
   // `.tabs` and `.tabPanes`.
-  private async reconcileExistingTerminals(appState: Pick<AppState, 'tabs' | 'tabPanes'>): Promise<void> {
+  private async reconcileExistingTerminals(appState: Pick<AppState, 'tabs' | 'tabPanes'>, isCurrent: () => boolean = () => true): Promise<void> {
+    const prepared = Object.values(appState.tabPanes || {}).flatMap(tree => describePanes(tree, true));
+    const pis = paneIncarnations.prepare(prepared);
     try {
       // Every terminalId the restore will otherwise spawn: each tab id plus
       // every terminal node in the saved pane trees. Leaf ids come in two FORMS
@@ -617,13 +643,14 @@ class StateManagerClass {
       } catch {
         return; // no API of our own to reconcile against
       }
-      const token = localStorage.getItem(apiTokenKey());
+      const token = getStoredApiToken();
       const res = await fetch(`${base}/terminals`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!res.ok) return;
 
       const data = await res.json();
+      if (!isCurrent()) return;
 
       // Owner check. Reattaching to — or worse, REAPING — another instance's
       // PTYs would kill live shells in someone else's window. The configured
@@ -657,6 +684,15 @@ class StateManagerClass {
       const orphansToClose: string[] = [];
       for (const [rendererId, candidates] of byRenderer) {
         const [keep, ...stale] = candidates;
+        if (paneIncarnations.enabled) {
+          if (!isCurrent()) return;
+          const index = prepared.findIndex(p => p.leaf === rendererId);
+          const pi = pis[index];
+          if (!pi) continue;
+          const bound = await paneIncarnations.bind(pi, keep.processId, 'reconcile');
+          if (!isCurrent()) return;
+          if (!accepted(bound) || !paneIncarnations.isCurrent(rendererId, prepared[index].paneId, pi)) continue;
+        }
         // Registers id→process AND seeds the init guards so the mount effect
         // reuses the live PTY (covers tab-root and split panes). The prompt-gate
         // seed re-arms command-suggest suppression the in-memory cache lost on
@@ -681,9 +717,9 @@ class StateManagerClass {
 
       for (const processId of orphansToClose) {
         try {
-          // electronAPI.closeTerminal takes the backend processId directly — the
-          // orphans were never in this renderer's terminalId→process map.
-          await window.electronAPI?.closeTerminal?.(processId);
+          await paneIncarnations.reap(processId, async () => {
+            await window.electronAPI?.closeTerminal?.(processId);
+          });
         } catch (e) {
           console.warn(`StateManager: failed to reap orphaned PTY ${processId}:`, e);
         }
@@ -695,6 +731,8 @@ class StateManagerClass {
       );
     } catch (e) {
       console.warn('StateManager: terminal reconciliation skipped (spawning fresh):', e);
+    } finally {
+      if (!isCurrent()) paneIncarnations.discardPrepared(pis);
     }
   }
 
@@ -772,7 +810,7 @@ class StateManagerClass {
         updatedAt: Date.now(),
       };
 
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts, omitInternalCreateFields));
 
       // plan/025 §2.5: a WORKSPACE-scope update re-captures the whole workspace
       // under this layout's name, so it becomes the new "clean" reference
@@ -912,7 +950,7 @@ class StateManagerClass {
       const existingLayouts = this.getSavedLayouts();
       existingLayouts.push(layout);
 
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(existingLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(existingLayouts, omitInternalCreateFields));
 
       // plan/025 §2.5: a WORKSPACE-scope save becomes the new "clean" reference.
       // A tab-scope save does NOT claim it — it never captured the whole
@@ -1029,7 +1067,8 @@ class StateManagerClass {
       // plus the per-tab focus/maximize/canvas restores a `SavedLayout` never
       // carries — is `populateWorkspace` (extracted verbatim from this method;
       // see its own header for the invariants it preserves).
-      this.populateWorkspace(sanitizedLayout, dispatch);
+      if (!await this.populateWorkspace(sanitizedLayout, dispatch, () => generation === this.loadGeneration)) return false;
+      if (generation !== this.loadGeneration) return false;
 
       // plan/025 §2.5: the newly loaded layout becomes the "clean" reference
       // for dirty tracking. Best-effort for the same reason as the snapshot
@@ -1046,7 +1085,7 @@ class StateManagerClass {
       // Update the layout's last used timestamp
       sanitizedLayout.updatedAt = Date.now();
       const updatedLayouts = layouts.map(l => l.id === layoutId ? sanitizedLayout : l);
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(updatedLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(updatedLayouts, omitInternalCreateFields));
 
       console.log(`Layout "${sanitizedLayout.name}" loaded successfully`);
       return true;
@@ -1054,6 +1093,25 @@ class StateManagerClass {
       console.error('Failed to load layout:', error);
       throw error;
     }
+  }
+
+  /** Register persisted leaf identities before either the mirror or Redux can mount them. */
+  private async registerRestoringTrees(
+    data: { paneTree?: any; tabPanes?: Record<string, any>; treesByTabId?: Record<string, any> },
+    isCurrent: () => boolean = () => true,
+  ): Promise<boolean> {
+    const trees = [data.paneTree, ...Object.values(data.tabPanes ?? {}), ...Object.values(data.treesByTabId ?? {})];
+    const panes = [...new Map(trees.flatMap(tree => describePanes(tree, true)).map(pane => [pane.paneId, pane])).values()];
+    if (!panes.length || !isCurrent()) return isCurrent();
+    if (!paneIncarnations.enabled) {
+      throw new RestoreRegistrationError('Restoring terminal hosts requires the desktop pane stream.');
+    }
+    const pis = paneIncarnations.prepare(panes);
+    // This FIFO barrier follows every restoring enter, before either mirror mounts.
+    const ready = await paneIncarnations.send({ kind: 'enter', panes: [] });
+    const current = () => isCurrent() && panes.every((pane, i) => paneIncarnations.isCurrent(pane.leaf, pane.paneId, pis[i]));
+    if (!current() || !accepted(ready)) paneIncarnations.discardPrepared(pis);
+    return current() && accepted(ready);
   }
 
   /**
@@ -1071,7 +1129,7 @@ class StateManagerClass {
    * the generation re-check all stay in the CALLERS (§0.3) — this method only
    * ever runs once a caller has already decided it owns the transaction.
    */
-  private populateWorkspace(
+  private async populateWorkspace(
     data: {
       tabs: any[];
       activeTabId: string | null;
@@ -1085,7 +1143,10 @@ class StateManagerClass {
       canvas?: CanvasPersisted;
     },
     dispatch: Dispatch,
-  ): void {
+    isCurrent: () => boolean,
+  ): Promise<boolean> {
+    if (!await this.registerRestoringTrees(data, isCurrent)) return false;
+    if (!isCurrent()) return false;
     // Load layout tabs. Review 109 H2: a tab must never be renderable without
     // its authoritative tree, or TerminalContainer's seed effects manufacture
     // a `terminalId: tab.id` root and can spawn a PTY the real tree later
@@ -1207,6 +1268,7 @@ class StateManagerClass {
         if (canvas) dispatch(hydrateCanvas(canvas));
       }
     }
+    return true;
   }
 
   /**
@@ -1282,7 +1344,7 @@ class StateManagerClass {
       // `TerminalService`'s map is already warm (nothing reloaded), and the
       // only way a persisted undo snapshot's ids point at anything live again
       // after one.
-      await this.reconcileExistingTerminals({ tabs: snapshot.tabs, tabPanes: snapshot.tabPanes });
+      await this.reconcileExistingTerminals({ tabs: snapshot.tabs, tabPanes: snapshot.tabPanes }, () => generation === this.loadGeneration);
 
       // The token must be re-checked after EVERY await, not just the yield.
       // This one is not a formality: `reconcileExistingTerminals` awaits
@@ -1296,7 +1358,8 @@ class StateManagerClass {
         return false;
       }
 
-      this.populateWorkspace(snapshot, dispatch);
+      if (!await this.populateWorkspace(snapshot, dispatch, () => generation === this.loadGeneration)) return false;
+      if (generation !== this.loadGeneration) return false;
 
       // Committed — only NOW is the slot spent. Reverting is not itself
       // undoable, which is why this consumes rather than leaves it.
@@ -1381,8 +1444,8 @@ class StateManagerClass {
       // leaf, deliberately. There, preserving the old key is required: the
       // pty-host has no rename verb and the session being renamed is OURS.
       // Here the id collides precisely because the session belongs to another
-      // tab's LIVE terminal — carrying the key would make this fresh spawn
-      // overwrite `session_to_process` and steal that terminal's output.
+      // tab's LIVE terminal — carrying the key would request that terminal's
+      // session rather than a genuinely new shell.
       //
       // Every re-mint is recorded in `remintedIds` because a terminal id is a
       // KEY, not just a value: `terminalCwds` is keyed by it, and seeding the
@@ -1436,14 +1499,9 @@ class StateManagerClass {
             // this id", and the whole reason we are re-minting is that some
             // OTHER tab's still-running terminal is the one the host knows by
             // it. Claiming it here is not a harmless label: the spawn path
-            // forwards `sessionKey` to `create_terminal`, and the backend's
-            // `register_host_terminal` indexes `session_to_process` with an
-            // unconditional insert — so the fresh spawn would take over the
-            // live terminal's routing key and every inbound frame for the
-            // ORIGINAL, still-visible terminal would be delivered to this new
-            // process instead. A re-minted leaf is by definition a terminal
-            // whose identity is already taken, so it must start a genuinely
-            // new session.
+            // forwards `sessionKey` to `create_terminal` as an exact restore
+            // override. A re-minted leaf is a new terminal, not an alias for
+            // another tab's session, so it must start a genuinely new shell.
             //
             // `seededForTabId` goes with it. It records which tab a leaf was
             // seeded FOR, and this leaf is being installed into `targetTabId`
@@ -1473,6 +1531,12 @@ class StateManagerClass {
           ? sanitizedLayout.treesByTabId[targetTabId]
           : sanitizedLayout.paneTree ?? undefined;
       const tree = savedTree === undefined ? undefined : remintCollisions(savedTree);
+      const generation = this.loadGeneration;
+      const isCurrent = () => generation === this.loadGeneration && !this.replacementInFlight
+        && store.getState().panes.treesByTabId === state.panes.treesByTabId
+        && store.getState().tabs.tabs === state.tabs.tabs;
+      if (!await this.registerRestoringTrees({ paneTree: tree }, isCurrent)) return false;
+      if (!isCurrent()) return false;
 
       // 3. Install the tab: patch durable fields in place if it already
       // exists — `removeTab` + `addTab` would destroy the tree the very next
@@ -1492,6 +1556,7 @@ class StateManagerClass {
             titleColor: savedTab.titleColor,
             titleIsCustom: savedTab.titleIsCustom,
             notifyMuted: savedTab.notifyMuted,
+            elevated: savedTab.elevated,
           },
         }));
       } else {
@@ -1573,7 +1638,7 @@ class StateManagerClass {
       const layouts = this.getSavedLayouts();
       const filteredLayouts = layouts.filter(l => l.id !== layoutId);
       
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(filteredLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(filteredLayouts, omitInternalCreateFields));
       console.log(`Layout deleted successfully`);
       return true;
     } catch (error) {
@@ -1600,7 +1665,7 @@ class StateManagerClass {
       }
       layouts[layoutIndex].updatedAt = Date.now();
       
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts, omitInternalCreateFields));
       console.log(`Layout renamed successfully`);
       return true;
     } catch (error) {
@@ -1664,6 +1729,8 @@ class StateManagerClass {
    * Clear current state (used before loading a layout)
    */
   private clearCurrentState(dispatch: Dispatch): void {
+    replaceWorkspace();
+    paneIncarnations.discardPrepared();
     // Clear the local tab panes mapping
     clearTabPanes();
     // Clear all tabs first
@@ -1685,7 +1752,7 @@ class StateManagerClass {
    */
   exportLayouts(): string {
     const layouts = this.getSavedLayouts();
-    return JSON.stringify(layouts, null, 2);
+    return JSON.stringify(layouts, omitInternalCreateFields, 2);
   }
 
   /**
@@ -1703,10 +1770,17 @@ class StateManagerClass {
 
       // Merge with existing layouts (avoid duplicates by ID)
       const existingIds = new Set(existingLayouts.map(l => l.id));
-      const newLayouts = validLayouts.filter(l => !existingIds.has(l.id));
+      // Clean SSH data at import, not only when the user later loads the layout.
+      // Leave legacy ID migration to load so all tree maps share its remapping.
+      const newLayouts = validLayouts.filter(l => !existingIds.has(l.id)).map(layout => ({
+        ...layout,
+        paneTree: sanitizePaneTreeSshFields(layout.paneTree),
+        tabPanes: layout.tabPanes && sanitizePaneTreeMapSshFields(layout.tabPanes),
+        treesByTabId: layout.treesByTabId && sanitizePaneTreeMapSshFields(layout.treesByTabId),
+      }));
       
       const allLayouts = [...existingLayouts, ...newLayouts];
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(allLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(allLayouts, omitInternalCreateFields));
       
       return newLayouts.length;
     } catch (error) {
@@ -1750,7 +1824,7 @@ class StateManagerClass {
     tabPanes?: { [tabId: string]: any };
     terminalCwds?: { [terminalId: string]: string };
     treesByTabId?: { [tabId: string]: any };
-  }>(data: T, renamesOut?: Map<string, string>): T {
+  }>(data: T, renamesOut?: Map<string, string>, keepElevated = false): T {
     const tabIdMap = new Map<string, string>();
     const paneIdMap = new Map<string, string>();
     const terminalIdMap = new Map<string, string>();
@@ -1764,6 +1838,7 @@ class StateManagerClass {
       }
       return {
         ...tab,
+        sshLaunchConnectionId: undefined,
         id: newId,
         processId: undefined, // Clear processId anyway as it's a new session
         // A restored/loaded session always spawns a fresh process (or reattaches
@@ -1780,6 +1855,11 @@ class StateManagerClass {
         // Unseen-output bell is transient (recomputed at runtime from live output);
         // never restore it, or a loaded layout / restored session shows a stale bell.
         hasUnseenOutput: undefined,
+        // Plan 058: elevation intent survives a SESSION restart only, so elevated tabs can
+        // reattach to the held elevated host upon UAC confirmation. A saved or imported
+        // layout is a file anyone can hand over: loading one must never open an elevated
+        // shell (which, with the elevated host already connected, needs no UAC prompt).
+        elevated: keepElevated ? tab.elevated : undefined,
       };
     });
 
@@ -1790,7 +1870,10 @@ class StateManagerClass {
     // Helper to recursively sanitize pane tree
     const sanitizeNode = (node: any, tabId: string): any => {
       if (!node) return null;
-      const newNode = { ...node };
+      const newNode = sanitizePaneSshFields(node);
+      // The pane leaf, not the tab, is what decides whether a shell spawns elevated
+      // (`findElevatedByTerminalId`), so the same session-restore-only rule applies here.
+      if (!keepElevated) delete newNode.elevated;
 
       // Map Pane ID
       if (newNode.id) {
@@ -1802,6 +1885,7 @@ class StateManagerClass {
       }
 
       if (newNode.type === 'terminal') {
+        // Plan 058: elevation intent on a leaf is kept only when `keepElevated` (see above).
         if (newNode.terminalId) {
           const oldTerminalId = newNode.terminalId;
           // DESIGN 014 MIGRATION — ONE rule: a live leaf is a `tm-`, so anything
@@ -1903,6 +1987,7 @@ class StateManagerClass {
       terminalCwds: remapCwds(data.terminalCwds || {}, terminalIdMap),
     };
 
+    Reflect.deleteProperty(result, 'sshLaunchConnectionId');
     if (data.tabPanes) {
       (result as any).tabPanes = sanitizedTabPanes;
     }

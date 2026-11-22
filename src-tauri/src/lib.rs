@@ -4,6 +4,11 @@ pub mod state;
 pub mod console_window;
 pub mod context_menu;
 pub mod webview_power;
+#[cfg(test)]
+mod child_process_gate_census_tests;
+mod memory_trim;
+mod webview_recovery;
+mod checked_counter;
 pub mod session_notify;
 pub mod app_config;
 pub mod profile;
@@ -19,15 +24,22 @@ pub mod automation;
 pub mod automation_commands;
 pub mod automation_engine;
 pub mod automation_store;
+mod automation_secret;
 pub mod automation_validation;
 pub mod automation_webhook;
 pub mod canvas_endpoints;
 pub mod network_commands;
 pub mod pty_manager;
 pub mod pty_host_client;
+mod helper_identity;
+// Elevated ("Open admin Tab") sidecar (plan 045). GUI-hosted reversed-dial
+// pipe + UAC launch — see the module doc for why the direction is inverted.
+pub mod elevated_host;
 pub mod commands;
+pub mod ssh;
 #[cfg(feature = "velopack-updates")]
 pub mod updater;
+pub mod update_policy;
 pub mod open_commands;
 pub mod api_server;
 pub mod event_bus;
@@ -48,12 +60,15 @@ mod mcp_sidecar;
 mod output_pipeline;
 mod history_flush;
 mod tray;
+mod relaunch;
 mod window_restore;
+mod window_lifetime;
+mod startup_failure;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 
 use tokio::sync::broadcast;
-use crate::state::{AppState, McpProcessHandle};
+use crate::state::{AppState, McpProcess, McpProcessHandle};
 use std::io::Write;
 use std::time::Duration;
 
@@ -68,6 +83,40 @@ pub(crate) use output_pipeline::{spawn_output_consumer, spawn_pipeline_watchdog}
 pub(crate) use history_flush::{flush_all_history, history_db_path, spawn_history_flush_task};
 pub(crate) use tray::build_tray;
 pub(crate) use window_restore::{restore_windows, show_or_focus_main_window};
+
+fn exit_after_main_window_creation_failure(app: &tauri::AppHandle, error: impl std::fmt::Display) {
+    let startup_failure::MainWindowFailureAction::ExitPreservingPtyHosts { exit_code } =
+        startup_failure::main_window_failure_action();
+    log::error!(
+        "Main window webview creation failed: {error}. Exiting with status {exit_code}; existing PTY hosts and shells will be preserved."
+    );
+    startup_failure::request_exit_code(exit_code);
+    app.exit(exit_code);
+}
+
+/// Check the native creation result after the configured window request has been
+/// processed by Wry. The Tauri wrapper exists before that asynchronous request
+/// succeeds; a runtime window query is the first operation that can distinguish
+/// a successful native window from Wry's logged-and-dropped creation failure.
+fn schedule_main_window_creation_probe(app: &tauri::AppHandle, headless: bool) {
+    if headless {
+        return;
+    }
+
+    let Some(main) = app.get_webview_window("main") else {
+        exit_after_main_window_creation_failure(
+            app,
+            "Tauri did not register the configured main window",
+        );
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = main.is_visible() {
+            exit_after_main_window_creation_failure(&app, error);
+        }
+    });
+}
 
 /// Gracefully shutdown the MCP server process
 /// Whether an MCP sidecar/legacy process is currently held.
@@ -109,8 +158,8 @@ fn should_force_kill_after_graceful_wait(completed: bool) -> bool {
 pub(crate) fn shutdown_mcp_server(state: &AppState) {
     match state.mcp_process.lock() {
         Ok(mut slot) => {
-            if let Some(child) = slot.take() {
-                shutdown_mcp_handle(child);
+            if let Some(process) = slot.take() {
+                shutdown_mcp_handle(process);
             }
         }
         Err(_) => log::error!("[MCP] process slot lock poisoned during shutdown; unable to inspect ownership"),
@@ -121,16 +170,16 @@ pub(crate) fn shutdown_mcp_server(state: &AppState) {
 pub(crate) fn shutdown_mcp_generation(state: &AppState, generation: u64) {
     match state.mcp_process.lock() {
         Ok(mut slot) => {
-            if let Some(child) = slot.take_if_current(generation) {
-                shutdown_mcp_handle(child);
+            if let Some(process) = slot.take_if_current(generation) {
+                shutdown_mcp_handle(process);
             }
         }
         Err(_) => log::error!("[MCP] process slot lock poisoned during generation shutdown; unable to inspect ownership"),
     }
 }
 
-fn shutdown_mcp_handle(child: McpProcessHandle) {
-            match child {
+fn shutdown_mcp_handle(process: McpProcess) {
+            match process.handle {
                 McpProcessHandle::Legacy(mut handle) => {
                     log::info!("[MCP] Gracefully shutting down MCP Server (PID: {})...", handle.id());
                     let wrote = handle.stdin.as_mut().map(|stdin| stdin.write_all(MCP_SHUTDOWN_COMMAND)).transpose();
@@ -190,22 +239,20 @@ mod mcp_shutdown_tests {
 
     #[test]
     fn force_kill_confirmation_deadline_does_not_wait_forever_for_a_live_legacy_child() {
-        // The child only has to OUTLIVE the wait, but it has to exist on the
-        // platform running the test: `cmd` is absent on Linux and macOS, so an
-        // ungated spawn here does not fail the assertion below — it panics at
-        // `spawn().unwrap()` with NotFound, and only on the runners this
-        // developer machine never exercises.
-        let mut child = if cfg!(windows) {
-            std::process::Command::new("cmd").args(["/C", "ping -n 10 127.0.0.1 >NUL"]).spawn()
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+        // Launch one process, not a shell with a surviving grandchild.
+        let mut child = crate::pty_host_client::real_process::OwnedChild(if cfg!(windows) {
+            std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 10"])
+                .spawn()
         } else {
-            std::process::Command::new("sh").args(["-c", "sleep 10"]).spawn()
-        }
-        .unwrap();
+            std::process::Command::new("sleep").arg("10").spawn()
+        }.unwrap());
         let started = std::time::Instant::now();
         assert!(!wait_for_legacy_exit(&mut child, Duration::from_millis(75)));
         assert!(started.elapsed() < Duration::from_secs(1));
         child.kill().unwrap();
-        let _ = child.wait();
+        child.0.wait().expect("reap the legacy test child");
     }
 }
 
@@ -233,11 +280,40 @@ struct Args {
    /// Positional fallback used by file managers and command-line users.
    #[arg(value_name = "PATH")]
    positional_path: Option<String>,
+   /// Set by a self-relaunch: wait for this predecessor pid to exit (returns the
+   /// moment it is gone; 5-minute ceiling) before taking the single-instance
+   /// lock, so we do not relay to a process that is on its way out and vanish
+   /// with it.
+   #[arg(long = "relaunch-after")]
+   relaunch_after: Option<u32>,
+}
+
+/// What `on_second_launch` should do with a relayed second-launch argv:
+/// open a path in a new window, or just focus/raise the existing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayAction {
+    OpenPath(String),
+    Focus,
+}
+
+/// Pure decision extracted from `on_second_launch`'s closure body so it is
+/// unit-testable without a live `AppHandle` (the closure itself needs one).
+/// Implements EXACTLY the closure's own logic — a re-parse of the relayed
+/// argv, `path.or(positional_path)` — so a future edit to one cannot drift
+/// from the other unnoticed.
+fn relay_action(argv: Vec<String>) -> RelayAction {
+    match Args::try_parse_from(argv)
+        .ok()
+        .and_then(|args| args.path.or(args.positional_path))
+    {
+        Some(path) => RelayAction::OpenPath(path),
+        None => RelayAction::Focus,
+    }
 }
 
 #[cfg(test)]
 mod cli_args_tests {
-    use super::Args;
+    use super::{Args, RelayAction};
     use clap::Parser;
 
     #[test]
@@ -287,6 +363,84 @@ mod cli_args_tests {
         assert_eq!(d.path, None);
         assert_eq!(d.positional_path, None);
     }
+
+    #[test]
+    fn relaunch_after_parses_and_does_not_break_relay_reparse() {
+        let a = Args::try_parse_from(["app", "--relaunch-after", "123"]).unwrap();
+        assert_eq!(a.relaunch_after, Some(123));
+
+        // Combined with another flag, both survive.
+        let b = Args::try_parse_from([
+            "app",
+            "--profile",
+            "work",
+            "--relaunch-after",
+            "5",
+        ])
+        .unwrap();
+        assert_eq!(b.profile.as_deref(), Some("work"));
+        assert_eq!(b.relaunch_after, Some(5));
+
+        // Absent by default.
+        let c = Args::try_parse_from(["app"]).unwrap();
+        assert_eq!(c.relaunch_after, None);
+
+        // `on_second_launch`'s re-parse relies on `path`/`positional_path`
+        // staying `None` when only `--relaunch-after` is given, so a relayed
+        // argv carrying it is still treated as "focus only".
+        let d = Args::try_parse_from(["app", "--relaunch-after", "123"]).unwrap();
+        assert_eq!(d.path, None);
+        assert_eq!(d.positional_path, None);
+    }
+
+    /// `relay_action` is what `on_second_launch`'s closure actually calls to
+    /// decide "open path" vs "focus" (extracted so it is testable without a
+    /// live `AppHandle`). The test above only pins that `Args` parses these
+    /// argvs; it never exercises the DECISION the closure makes from the
+    /// parse result, so a mishandled decision (e.g. treating a path as
+    /// "focus", or vice versa) could regress unnoticed with every existing
+    /// test green.
+    #[test]
+    fn relay_action_matches_on_second_launchs_decision() {
+        use super::relay_action;
+
+        // relaunch-after alone: no path anywhere → Focus.
+        assert_eq!(
+            relay_action(vec!["app".into(), "--relaunch-after".into(), "123".into()]),
+            RelayAction::Focus
+        );
+
+        // relaunch-after combined with --path: the path still wins.
+        assert_eq!(
+            relay_action(vec![
+                "app".into(),
+                "--relaunch-after".into(),
+                "123".into(),
+                "--path".into(),
+                "X".into(),
+            ]),
+            RelayAction::OpenPath("X".into())
+        );
+
+        // A named profile plus a positional path: positional_path is used
+        // when --path is absent.
+        assert_eq!(
+            relay_action(vec![
+                "app".into(),
+                "--profile".into(),
+                "w".into(),
+                "Y".into(),
+            ]),
+            RelayAction::OpenPath("Y".into())
+        );
+
+        // An argv clap cannot parse (`try_parse_from` returns Err) must fail
+        // SAFE — Focus, not a panic and not a phantom path.
+        assert_eq!(
+            relay_action(vec!["app".into(), "--bogus".into()]),
+            RelayAction::Focus
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -296,6 +450,15 @@ pub fn run() {
   panic_hook::install();
 
   let args = Args::parse();
+
+  // A self-relaunch (plan 044): wait out our predecessor before anything else
+  // — including identity resolution — runs, so the single-instance lock (built
+  // into the identity-scoped plugin below) never contends with a process that
+  // is on its way out. Logged later via `relaunch::replay_outcome` once
+  // `tauri_plugin_log` is live; this runs long before that.
+  if let Some(pid) = args.relaunch_after {
+    relaunch::wait_for_predecessor(pid);
+  }
 
   // Resolve the instance identity BEFORE anything resolves a path. Every mutable
   // artifact name flows from it (app_config::dev_file), so a late resolution
@@ -344,20 +507,20 @@ pub fn run() {
     // its pipe; that is the accepted cost of each exemption.
     if !crate::app_config::is_dev() && !args.headless {
       let on_second_launch = |app: &tauri::AppHandle, argv: Vec<String>, _cwd: String| {
-        let path = Args::try_parse_from(argv)
-          .ok()
-          .and_then(|args| args.path.or(args.positional_path));
-        if let Some(path) = path {
-          if let Err(e) = commands::open_new_window(app, Some(path)) {
-            log::error!("Open in TermFlow failed: {}", e);
-          } else {
-            commands::refresh_menu(app);
+        match relay_action(argv) {
+          RelayAction::OpenPath(path) => {
+            if let Err(e) = commands::open_new_window(app, Some(path)) {
+              log::error!("Open in TermFlow failed: {}", e);
+            } else {
+              commands::refresh_menu(app);
+            }
           }
-        } else {
-          // No path → a plain relaunch while already running: focus/raise (or recreate)
-          // a window. Reuse the robust helper, which falls back to any real window and
-          // creates one if none exist (e.g. tray-only or the main window was detached).
-          show_or_focus_main_window(app);
+          RelayAction::Focus => {
+            // No path → a plain relaunch while already running: focus/raise (or recreate)
+            // a window. Reuse the robust helper, which falls back to any real window and
+            // creates one if none exist (e.g. tray-only or the main window was detached).
+            show_or_focus_main_window(app);
+          }
         }
       };
 
@@ -414,9 +577,12 @@ pub fn run() {
         tauri_plugin_autostart::MacosLauncher::LaunchAgent,
         None,
     ))
+    .manage(memory_trim::MemoryTrim::default())
+    .on_page_load(|webview, payload| memory_trim::on_page_load(webview, payload.event()))
     .setup(move |app| {
         // Resolved before the builder ran, so it could not be logged then.
         gpu_preference::log_resolution();
+        relaunch::replay_outcome();
 
         // Unpackaged Windows apps need an AUMID registered before WinRT can
         // attribute and deliver native toast notifications. On macOS this claims the
@@ -486,13 +652,44 @@ pub fn run() {
             }
         }
 
-        // Manage state in Tauri
-        app.manage(state.clone());
+        // A dev build must not rewrite the installed app's right-click entry to point at itself.
+        if !is_headless && !app_config::is_dev() {
+            shell_integration::refresh_if_installed();
+        }
 
-        // Advertise this instance BEFORE the servers come up: an instance that
-        // serves no endpoints at all (an elevated launch without a port flag) is
-        // still a running sibling, and the updater must see it (Task 17).
-        // Re-published with the real ports once they are bound.
+        // Manage state in Tauri
+        app.manage(crate::ssh::metrics::watch::WatchRegistry::native(
+            state.host_table.keys().clone(),
+            state.ssh_sessions.clone(),
+            app.handle().clone(),
+        ));
+        app.manage(state.clone());
+        let edit_root = ssh::sftp::edit::edit_root(app.handle())?;
+        let ssh_edits = std::sync::Arc::new(ssh::sftp::edit::EditRegistry::with_sink(
+            edit_root,
+            std::sync::Arc::new(ssh::sftp::watch::TokioClock),
+            std::sync::Arc::new(ssh::sftp::edit::AppEditEvents(app.handle().clone())),
+        ));
+        if let Err(error) = ssh_edits.load_recovered() {
+            log::warn!("Could not recover SSH editor copies: {error}");
+        }
+        state.ssh_sessions.set_edit_registry(&ssh_edits);
+        app.manage(ssh_edits.clone());
+        // The edit poller spawns onto tokio; enter Tauri's runtime for that call instead of
+        // a second setup spawn (the setup closure owns exactly one boot task).
+        {
+            let _runtime = tauri::async_runtime::handle().inner().enter();
+            ssh_edits.start(state.ssh_sessions.clone());
+        }
+        // Tauri has already built the configured window before calling setup.
+        if let Some(main) = app.get_webview_window("main") {
+            let build = window_lifetime::reserve(app.handle(), "main")?;
+            window_lifetime::commit(build, &main)?;
+        }
+
+        // Advertise this instance BEFORE the servers come up: even before endpoints
+        // are bound (or if binding fails), this is still a running sibling, and the
+        // updater must see it (Task 17). Re-published with the real ports once they are bound.
         let publish_record = |api_port, mcp_port| {
             let id = crate::profile::current();
             let rec = crate::net_ports::InstanceRecord {
@@ -523,6 +720,16 @@ pub fn run() {
                 .store(keep, std::sync::atomic::Ordering::Relaxed);
         }
 
+        // Plan 047: the loopback proxy exemption defaults ON; only an explicit saved
+        // `false` turns it off. Seeded before the first spawn can happen.
+        if let Some(exempt) =
+            crate::app_config::read_bool_setting(&app.handle(), "exemptLoopbackFromProxy")
+        {
+            state
+                .exempt_loopback_from_proxy
+                .store(exempt, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // System tray (Plan 010): reuse the app's window icon (no new asset). Left-
         // click shows/focuses the main window; the menu offers Show / Peers / Quit.
         // Failure is non-fatal — the app still runs without a tray.
@@ -542,6 +749,7 @@ pub fn run() {
             // Every later update goes through set_window_title, which decorates too.
             let _ = main.set_title(&crate::profile::decorate_title("TermFlow"));
             crate::context_menu::install(&main);
+            crate::webview_recovery::install(&main);
             // Detect RDP/console session switches (Windows) and tell the renderer to
             // suppress the resulting ConPTY repaint burst — otherwise the activity
             // bell rings on every tab when you return to the machine. The DOM
@@ -576,21 +784,24 @@ pub fn run() {
         if let Ok(mut g) = api_state.api_shutdown.lock() {
             *g = Some(api_sd_tx);
         }
-        // An elevated instance serves its API/MCP only when the user explicitly
-        // asked for it with a port flag. Otherwise the safest surface is none at
-        // all: the default is an admin terminal you drive by hand, not one any
-        // local program can reach.
-        let serve_endpoints =
-            !elevated || cli_api_port.is_some() || cli_mcp_port.is_some();
         tauri::async_runtime::spawn(async move {
-            if !serve_endpoints {
-                log::info!(
-                    "[API] Suppressed for the elevated profile: pass --api-port or --mcp-port \
-                     to serve them (the token is minted per launch)"
-                );
-                return;
-            }
+            // Boot network initialization acquires network_op_lock so it is fully serialized
+            // with any concurrent set_network_config / rotate_auth_token / stop_network.
+            let _op = api_state.network_op_lock.lock().await;
             let host = if api_net.expose_on_network { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+            // Adopt the surviving pty-hosts and learn whether one holds the MCP port for the agents
+            // (plan 056). The wait is bounded, and the holder keeps serving until the sidecar takes
+            // the port over below.
+            let mcp_io = crate::state::mcp_reclaim::AppBootIo { app: mcp_app_handle, state: api_state.clone() };
+            let prepared = crate::state::mcp_reclaim::prepare_reclaim(
+                &mcp_io,
+                crate::state::mcp_reclaim::BootInputs {
+                    own_id: api_state.instance_id.clone(),
+                    cfg: mcp_net,
+                    reclaim: api_state.mcp_reclaim.clone(),
+                },
+            )
+            .await;
             // Bind-and-RETAIN, walking forward from the configured port. A probe
             // followed by a separate bind leaves a window in which a sibling can
             // take the port, and `SO_REUSEADDR` (needed for the hot-restart
@@ -606,6 +817,7 @@ pub fn run() {
                 api_net.api_port,
                 crate::net_ports::DEFAULT_SPAN,
                 &api_state.instance_id,
+                prepared.reserved(),
             )
             .await;
             match picked {
@@ -615,21 +827,21 @@ pub fn run() {
                     // read a config clone captured before binding, so a fallback
                     // port left the MCP sidecar forwarding to the OTHER instance's
                     // API. Same for the fabric and the renderer.
-                    let mcp_port = crate::net_ports::pick_mcp_port(
-                        api_net.mcp_port,
-                        crate::net_ports::DEFAULT_SPAN,
-                        &api_state.instance_id,
-                    )
-                    .await;
-                    {
-                        let mut eff = api_state.effective_endpoints.write();
-                        eff.api_port = Some(api_port);
-                        eff.mcp_port = mcp_port;
-                    }
+                    api_state.effective_endpoints.write().api_port = Some(api_port);
+
+                    // Only start the MCP sidecar (which forwards every tool call
+                    // to this API) after binding the API, so a bind failure can never
+                    // leave a sidecar advertising our instanceId while pointing at a port
+                    // we don't own. It is launched with the EFFECTIVE ports, on the port the
+                    // pty-host held when one did and the configuration still asks for it.
+                    let mcp_effective_port = crate::state::mcp_reclaim::start_mcp(prepared, api_port, &mcp_io).await;
+
+                    api_state.effective_endpoints.write().mcp_port = mcp_effective_port;
                     log::info!(
                         "[NET] effective endpoints: api={api_port} (configured {}) mcp={:?} (configured {})",
-                        api_net.api_port, mcp_port, api_net.mcp_port
+                        api_net.api_port, mcp_effective_port, api_net.mcp_port
                     );
+
                     // Re-advertise with the ports we actually got, so a sibling
                     // (or the user) can find this instance without guessing.
                     if let Err(e) = crate::net_ports::publish(
@@ -637,7 +849,7 @@ pub fn run() {
                             profile: crate::profile::current().key(),
                             pid: std::process::id(),
                             api_port: Some(api_port),
-                            mcp_port,
+                            mcp_port: mcp_effective_port,
                             token: (crate::profile::current().integrity
                                 == crate::profile::Integrity::High)
                                 .then(|| api_net.auth_token.clone()),
@@ -646,33 +858,7 @@ pub fn run() {
                     ) {
                         log::warn!("[NET] could not republish the instance record: {e}");
                     }
-                    // Only NOW start the MCP sidecar (which forwards every tool call
-                    // to this API), so a bind failure can never leave a sidecar
-                    // advertising our instanceId while pointing at a port we don't
-                    // own. It is launched with the EFFECTIVE ports.
-                    let mut mcp_net = mcp_net;
-                    mcp_net.api_port = api_port;
-                    let mcp_state = api_state.clone();
-                    match mcp_port {
-                        Some(p) => {
-                            mcp_net.mcp_port = p;
-                            tauri::async_runtime::spawn(async move {
-                                let _op = mcp_state.network_op_lock.lock().await;
-                                let started = respawn_mcp(mcp_app_handle, mcp_state.clone(), &mcp_net).await;
-                                if !started {
-                                    let mut effective = mcp_state.effective_endpoints.write();
-                                    if effective.mcp_port == Some(p) {
-                                        effective.mcp_port = None;
-                                    }
-                                    log::error!("[MCP] boot startup was rejected or failed; endpoint unpublished");
-                                }
-                            });
-                        }
-                        None => log::error!(
-                            "[MCP] no free MCP port near {} — the MCP server is NOT running",
-                            api_net.mcp_port
-                        ),
-                    }
+
                     // Spawn the peering fabric sidecar. Spawn failure (binary absent /
                     // not bundled) is logged and NON-FATAL — the open-core app runs
                     // fine with peering "not installed".
@@ -682,28 +868,26 @@ pub fn run() {
                     // listener port), which are not profile-scoped. A second profile
                     // starting one would contend for both.
                     if crate::profile::current().is_primary() {
-                        let fabric_state = api_state.clone();
-                        tauri::async_runtime::spawn(async move {
-                            // Boot is lifecycle work too: serialize it with a
-                            // concurrent Stop/API-network transition before it
-                            // can claim or install a fabric generation.
-                            let _op = fabric_state.network_op_lock.lock().await;
-                            if let Err(e) =
-                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state.clone())
-                                    .await
-                            {
-                                log::warn!(
-                                    "[FABRIC] termflow-fabric not started (peering not installed): {}",
-                                    e
-                                );
-                            }
-                        });
+                        if let Err(e) =
+                            crate::fabric_manager::start_fabric(fabric_app_handle, api_state.clone())
+                                .await
+                        {
+                            log::warn!(
+                                "[FABRIC] termflow-fabric not started (peering not installed): {}",
+                                e
+                            );
+                        }
                     } else {
                         log::info!(
                             "[FABRIC] Not started: profile '{}' is not the primary instance",
                             crate::profile::current().name
                         );
                     }
+
+                    // Release network_op_lock before entering the serving loop so concurrent
+                    // mutations (e.g. set_network_config) are not blocked.
+                    drop(_op);
+
                     crate::api_server::start_api_server(
                         api_state,
                         listener,
@@ -712,11 +896,17 @@ pub fn run() {
                     )
                     .await;
                 }
-                None => log::error!(
-                    "API could not bind any port near {} — the REST/WebSocket API and MCP are \
-                     NOT running. Change the port in Settings > Connections.",
-                    api_net.api_port
-                ),
+                None => {
+                    drop(_op);
+                    // MCP is not started; a claim boot still holds goes back to its host.
+                    drop(prepared);
+                    let _ = api_state.app_handle.emit("server-status:changed", ());
+                    log::error!(
+                        "API could not bind any port near {} — the REST/WebSocket API and MCP are \
+                         NOT running. Change the port in Settings > Connections.",
+                        api_net.api_port
+                    );
+                }
             }
         });
 
@@ -743,11 +933,18 @@ pub fn run() {
         // Terminal Automations (plan 028 §2.1): the tap, the evaluator and the targeting tick.
         automation_engine::spawn(state.clone());
 
+        // Runtime-level webview build errors are logged by Wry but do not abort the run loop.
+        // Probe after setup so a missing main window releases the instance lock and record.
+        schedule_main_window_creation_probe(app.handle(), is_headless);
+
         Ok(())
     })
-    .invoke_handler(tauri::generate_handler![
+    .manage(crate::ssh::store::Store::new(crate::ssh::store::store_path()))
+    .invoke_handler(crate::ssh_handlers![
+        commands::ssh_terminal_launch,
+        commands::ssh_terminal_cancel_launch,
+        commands::ssh_terminal_launch_state,
         commands::create_terminal,
-        commands::report_host_restore_settled,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
@@ -782,6 +979,9 @@ pub fn run() {
         commands::get_terminal_cwds,
         commands::resolve_terminal_path,
         commands::get_os_build_number,
+        commands::macos_permission_status,
+        commands::request_macos_permission,
+        open_commands::open_permission_pane,
         open_commands::open_external,
         open_commands::open_path,
         open_commands::open_in_editor,
@@ -789,7 +989,10 @@ pub fn run() {
         commands::write_terminal,
         commands::resize_terminal,
         commands::get_terminal_size,
+        commands::get_terminal_generations,
         commands::get_shell_profiles,
+        commands::add_shell_profile,
+        commands::delete_shell_profile,
         commands::read_legal_document,
         // Snippets import/export (plan/029 §8.3). Tauri IPC only by design (D10) —
         // see the note above the two functions in commands.rs before adding a route.
@@ -797,6 +1000,7 @@ pub fn run() {
         commands::import_snippets_file,
         commands::quit_app,
         commands::get_profile,
+        commands::get_admin_tab_support,
         commands::save_config,
         commands::merge_config,
         commands::load_config,
@@ -822,9 +1026,12 @@ pub fn run() {
         commands::confirm_close_app,
         commands::get_window_session_id,
         commands::list_window_session_ids,
+        commands::register_page,
+        commands::pane_op,
+        commands::wait_transfer_taken,
+        commands::create_admitted_terminal,
+        commands::close_process,
         commands::flush_session_ack,
-        commands::stash_detach_payload,
-        commands::take_detach_payload,
         commands::create_detached_window,
         commands::begin_global_pane_drag,
         commands::claim_global_pane_drag,
@@ -845,6 +1052,7 @@ pub fn run() {
         commands::close_self_window,
         commands::open_devtools,
         commands::set_keep_running_in_background,
+        commands::set_exempt_loopback_from_proxy,
         peer_commands::fabric_status,
         peer_commands::peers_list,
         peer_commands::pending_approvals_list,
@@ -871,6 +1079,12 @@ pub fn run() {
         }
     })
     .on_window_event(|window, event| {
+        match event {
+            WindowEvent::Focused(focused) => memory_trim::focused(window, *focused),
+            WindowEvent::Resized(_) => memory_trim::resized(window),
+            WindowEvent::Destroyed => memory_trim::destroyed(window),
+            _ => {}
+        }
         // Intercept the native window close so the frontend can show an in-app
         // confirmation dialog. The actual exit happens via confirm_close_app.
         if let WindowEvent::CloseRequested { api, .. } = event {
@@ -897,8 +1111,9 @@ pub fn run() {
                         .count();
                     if real_windows <= 1 {
                         api.prevent_close();
-                        if let Err(e) = window.hide() {
-                            log::warn!("Failed to hide window to tray: {}", e);
+                        match window.hide() {
+                            Ok(()) => memory_trim::request(app, memory_trim::Trigger::Hidden),
+                            Err(e) => log::warn!("Failed to hide window to tray: {}", e),
                         }
                         return;
                     }
@@ -922,11 +1137,6 @@ pub fn run() {
             // one's "already hidden" and skip its first real put_IsVisible.
             crate::webview_power::forget(window.label());
             if let Some(state) = app.try_state::<AppState>() {
-                let restore_state = (*state).clone();
-                let destroyed_label = window.label().to_string();
-                tauri::async_runtime::spawn(async move {
-                    restore_state.host_restore_window_destroyed(&destroyed_label).await;
-                });
                 state.window_titles.remove(window.label());
                 // Plan 018: a closed window must not be recreated at the next
                 // start. Persisted immediately, not debounced — the process may
@@ -1070,6 +1280,10 @@ pub fn run() {
                 // makes §7.5's actual requirement — each entry keeping its own decision timestamp
                 // rather than a flush-time `now` — trivially true. Corrected in the plan.
                 state.automations.stop();
+                if let Some(edits) = app_handle.try_state::<std::sync::Arc<ssh::sftp::edit::EditRegistry>>() {
+                    tauri::async_runtime::block_on(edits.shutdown());
+                }
+                tauri::async_runtime::block_on(state.ssh_sessions.shutdown());
                 // Persist every terminal's scrollback before the process dies.
                 flush_all_history(&state);
                 // Gracefully shutdown MCP server on app exit
@@ -1081,6 +1295,15 @@ pub fn run() {
             // which is why readers treat a dead pid as stale rather than trusting
             // the file's existence.
             crate::net_ports::retract(&crate::profile::current().key());
+            // The runtime exits with status 0 whatever `exit(code)` was given, so a
+            // startup failure that asked for a non-zero status applies it here, after
+            // the cleanup above has run.
+            if let Some(code) = startup_failure::requested_exit_code() {
+                // Tauri runs this itself once the callback returns; do it here so
+                // the tray icon and window resources are released before the exit.
+                app_handle.cleanup_before_exit();
+                std::process::exit(code);
+            }
         }
     });
 }

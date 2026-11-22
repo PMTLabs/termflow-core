@@ -17,20 +17,84 @@ jest.mock('../../../../store', () => ({
 
 jest.mock('../../../../services/TerminalService', () => ({
   terminalService: {
-    getProcessId: (terminalId: string) => `proc-${terminalId}`,
+    getProcessId: (terminalId: string) => terminalId === 'tm-other' ? undefined : `proc-${terminalId}`,
     attachExistingTerminal: jest.fn(),
     detachTerminal: jest.fn(),
+    markReattachedSession: jest.fn(),
+    stashKeyboardProtocol: jest.fn(),
   },
 }));
 
+// The source window's live cache entries, keyed by terminalId. Empty = no entry.
+const mockCacheEntries: Record<string, Record<string, unknown>> = {};
 jest.mock('@termflow/terminal-core', () => ({
-  terminalCache: { get: () => undefined },
+  terminalCache: { get: (id: string) => mockCacheEntries[id] },
 }));
 
 import {
-  buildTabDetachPayload, applyDetachPayload, removeSourceTab, removeSourcePane,
+  buildTabDetachPayload, buildPaneDetachPayload, applyDetachPayload, applyCrossWindowPayload,
+  removeSourceTab, removeSourcePane,
 } from '../detach';
 import { addTab } from '../../../../store/slices/tabsSlice';
+import { addTabTree } from '../../../../store/slices/panesSlice';
+import { terminalService } from '../../../../services/TerminalService';
+import { leafForDrag } from '../PaneDragController';
+import { expectPaneTags, pane, sentinel, taggedTree, tags } from '../../../../__testFixtures__/sshPaneCensus';
+
+test('drag_identity_keeps_tag_and_stale_source_cannot_demote_ssh', () => {
+  const tree = taggedTree();
+  const source = { sourceTabId: 'tb-drag', sourcePaneId: 'pn-ssh', terminalId: 'tm-ssh' };
+  try {
+    mockState.panes.treesByTabId = { 'tb-drag': tree };
+    const leaf = leafForDrag(source)!;
+    expectPaneTags([leaf, tree.children![1]], tags, ['tm-local']);
+    expectPaneTags([JSON.parse(JSON.stringify(buildPaneDetachPayload(leaf).paneTree)), tree.children![1]], tags, ['tm-local']);
+    mockState.panes.treesByTabId = { 'tb-drag': { ...pane('local'), id: 'pn-ssh' } };
+    expect(leafForDrag(source)).toBeNull();
+    mockState.panes.treesByTabId = {};
+    expect(leafForDrag(source)).toBeNull();
+  } finally { mockState.panes.treesByTabId = {}; }
+});
+
+test('pane_and_tab_detach_json_preserve_all_ssh_preferences', () => {
+  const tree = taggedTree();
+  mockState.panes.treesByTabId = { 'tb-drag': tree };
+  try {
+    const single = JSON.parse(JSON.stringify(buildPaneDetachPayload(pane('ssh', sentinel))));
+    expectPaneTags([single.paneTree, tree.children![1]], tags, ['tm-local']);
+    const tab = JSON.parse(JSON.stringify(buildTabDetachPayload('tb-drag', 'Drag')));
+    expectPaneTags([tab.paneTree], tags, ['tm-local']);
+    const terminalId = single.terminals[0].terminalId;
+    expect(terminalId).toBe('tm-ssh');
+    const tagFor = (node: typeof tree): typeof node.ssh => node.terminalId === terminalId
+      ? node.ssh : node.children?.map(tagFor).find(Boolean);
+    expect(tagFor(single.paneTree)).toStrictEqual(tagFor(tree));
+    expect(tagFor(tab.paneTree)).toStrictEqual(tagFor(tree));
+    expect(tab.terminals.map((t: { terminalId: string }) => t.terminalId)).toEqual(['tm-ssh', 'tm-local']);
+    expect(single.terminals[0]).not.toHaveProperty('ssh');
+    for (const descriptor of tab.terminals) {
+      for (const key of ['ssh', 'connectionId', 'hiddenMetrics', 'password', 'identityFile']) {
+        expect(descriptor).not.toHaveProperty(key);
+      }
+    }
+  } finally { mockState.panes.treesByTabId = {}; }
+});
+
+test.each(['direct new tab', 'cross-window new tab'] as const)(
+  'all_reattach_destinations_preserve_tag_without_retyping (%s)', destination => {
+    dispatch.mockClear();
+    jest.mocked(terminalService.attachExistingTerminal).mockClear();
+    const payload = JSON.parse(JSON.stringify(buildPaneDetachPayload(taggedTree())));
+    payload.paneTree.children[0].ssh.hiddenMetrics = ['nfs', 'unknown', 'cpu', 'nfs'];
+    if (destination === 'direct new tab') applyDetachPayload(payload);
+    else applyCrossWindowPayload(payload);
+    const install = dispatch.mock.calls.find(([action]) => action.type === addTabTree.type)?.[0];
+    expectPaneTags([install.payload.tree], tags, ['tm-local']);
+    expect(jest.mocked(terminalService.attachExistingTerminal).mock.calls.map(call => call.slice(0, 2))).toEqual([
+      ['tm-ssh', 'proc-tm-ssh'], ['tm-local', 'proc-tm-local'],
+    ]);
+  },
+);
 
 describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => {
   beforeEach(() => {
@@ -42,7 +106,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
 
   const leaf = (id: string, terminalId: string): PaneNode => ({ id, type: 'terminal', terminalId });
 
-  it('carries the source tab icon, titleIsCustom, titleColor, colorSchemaId and notifyMuted into the payload', () => {
+  it('carries the source tab icon, titleIsCustom, titleColor, colorSchemaId, notifyMuted and elevated into the payload', () => {
     mockState.tabs.tabs = [{
       id: 'tab-1',
       title: 'rephlo-main',
@@ -52,6 +116,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       titleColor: '#ff0000',
       colorSchemaId: 'solarized',
       notifyMuted: true,
+      elevated: true,
     }];
     mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
 
@@ -63,10 +128,11 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       titleColor: '#ff0000',
       colorSchemaId: 'solarized',
       notifyMuted: true,
+      elevated: true,
     });
   });
 
-  it('reconstructs the tab in the destination window with those fields intact (incl. mute)', () => {
+  it('reconstructs the tab in the destination window with those fields intact (incl. mute and elevated)', () => {
     mockState.tabs.tabs = [{
       id: 'tab-1',
       title: 'rephlo-main',
@@ -74,6 +140,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       icon: '🖥️',
       titleIsCustom: true,
       notifyMuted: true,
+      elevated: true,
     }];
     mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
 
@@ -88,7 +155,45 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       icon: '🖥️',
       titleIsCustom: true,
       notifyMuted: true,
+      elevated: true,
     });
+  });
+
+  /**
+   * Plan 045 R8: dragging a NON-admin tab must not spuriously badge the
+   * destination — `elevated` has to travel both ways, not just be forwarded
+   * whenever present.
+   */
+  it('omits elevated when the source tab was never an admin tab', () => {
+    mockState.tabs.tabs = [{ id: 'tab-1', title: 'rephlo-main', shellType: 'default' }];
+    mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
+
+    const payload = buildTabDetachPayload('tab-1', 'rephlo-main');
+    expect(payload?.elevated).toBeUndefined();
+
+    dispatch.mockClear();
+    applyDetachPayload(payload!);
+    const addTabCall = dispatch.mock.calls.find((c) => c[0].type === addTab.type);
+    expect(addTabCall?.[0].payload.elevated).toBeUndefined();
+  });
+});
+
+describe('single-pane detach (buildPaneDetachPayload) carries the pane\'s own elevation', () => {
+  beforeEach(() => {
+    dispatch.mockClear();
+    mockState.tabs.tabs = [];
+    mockState.panes.treesByTabId = {};
+    mockState.zoom.levels = {};
+  });
+
+  it('reads elevated off the dragged pane node itself, not the source tab', () => {
+    const payload = buildPaneDetachPayload({ id: 'p1', type: 'terminal', terminalId: 'tm-1', elevated: true });
+    expect(payload.elevated).toBe(true);
+  });
+
+  it('omits elevated for a non-admin pane', () => {
+    const payload = buildPaneDetachPayload({ id: 'p1', type: 'terminal', terminalId: 'tm-1' });
+    expect(payload.elevated).toBeUndefined();
   });
 });
 
@@ -143,6 +248,87 @@ describe('detach carries the cwd snapshot across windows (spec 045 §3.3)', () =
     // Seeding a payload without a cwd must not throw or write a bogus entry.
     expect(() => applyDetachPayload(payload!)).not.toThrow();
     expect(getCwdSnapshot('tm-1')).toBeUndefined();
+  });
+});
+
+/**
+ * The bug this pins: detach a tab running an agent CLI to a new window, press
+ * Escape — nothing. The PTY had negotiated Win32-Input-Mode (ConPTY's one-shot
+ * `?9001h`) with the SOURCE window; the new window's fresh engine has no cache
+ * entry to adopt that from, so it sent a legacy `` to a ConPTY expecting
+ * records. A brand-new tab beside it worked because its session announced
+ * `?9001h` to THIS window. Same class for the Kitty flags a TUI pushes once.
+ */
+describe('detach carries the negotiated keyboard-protocol state across windows', () => {
+  const { terminalService } = jest.requireMock('../../../../services/TerminalService');
+  const tree: PaneNode = { id: 'p1', type: 'terminal', terminalId: 'tm-1' } as PaneNode;
+
+  beforeEach(() => {
+    dispatch.mockClear();
+    terminalService.markReattachedSession.mockClear();
+    terminalService.stashKeyboardProtocol.mockClear();
+    mockState.tabs.tabs = [{ id: 'tb-1', title: 'claude', shellType: 'pwsh' }];
+    mockState.panes.treesByTabId = { 'tb-1': tree };
+    mockState.zoom.levels = {};
+    for (const k of Object.keys(mockCacheEntries)) delete mockCacheEntries[k];
+  });
+
+  it('packs an active Win32-Input-Mode and re-seeds it for the destination mount', () => {
+    mockCacheEntries['tm-1'] = { win32State: { isActive: () => true } };
+
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0].win32InputMode).toBe(true);
+
+    applyDetachPayload(payload!);
+    expect(terminalService.markReattachedSession).toHaveBeenCalledWith('tm-1');
+  });
+
+  it('packs the Kitty state as plain data and stashes it for the destination mount', () => {
+    const data = { mainStack: [1], altStack: [], modifyOtherKeys: 0 };
+    mockCacheEntries['tm-1'] = { kbState: { serialize: () => data } };
+
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0].keyboardProtocol).toEqual(data);
+
+    applyDetachPayload(payload!);
+    expect(terminalService.stashKeyboardProtocol).toHaveBeenCalledWith('tm-1', data);
+    expect(terminalService.markReattachedSession).not.toHaveBeenCalled();
+  });
+
+  it('omits both when the source negotiated nothing, and seeds nothing', () => {
+    mockCacheEntries['tm-1'] = {
+      win32State: { isActive: () => false },
+      kbState: { serialize: () => ({ mainStack: [], altStack: [], modifyOtherKeys: 0 }) },
+    };
+
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0]).not.toHaveProperty('win32InputMode');
+    expect(payload?.terminals[0]).not.toHaveProperty('keyboardProtocol');
+
+    applyDetachPayload(payload!);
+    expect(terminalService.markReattachedSession).not.toHaveBeenCalled();
+    expect(terminalService.stashKeyboardProtocol).not.toHaveBeenCalled();
+  });
+
+  it('copes with a source pane that has no cache entry at all', () => {
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0]).not.toHaveProperty('win32InputMode');
+    expect(payload?.terminals[0]).not.toHaveProperty('keyboardProtocol');
+    expect(() => applyDetachPayload(payload!)).not.toThrow();
+  });
+
+  it('seeds on the cross-window drop path too, not only the new-window path', () => {
+    mockCacheEntries['tm-1'] = {
+      win32State: { isActive: () => true },
+      kbState: { serialize: () => ({ mainStack: [3], altStack: [], modifyOtherKeys: 0 }) },
+    };
+    const payload = buildTabDetachPayload('tb-1');
+
+    applyCrossWindowPayload(payload!);
+    expect(terminalService.markReattachedSession).toHaveBeenCalledWith('tm-1');
+    expect(terminalService.stashKeyboardProtocol).toHaveBeenCalledWith(
+      'tm-1', { mainStack: [3], altStack: [], modifyOtherKeys: 0 },
+    );
   });
 });
 

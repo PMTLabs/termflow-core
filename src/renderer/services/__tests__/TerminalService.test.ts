@@ -3,6 +3,20 @@
  */
 import { terminalService } from '../TerminalService';
 
+// A create is authorized by this window's tree, including in direct service tests.
+beforeEach(() => {
+  const ids = [
+    'tm-adopt-1', 'tm-owner-leaf', 'tb-solo-1', 'tm-migrated-leaf', 'tm-admin-leaf',
+    'tm-fresh-leaf', 'tm-singleflight-1', 'tm-singleflight-2', 'tm-singleflight-3',
+    'tm-reassert', 'tm-spawn-1',
+  ];
+  (window as any).__REDUX_STORE__ = { getState: () => ({ panes: { treesByTabId: {
+    'tb-service-test': { id: 'pn-test', type: 'split', children: ids.map(terminalId => ({
+      id: terminalId, type: 'terminal', terminalId,
+    })) },
+  } } }) };
+});
+
 describe('TerminalService.getTerminalIdForProcess', () => {
   it('returns the terminalId mapped to a given processId', () => {
     terminalService.registerExistingTerminal('tm-getpid-1', 'pc-getpid-1');
@@ -69,7 +83,7 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
       'tm-owner-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab',
     );
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab', undefined,
+      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab', undefined, false,
     );
   });
 
@@ -78,7 +92,7 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
   it('omits the owner when the caller does not know one', async () => {
     await terminalService.createTerminal('tb-solo-1');
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined, undefined,
+      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined, undefined, false,
     );
   });
 
@@ -92,7 +106,18 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
       'tm-migrated-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab', 'tb-legacy01',
     );
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', 'Terminal', undefined, 'tm-migrated-leaf', 120, 40, 'tb-owner-tab', 'tb-legacy01',
+      'default', 'Terminal', undefined, 'tm-migrated-leaf', 120, 40, 'tb-owner-tab', 'tb-legacy01', false,
+    );
+  });
+
+  it('forwards true only when an admin pane explicitly requests elevation', async () => {
+    await terminalService.createTerminal(
+      'tm-admin-leaf', 'powershell', 'Admin', undefined, undefined, undefined,
+      'tb-admin-tab', undefined, true,
+    );
+    expect(createTerminal).toHaveBeenCalledWith(
+      'powershell', 'Admin', undefined, 'tm-admin-leaf', undefined, undefined,
+      'tb-admin-tab', undefined, true,
     );
   });
 
@@ -262,5 +287,142 @@ describe('TerminalService publishes pty:spawn for a FRESH spawn only', () => {
     terminalService.registerExistingTerminal('tm-spawn-2', 'pc-spawn-2');
     terminalService.attachExistingTerminal('tm-spawn-3', 'pc-spawn-3');
     expect(spawns).toEqual([]);
+  });
+});
+
+describe('TerminalService elevated single-flight and consent denial latch', () => {
+  let createTerminalMock: jest.Mock;
+
+  beforeEach(() => {
+    terminalService.reconnectElevated();
+    createTerminalMock = jest.fn();
+    (window as any).electronAPI = {
+      createTerminal: createTerminalMock,
+      adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
+    };
+  });
+
+  afterEach(() => {
+    terminalService.reconnectElevated();
+  });
+
+  it('coalesces concurrent elevated creates across different panes into a single flight', async () => {
+    let resolveFirst: (pid: string) => void = () => {};
+    const firstPromise = new Promise<string>((res) => { resolveFirst = res; });
+    createTerminalMock.mockImplementationOnce(() => firstPromise);
+    createTerminalMock.mockResolvedValueOnce('pc-admin-2');
+
+    const call1 = terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+    const call2 = terminalService.createTerminal('tm-singleflight-2', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+
+    // Only the first call hit the backend createTerminal so far
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+
+    // Now resolve first
+    resolveFirst('pc-admin-1');
+
+    const [pid1, pid2] = await Promise.all([call1, call2]);
+    expect(pid1).toBe('pc-admin-1');
+    expect(pid2).toBe('pc-admin-2');
+    expect(createTerminalMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('latches denial on ADMIN_UAC_CANCELLED and prevents subsequent elevated attempts', async () => {
+    createTerminalMock.mockRejectedValueOnce(new Error('ADMIN_UAC_CANCELLED'));
+
+    await expect(
+      terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true)
+    ).rejects.toThrow('ADMIN_UAC_CANCELLED');
+
+    expect(terminalService.isElevatedConsentDenied()).toBe(true);
+
+    // Subsequent call fails immediately without calling createTerminal
+    createTerminalMock.mockClear();
+    await expect(
+      terminalService.createTerminal('tm-singleflight-2', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true)
+    ).rejects.toThrow('ADMIN_UAC_CANCELLED');
+
+    expect(createTerminalMock).not.toHaveBeenCalled();
+  });
+
+  it('reconnectElevated clears the denied latch and dispatches pty:elevated-reconnect', async () => {
+    createTerminalMock.mockRejectedValueOnce(new Error('ADMIN_UAC_CANCELLED'));
+    await expect(
+      terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true)
+    ).rejects.toThrow('ADMIN_UAC_CANCELLED');
+    expect(terminalService.isElevatedConsentDenied()).toBe(true);
+
+    let eventFired = false;
+    const onReconnect = () => { eventFired = true; };
+    window.addEventListener('pty:elevated-reconnect', onReconnect);
+
+    terminalService.reconnectElevated();
+    expect(terminalService.isElevatedConsentDenied()).toBe(false);
+    expect(eventFired).toBe(true);
+    window.removeEventListener('pty:elevated-reconnect', onReconnect);
+
+    // New attempt can proceed to backend
+    createTerminalMock.mockClear();
+    createTerminalMock.mockResolvedValueOnce('pc-admin-new');
+    const pid = await terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+    expect(pid).toBe('pc-admin-new');
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+  });
+
+  const elevatedCreate = (leaf: string) =>
+    terminalService.createTerminal(leaf, 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+  // A hang is the defect under test, so a wedged promise must fail the test instead of the run.
+  const within = <T,>(work: Promise<T>, ms = 1000) => Promise.race([
+    work,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out: promise never settled')), ms)),
+  ]);
+
+  it('beginUserElevatedAttempt forgets a cancelled prompt without waking the banner panes', async () => {
+    createTerminalMock.mockRejectedValueOnce(new Error('ADMIN_UAC_CANCELLED'));
+    await expect(elevatedCreate('tm-singleflight-1')).rejects.toThrow('ADMIN_UAC_CANCELLED');
+    expect(terminalService.isElevatedConsentDenied()).toBe(true);
+
+    let eventFired = false;
+    const onReconnect = () => { eventFired = true; };
+    window.addEventListener('pty:elevated-reconnect', onReconnect);
+    terminalService.beginUserElevatedAttempt();
+    window.removeEventListener('pty:elevated-reconnect', onReconnect);
+
+    expect(terminalService.isElevatedConsentDenied()).toBe(false);
+    expect(eventFired).toBe(false);
+    createTerminalMock.mockClear();
+    createTerminalMock.mockResolvedValueOnce('pc-admin-again');
+    await expect(elevatedCreate('tm-singleflight-2')).resolves.toBe('pc-admin-again');
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a flight owner that leaves through an early return does not wedge later elevated creates', async () => {
+    // The pane leaves this window's tree while its spawn is in flight, so the create returns ''
+    // after the backend answered, without ever settling or rejecting the flight.
+    const treeBefore = (window as any).__REDUX_STORE__;
+    createTerminalMock.mockImplementationOnce(async () => {
+      (window as any).__REDUX_STORE__ = { getState: () => ({ panes: { treesByTabId: {} } }) };
+      return 'pc-owner-gone';
+    });
+    await expect(within(elevatedCreate('tm-singleflight-1'))).resolves.toBe('');
+    (window as any).__REDUX_STORE__ = treeBefore;
+
+    createTerminalMock.mockResolvedValueOnce('pc-after-owner-gone');
+    await expect(within(elevatedCreate('tm-singleflight-1'))).resolves.toBe('pc-after-owner-gone');
+  });
+
+  it('waiters do not start their own backend create when the flight owner fails', async () => {
+    let failOwner: (error: Error) => void = () => {};
+    createTerminalMock.mockImplementationOnce(() => new Promise((_, reject) => { failOwner = reject; }));
+
+    const owner = elevatedCreate('tm-singleflight-1');
+    const waiterA = elevatedCreate('tm-singleflight-2');
+    const waiterB = elevatedCreate('tm-singleflight-3');
+    failOwner(new Error('surviving elevated pty-host did not connect'));
+
+    const settled = await within(Promise.allSettled([owner, waiterA, waiterB]));
+    expect(settled.map(r => r.status)).toEqual(['rejected', 'rejected', 'rejected']);
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+    expect(terminalService.isElevatedConsentDenied()).toBe(false);
   });
 });

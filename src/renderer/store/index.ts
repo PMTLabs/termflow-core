@@ -1,4 +1,8 @@
-import { configureStore } from '@reduxjs/toolkit';
+import sshReducer from './slices/sshSlice';
+import { sshLaunchReducer } from './slices/sshSessionSlice';
+import sshSessionReducer from './slices/sshSessionSlice';
+import broadcastReducer, { shouldStopBroadcast, stopBroadcast } from './slices/broadcastSlice';
+import { combineReducers, configureStore } from '@reduxjs/toolkit';
 import tabsReducer from './slices/tabsSlice';
 import panesReducer from './slices/panesSlice';
 import settingsReducer from './slices/settingsSlice';
@@ -8,6 +12,7 @@ import zoomReducer from './slices/zoomSlice';
 import peersReducer from './slices/peersSlice';
 import canvasReducer from './slices/canvasSlice';
 import sessionExitReducer from './slices/sessionExitSlice';
+import { paneIncarnations } from '../services/paneIncarnations';
 import { attachPaneOwnershipSync } from '../services/paneOwnership';
 import { attachTerminalLabelSync } from '../services/terminalLabelSync';
 import { attachTerminalTitleColorSync } from '../services/terminalTitleColorSync';
@@ -25,17 +30,25 @@ const loggingMiddleware = (storeAPI: any) => (next: any) => (action: any) => {
   return result;
 };
 
+const combinedReducer = combineReducers({
+  broadcast: broadcastReducer,
+  tabs: tabsReducer,
+  panes: panesReducer,
+  settings: settingsReducer,
+  layouts: layoutsReducer,
+  ui: uiReducer,
+  zoom: zoomReducer,
+  peers: peersReducer,
+  canvas: canvasReducer,
+  sessionExit: sessionExitReducer,
+  ssh: sshReducer,
+  sshSession: sshSessionReducer,
+  sshLaunch: sshLaunchReducer,
+});
 export const store = configureStore({
-  reducer: {
-    tabs: tabsReducer,
-    panes: panesReducer,
-    settings: settingsReducer,
-    layouts: layoutsReducer,
-    ui: uiReducer,
-    zoom: zoomReducer,
-    peers: peersReducer,
-    canvas: canvasReducer,
-    sessionExit: sessionExitReducer,
+  reducer: (state: ReturnType<typeof combinedReducer> | undefined, action: Parameters<typeof combinedReducer>[1]) => {
+    const next = combinedReducer(state, action);
+    return shouldStopBroadcast(next) ? { ...next, broadcast: broadcastReducer(next.broadcast, stopBroadcast()) } : next;
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware().concat(loggingMiddleware),
@@ -66,6 +79,7 @@ if (typeof window !== 'undefined') {
   // pane tree rather than off the individual move/attach dispatch sites, so no
   // reparent path can be added later that forgets to report itself — see
   // services/paneOwnership.ts.
+  paneIncarnations.attachStore(store);
   attachPaneOwnershipSync(store);
 
   // And what the tab strip CALLS each terminal (plan 028 §4.2). Driven off the same two pieces of

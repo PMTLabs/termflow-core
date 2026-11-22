@@ -52,6 +52,27 @@ pub const CAP_ATTACH_ACK: u32 = 1 << 1;
 /// in its discovery record. The bit carries no policy value; consumers require
 /// the accompanying record field before treating a policy as known.
 pub const CAP_LIFECYCLE_CONTRACT: u32 = 1 << 2;
+/// Host distinguishes an intentional quit from a GUI crash: a bare disconnect
+/// with live children HOLDS them (bounded by the advertised retention) instead
+/// of tearing down, and only `Control::Shutdown` tears down. A client that sees
+/// this bit MUST send `Shutdown` on an intentional exit, or its shells outlive
+/// it for the retention window. Absent ⇒ legacy host: disconnect is teardown.
+pub const CAP_SHUTDOWN_CONTROL: u32 = 1 << 3;
+/// Host honours `SpawnSpec::initial_cursor_row`: it creates the pseudoconsole inheriting the
+/// cursor and answers ConPTY's startup cursor query with that row. Advertised only when the
+/// host's ConPTY is the bundled one, which is the only one this was measured against. A GUI
+/// that does not see this bit must not assume the shell's prompt sits on the requested row.
+pub const CAP_INHERIT_CURSOR: u32 = 1 << 4;
+/// Host can hold an MCP port across a GUI absence and hand it back: it accepts
+/// `Control::HoldMcp` / `ClaimMcp` / `ReleaseMcp` and replies with
+/// `Response::McpHoldAck` / `McpClaimAck` / `McpReleaseAck`. A client must ONLY
+/// send those frames to a host whose discovery record advertises this bit — a
+/// legacy host fails to decode the unknown variants and drops the connection.
+pub const CAP_MCP_HOLD: u32 = 1 << 5;
+/// Host supports permission controls; never send them without this bit.
+pub const CAP_PERMISSIONS: u32 = 1 << 6;
+/// Spawn consumes SSH prompt registration metadata without exporting it.
+pub const CAP_SSH_PROMPT_REGISTRATION: u32 = 1 << 7;
 
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +310,31 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_mcp_hold_is_bit_5_and_distinct() {
+        assert_eq!(CAP_MCP_HOLD, 1 << 5);
+        assert_eq!(CAP_MCP_HOLD, 32);
+        let others = [
+            CAP_DRAIN,
+            CAP_ATTACH_ACK,
+            CAP_LIFECYCLE_CONTRACT,
+            CAP_SHUTDOWN_CONTROL,
+            CAP_INHERIT_CURSOR,
+        ];
+        // Every shipped bit keeps its number, and the new bit overlaps none.
+        assert_eq!(others, [1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4]);
+        for other in others {
+            assert_eq!(other & CAP_MCP_HOLD, 0, "CAP_MCP_HOLD overlaps {other:#x}");
+        }
+        // Survives the hello envelope next to the other bits, and only it.
+        let advertised = others.iter().fold(0, |a, b| a | b) | CAP_MCP_HOLD;
+        let back = Hello::decode(&Hello::host(1, advertised, 0, "b").encode()).unwrap();
+        assert_eq!(back.capabilities, 0b11_1111);
+        assert_eq!(back.capabilities & CAP_MCP_HOLD, CAP_MCP_HOLD);
+        let without = Hello::decode(&Hello::host(1, advertised & !CAP_MCP_HOLD, 0, "b").encode()).unwrap();
+        assert_eq!(without.capabilities & CAP_MCP_HOLD, 0);
+    }
 
     #[test]
     fn host_hello_roundtrips() {

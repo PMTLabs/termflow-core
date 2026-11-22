@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import { isSshEditorDirty, saveSshEditorDraft, discardSshEditorDraft } from '../../services/sshEditorGuard';
+import { SshConnectionsPanel } from './SshConnections/SshConnectionsPanel';
+import { useSelector, useDispatch, useStore } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setTabRunningCue, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration, setExemptLoopbackFromProxy } from '../../store/slices/settingsSlice';
 import type { TerminalFontWeight } from '../../store/slices/settingsSlice';
 import type { CanvasWheelMode } from '../Canvas/canvasGestures';
 import type { CanvasBusyCue } from '../Canvas/canvasBusyCue';
+import type { TabRunningCue } from '../Tabs/tabRunningCue';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import {
     ShortcutAction, GLOBAL_SHORTCUT_ACTIONS, CANVAS_SHORTCUT_ACTIONS, CANVAS_FIXED_SHORTCUTS,
@@ -13,9 +16,10 @@ import {
 } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
-import { ShellProfile } from '../../store/slices/settingsSlice';
+import { ShellProfile, setShellProfiles } from '../../store/slices/settingsSlice';
+import { AddShellProfileForm, NewShellProfileInput } from './AddShellProfileForm';
 import { NetworkConfig, NetworkInterfaceInfo, EffectiveEndpoints } from '../../types/electron';
-import { apiTokenKey } from '../../services/profileScope';
+import { setStoredApiToken } from '../../services/profileScope';
 import { McpConnectModal } from './McpConnectModal';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { UnsavedChangesDialog } from '../UI/UnsavedChangesDialog';
@@ -27,10 +31,22 @@ import { SplitButton } from '../UI/SplitButton';
 import { connectionStatus } from './connectionStatus';
 import { PeersPanel } from './PeersPanel';
 import { SnippetsPanel } from './SnippetsPanel';
+import { PermissionsSection } from './PermissionsSection';
 import { AboutLegalPanel } from './AboutLegalPanel';
 import { AutomationsPanel } from './Automations/AutomationsPanel';
 import { offloadRetentionCopy } from './offloadRetentionCopy';
-import type { ConnectedHostRetention } from '../../api/tauri-bridge';
+import type {
+    ConnectedHostRetention,
+    UpdateAvailability,
+    UpdateConfirmation,
+    UpdateMarkerMode,
+} from '../../api/tauri-bridge';
+import {
+    confirmTokenFor,
+    fullUpdateDialogLead,
+    fullUpdateDialogTitle,
+    fullUpdateReasonLines,
+} from './fullUpdateCopy';
 import {
     discardAutomationEditorDraft,
     isAutomationEditorDirty,
@@ -98,6 +114,10 @@ interface SettingsPageProps {
 export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) => {
     const dispatch = useDispatch<AppDispatch>();
     const settings = useSelector((state: RootState) => state.settings);
+    // Fresh reads after an await: a handler's render closure can predate edits
+    // or removals that landed while its IPC call was in flight.
+    const store = useStore<RootState>();
+    const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
 
     // Local state for font size input to allow typing
     const [localFontSize, setLocalFontSize] = useState<string>(settings.fontSize.toString());
@@ -135,7 +155,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // duplicate union, renderActiveCategory's switch, and (for Automations) the editor's
     // dirty-guard hook-up in requestCategoryChange. Plan 028 §5.1 and plan 029 §7.1 both
     // list them — the two features landed independently and each hit all seven.
-    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'updates' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'ssh' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'permissions' | 'updates' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
     const [snippetsEntry, setSnippetsEntry] = useState(0);
 
@@ -198,12 +218,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
         appearance: 'Appearance', terminal: 'Terminal Behavior',
         notifications: 'Notifications', startup: 'Startup & Integration',
-        profiles: 'Shell Profiles', automations: 'Automations',
-        shortcuts: 'Shortcuts', connections: 'Connections',
-        peers: 'Peers', snippets: 'Snippets', updates: 'Updates', about: 'About & Legal',
+        profiles: 'Shell Profiles', ssh: 'SSH Connections', automations: 'Automations',
+        shortcuts: 'Shortcuts', connections: 'Connections (API & MCP)',
+        peers: 'Peers', snippets: 'Snippets', permissions: 'Permissions', updates: 'Updates', about: 'About & Legal',
     };
-    // Peers/Connections own their own live flow; About & Legal and Updates are
-    // action-only (no saved fields); Startup and Notifications apply live
+    // Peers/Connections own their own live flow; About & Legal, Updates and
+    // Permissions are action-only (no saved fields); Startup and Notifications apply live
     // (persisted on change) — none are dirty-tracked.
     //
     // `isTracked` is an EXCLUSION list, so a new category is dirty-tracked BY DEFAULT. Left out,
@@ -216,7 +236,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // Snippets is excluded for the neighbouring reason: it applies live, persisting per mutation
     // with no Save button (plan/029 §7.1), so it too has nothing to snapshot and nothing to revert.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'automations' && c !== 'snippets';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'automations' && c !== 'snippets' && c !== 'permissions' && c !== 'ssh';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -239,6 +259,29 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // can. Sharing one string is what let the panel show one verdict while
     // the button enforced another (014 B4).
     const [updateBlockedReason, setUpdateBlockedReason] = useState<string | null>(null);
+    // What the update would do: `full` closes every terminal and says why. Whether
+    // it may run at all is the backend's verdict above, never decided here.
+    const [updateAvailability, setUpdateAvailability] = useState<UpdateAvailability | null>(null);
+    // The mode follows the release notes of the last update check, so a sample taken
+    // before that check finished can be superseded by one taken after it.
+    const updateAvailabilityGenRef = useRef(0);
+    // What the last update check said the release asks for. It is handed to every
+    // availability sample, so a sample never depends on which call finished first;
+    // cleared whenever a check finds no release.
+    const checkedMarkerModeRef = useRef<UpdateMarkerMode | undefined>(undefined);
+    const refreshUpdateAvailability = useCallback(async () => {
+        const gen = ++updateAvailabilityGenRef.current;
+        try {
+            const availability = await window.electronAPI?.updateAvailable?.(checkedMarkerModeRef.current);
+            if (gen !== updateAvailabilityGenRef.current) return;
+            setUpdateBlockedReason(null);
+            setUpdateAvailability(availability ?? null);
+        } catch (err) {
+            if (gen !== updateAvailabilityGenRef.current) return;
+            setUpdateBlockedReason(String(err));
+            setUpdateAvailability(null);
+        }
+    }, []);
     const refreshHotswapPreflight = useCallback(async () => {
         try {
             await window.electronAPI?.hotswapAvailable?.();
@@ -246,13 +289,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         } catch (err) {
             setHotswapBlockedReason(String(err));
         }
-        try {
-            await window.electronAPI?.updateAvailable?.();
-            setUpdateBlockedReason(null);
-        } catch (err) {
-            setUpdateBlockedReason(String(err));
-        }
-    }, []);
+        await refreshUpdateAvailability();
+    }, [refreshUpdateAvailability]);
     // Velopack auto-update status. 'unavailable'/'notInstalled' ⇒ this build has
     // no updater (or isn't a Velopack install) → the check-for-updates block hides.
     const [updateStatus, setUpdateStatus] = useState<{ state: string; version?: string }>({ state: 'unavailable' });
@@ -263,18 +301,34 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         if (!window.electronAPI?.checkForUpdates) return;
         setCheckingUpdate(true);
         try {
-            setUpdateStatus(await window.electronAPI.checkForUpdates());
+            const status = await window.electronAPI.checkForUpdates();
+            setUpdateStatus(status);
+            // The check is what says which way the release wants to be applied, so a
+            // sample taken before it finished judged the wrong mode: take it again.
+            checkedMarkerModeRef.current = status.state === 'available' ? status.markerMode : undefined;
+            void refreshUpdateAvailability();
         } catch {
+            checkedMarkerModeRef.current = undefined;
             setUpdateStatus({ state: 'notInstalled' });
         } finally {
             setCheckingUpdate(false);
         }
-    }, []);
-    const doUpdateAndRestart = useCallback(async () => {
+    }, [refreshUpdateAvailability]);
+    // The update that must close every terminal answers `needsConfirmation` with what
+    // it would close; nothing is closed until the user agrees to exactly that.
+    const [fullUpdateConfirmation, setFullUpdateConfirmation] = useState<UpdateConfirmation | null>(null);
+    const runUpdate = useCallback(async (confirmation?: UpdateConfirmation) => {
         setApplyingUpdate(true);
         try {
-            await window.electronAPI?.updateAndRestart?.();
-            // Success exits the process during the call.
+            const result = await window.electronAPI?.updateAndRestart?.(
+                confirmation ? confirmTokenFor(confirmation) : undefined,
+            );
+            // `started`: the process exits during the call.
+            if (result?.outcome === 'started') return;
+            setApplyingUpdate(false);
+            // What is true now differs from what was agreed to (or nothing was yet):
+            // ask again about this, never act on the earlier answer.
+            if (result?.outcome === 'needsConfirmation') setFullUpdateConfirmation(result);
         } catch (err) {
             setApplyingUpdate(false);
             dispatch(addToast({ message: `Update failed: ${String(err)}`, type: 'error' }));
@@ -297,19 +351,37 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             }));
         }
     }, [dispatch]);
-    // Re-check the preflight whenever the Updates panel is opened (and reset the
-    // arm state), so the caveat reflects the current terminals.
+    // Whenever the Updates category is entered: reset the arm state and refresh
+    // the things that do NOT depend on the pty-host (the GitHub update check is
+    // a network round-trip, so it runs on entry only, not on every tab switch).
     useEffect(() => {
         if (activeCategory === 'updates') {
             setOffloadArmed(false);
-            void refreshHotswapPreflight();
             void refreshUpdateStatus();
-            void window.electronAPI?.connectedHostRetention?.()
-                .then(setHostRetention)
-                .catch(() => setHostRetention({ state: 'unknown' }));
             void window.electronAPI?.getAppVersion?.().then((v) => setAppVersion(v)).catch(() => {});
         }
-    }, [activeCategory, refreshHotswapPreflight, refreshUpdateStatus]);
+    }, [activeCategory, refreshUpdateStatus]);
+    // The offload verdict and the retention copy are functions of the pty-host
+    // connection, and that connection is LAZY: the first terminal connects it,
+    // seconds after a restored Settings tab has mounted and rehydrated onto
+    // Updates (`settingsLastCategory`). Sampled at mount, the verdict was
+    // "pty-host not connected — nothing to keep alive" and it stayed — Offload
+    // disabled — until the category changed, which is exactly what a user who
+    // offloaded from this panel and reopened the app saw. So sample only while
+    // the panel is actually visible, and re-sample on every host-connection
+    // edge the backend reports (`pty-host:state`, bridged in tauri-bridge.ts).
+    const refreshHostVerdicts = useCallback(() => {
+        void refreshHotswapPreflight();
+        void window.electronAPI?.connectedHostRetention?.()
+            .then(setHostRetention)
+            .catch(() => setHostRetention({ state: 'unknown' }));
+    }, [refreshHotswapPreflight]);
+    useEffect(() => {
+        if (!isActive || activeCategory !== 'updates') return;
+        refreshHostVerdicts();
+        window.addEventListener('pty-host:state', refreshHostVerdicts);
+        return () => window.removeEventListener('pty-host:state', refreshHostVerdicts);
+    }, [isActive, activeCategory, refreshHostVerdicts]);
 
     const isDirty = useCallback((): boolean => {
         if (!isTracked(activeCategory) || !baseline) return false;
@@ -325,6 +397,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setFontWeightBold(baseline.fontWeightBold as TerminalFontWeight));
             dispatch(setTabSizingMode(baseline.tabSizingMode as 'shrink' | 'scroll' | 'fixed'));
             dispatch(setFixedTabWidth(baseline.fixedTabWidth));
+            dispatch(setTabRunningCue(baseline.tabRunningCue as TabRunningCue));
+            dispatch(setCanvasBusyCue(baseline.canvasBusyCue as CanvasBusyCue));
             dispatch(setColorSchema(baseline.colorSchemaId));
             dispatch(setNonFocusedPaneOpacity(baseline.nonFocusedPaneOpacity));
             dispatch(setAgentColorSchemes(Object.fromEntries(baseline.agentColorSchemes)));
@@ -335,7 +409,6 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setCommandSuggestions(baseline.commandSuggestions));
             dispatch(setActivateTabOnApiCreate(baseline.activateTabOnApiCreate));
             dispatch(setCanvasWheelMode(baseline.canvasWheelMode as CanvasWheelMode));
-            dispatch(setCanvasBusyCue(baseline.canvasBusyCue as CanvasBusyCue));
             dispatch(setDefaultEditor(baseline.defaultEditor));
         } else if (baseline.kind === 'shortcuts') {
             dispatch(setCustomKeybindings(Object.fromEntries(baseline.customKeybindings)));
@@ -355,7 +428,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // baseline, while for an automation draft nothing has been written at all and only the editor
     // knows how to persist or drop it. Routing both through one handler would have made "Save" on a
     // dirty automation draft save the *settings* and then throw the draft away.
-    const [unsavedOwner, setUnsavedOwner] = useState<'settings' | 'automations'>('settings');
+    const [unsavedOwner, setUnsavedOwner] = useState<'settings' | 'automations' | 'ssh'>('settings');
 
     // Guard the internal category switch.
     const requestCategoryChange = useCallback((target: SettingsCategory) => {
@@ -366,8 +439,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         // category silently discarded an unsaved rule. The deep-link handler above and the tab-close
         // guard below reach the same code, which is why the check lives here rather than in the
         // sidebar's onClick.
-        if (activeCategory === 'automations' && isAutomationEditorDirty()) {
-            setUnsavedOwner('automations');
+        if ((activeCategory === 'automations' && isAutomationEditorDirty()) || (activeCategory === 'ssh' && isSshEditorDirty())) {
+            setUnsavedOwner(activeCategory as 'automations' | 'ssh');
             setPendingAction(() => go);
             setShowUnsaved(true);
             return;
@@ -398,11 +471,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
             c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
-            c === 'profiles' || c === 'automations' || c === 'shortcuts' || c === 'connections' ||
-            c === 'peers' || c === 'snippets' || c === 'updates' || c === 'about';
+            c === 'profiles' || c === 'ssh' || c === 'automations' || c === 'shortcuts' || c === 'connections' ||
+            c === 'peers' || c === 'snippets' || c === 'permissions' || c === 'updates' || c === 'about';
+        // A known but unavailable category falls back even for an explicit deep link,
+        // rather than restoring some unrelated saved category or leaving a blank page.
+        const availableCategory = (c: SettingsCategory): SettingsCategory =>
+            c === 'permissions' && !isMac ? 'appearance' : c;
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
-            requestCategoryChange(pending);
+            requestCategoryChange(availableCategory(pending));
             categoryAttemptedRef.current = true;
             setCategoryHydrated(true);
         } else if (!categoryAttemptedRef.current) {
@@ -414,7 +491,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 try {
                     const saved = await window.electronAPI?.getConfigValue?.('settingsLastCategory');
                     if (typeof saved === 'string' && isCategory(saved)) {
-                        requestCategoryChange(saved);
+                        requestCategoryChange(availableCategory(saved));
                     }
                 } catch { /* keep the default */ }
                 finally { setCategoryHydrated(true); }
@@ -423,13 +500,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         const handler = (e: Event) => {
             const cat = (e as CustomEvent).detail;
             if (typeof cat === 'string' && isCategory(cat)) {
-                requestCategoryChange(cat);
+                requestCategoryChange(availableCategory(cat));
                 setSnippetsEntry((entry) => entry + 1);
             }
         };
         window.addEventListener('settings:goto-category', handler);
         return () => window.removeEventListener('settings:goto-category', handler);
-    }, [requestCategoryChange]);
+    }, [requestCategoryChange, isMac]);
 
     // Persist the active category on every change, so the restore above has something
     // to read next launch. Gated on `categoryHydrated` — otherwise the very first
@@ -453,12 +530,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
-        if (unsavedOwner === 'automations') {
+        if (unsavedOwner === 'automations' || unsavedOwner === 'ssh') {
             // The navigation is CONDITIONAL on the save succeeding. A refused save that still
             // navigated would unmount the editor and take the draft with it — the loss this whole
             // guard exists to prevent, arrived at by way of its own Save button. The prompt is
             // re-raised so the user is not left believing the work was stored.
-            void saveAutomationEditorDraft().then((saved) => {
+            void (unsavedOwner === 'ssh' ? saveSshEditorDraft() : saveAutomationEditorDraft()).then((saved) => {
                 if (!saved) {
                     setShowUnsaved(true);
                     return;
@@ -474,8 +551,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const handleUnsavedDiscard = useCallback(() => {
         setShowUnsaved(false);
-        if (unsavedOwner === 'automations') {
-            discardAutomationEditorDraft();
+        if (unsavedOwner === 'automations' || unsavedOwner === 'ssh') {
+            if (unsavedOwner === 'ssh') discardSshEditorDraft();
+            else discardAutomationEditorDraft();
         } else {
             revertToBaseline();
         }
@@ -494,8 +572,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     guardImplRef.current = (proceed: () => void) => {
         // Closing the Settings TAB discards an unsaved automation draft exactly as switching
         // category did (§5.2 names all three routes), so the same question is asked here.
-        if (activeCategory === 'automations' && isAutomationEditorDirty()) {
-            setUnsavedOwner('automations');
+        if ((activeCategory === 'automations' && isAutomationEditorDirty()) || (activeCategory === 'ssh' && isSshEditorDirty())) {
+            setUnsavedOwner(activeCategory as 'automations' | 'ssh');
             setPendingAction(() => proceed);
             setShowUnsaved(true);
             return true;
@@ -684,7 +762,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setNetCfg(cfg);
             // Keep the renderer's bearer token current so its own (loopback) calls
             // stay authorized once the network token is being enforced.
-            if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+            if (cfg.authToken) setStoredApiToken(cfg.authToken);
             // The restart re-binds, so the effective ports may have changed too.
             await refreshEffective();
             dispatch(addToast({ message: 'Network settings applied — servers restarted.', type: 'success' }));
@@ -743,7 +821,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setNetCfg(cfg);
             setRevealToken(true);
             // Update the renderer's bearer token to the freshly rotated one.
-            if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+            if (cfg.authToken) setStoredApiToken(cfg.authToken);
             dispatch(addToast({ message: 'Access token rotated.', type: 'success' }));
         } catch (err) {
             dispatch(addToast({ message: `Failed to rotate token: ${err}`, type: 'error' }));
@@ -758,7 +836,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
      * `enabled: false` for an endpoint we are NOT currently serving.
      *
      * The displayed port falls back to the configured one when this instance holds nothing
-     * (servers stopped, or suppressed for an elevated profile) — which is fine to LOOK at,
+     * (servers stopped) — which is fine to LOOK at,
      * and wrong to hand out: the configured port is exactly where a sibling instance is
      * listening, so a copied URL would point an agent or a colleague at another app.
      */
@@ -836,6 +914,58 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const handleSetDefault = (profileId: string) => {
         dispatch(setDefaultProfile(profileId));
+    };
+
+    const [addingProfile, setAddingProfile] = useState(false);
+
+    const [removingIds, setRemovingIds] = useState<string[]>([]);
+
+    // Adding or removing a profile saves the Shell Profiles page at once: the
+    // backend writes profiles.json, and the list goes to config through
+    // merge_config, whose `config:changed` broadcast updates every window (a
+    // window left with the old list would write it back on its next Save).
+    // The baseline then moves to the saved state so nothing reads as unsaved.
+    const commitProfiles = async (next: ShellProfile[], nextDefault: string) => {
+        dispatch(setShellProfiles(next));
+        if (nextDefault && nextDefault !== store.getState().settings.defaultProfile) {
+            dispatch(setDefaultProfile(nextDefault));
+        }
+        await window.electronAPI?.setConfigValue('shellProfiles', next);
+        setBaseline((prev) => prev?.kind === 'profiles'
+            ? snapshotCategory('profiles', store.getState().settings)
+            : prev);
+    };
+
+    const handleAddProfile = async (input: NewShellProfileInput) => {
+        if (!window.electronAPI?.addShellProfile) {
+            throw new Error('Adding profiles requires the desktop app.');
+        }
+        const created: ShellProfile = await window.electronAPI.addShellProfile(input);
+        const fresh = store.getState().settings;
+        await commitProfiles(
+            [...fresh.shellProfiles.filter((p) => p.id !== created.id), created],
+            fresh.defaultProfile,
+        );
+        setAddingProfile(false);
+        dispatch(addToast({ message: `Added shell profile "${created.name}"`, type: 'success' }));
+    };
+
+    const handleRemoveProfile = async (profile: ShellProfile) => {
+        if (removingIds.includes(profile.id)) return;
+        setRemovingIds((ids) => [...ids, profile.id]);
+        try {
+            await window.electronAPI?.deleteShellProfile?.(profile.id);
+            const fresh = store.getState().settings;
+            const remaining = fresh.shellProfiles.filter((p) => p.id !== profile.id);
+            const nextDefault = fresh.defaultProfile === profile.id
+                ? remaining[0]?.id ?? ''
+                : fresh.defaultProfile;
+            await commitProfiles(remaining, nextDefault);
+        } catch (err) {
+            dispatch(addToast({ message: `Could not remove "${profile.name}": ${err instanceof Error ? err.message : String(err)}`, type: 'error' }));
+        } finally {
+            setRemovingIds((ids) => ids.filter((id) => id !== profile.id));
+        }
     };
 
     const handleBrowseEditor = async () => {
@@ -993,6 +1123,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             ),
         },
         {
+            id: 'ssh',
+            label: 'SSH Connections',
+            icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6h.01M7 17h.01"/></svg>,
+        },
+        {
             id: 'automations',
             label: 'Automations',
             icon: (
@@ -1012,7 +1147,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         },
         {
             id: 'connections',
-            label: 'Connections',
+            label: 'Connections (API & MCP)',
             icon: (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M9 17H7A5 5 0 0 1 7 7h2" /><path d="M15 7h2a5 5 0 0 1 0 10h-2" /><line x1="8" y1="12" x2="16" y2="12" />
@@ -1034,6 +1169,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             icon: (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" />
+                </svg>
+            ),
+        },
+        {
+            id: 'permissions',
+            label: 'Permissions',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z" /><path d="m9 12 2 2 4-4" />
                 </svg>
             ),
         },
@@ -1140,6 +1284,55 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     you reach off-screen tabs with the mouse wheel or the ‹ › arrow buttons.
                     “Fixed width, scroll” gives every tab the same configurable width and
                     scrolls the same way once they overflow.
+                </span>
+            </div>
+            <div className="setting-item">
+                <label className="setting-label" htmlFor="tab-running-cue">
+                    Busy indicator on tabs
+                </label>
+                <select
+                    id="tab-running-cue"
+                    className="setting-input"
+                    value={settings.tabRunningCue}
+                    onChange={(e) => dispatch(setTabRunningCue(e.target.value as TabRunningCue))}
+                >
+                    <option value="pulse">Pulse the tab icon, low power (default)</option>
+                    <option value="animated">Animated sweep</option>
+                    <option value="static">Static highlight</option>
+                    <option value="off">Off</option>
+                </select>
+                <span className="help-text">
+                    How a tab shows that something inside it, such as an agent, is producing
+                    output. “Pulse” makes the tab’s icon glow and dim once a second.
+                    “Animated sweep” steps a band across the tab a few times a second;
+                    it is easier to spot but redraws the window about five times as often.
+                    “Static highlight” keeps the highlight still, so busy tabs cost no redraws
+                    at all. “Off” removes the cue from tabs.
+                </span>
+            </div>
+            <div className="setting-item">
+                <label className="setting-label" htmlFor="canvas-busy-cue">
+                    Busy indicator in Canvas Mode
+                </label>
+                <select
+                    id="canvas-busy-cue"
+                    className="setting-input"
+                    value={settings.canvasBusyCue}
+                    onChange={(e) => dispatch(setCanvasBusyCue(e.target.value as CanvasBusyCue))}
+                >
+                    <option value="pulse">Pulse the node header, low power (default)</option>
+                    <option value="sweep">Animated sweep across the node</option>
+                    <option value="dot">Blinking dot in the node title</option>
+                    <option value="static">Static highlight</option>
+                    <option value="off">Off</option>
+                </select>
+                <span className="help-text">
+                    The same choice for nodes on the canvas. “Pulse”, “Animated sweep” and
+                    “Static highlight” light the node header, and still show when you zoom out
+                    far enough for nodes to collapse to name tiles. “Blinking dot” is a small
+                    light in the node title instead, with nothing shown on collapsed tiles. The
+                    Canvas sidebar blinks a busy terminal’s shell icon, except with “Static
+                    highlight” or “Off”, where nothing on the canvas moves.
                 </span>
             </div>
             <div className="setting-item">
@@ -1509,29 +1702,6 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 (Shift+wheel pans sideways) and Ctrl/Cmd+wheel zooms the canvas instead — font
                 zoom then stays on Ctrl/Cmd+wheel in the terminal you are editing.
             </span>
-            <div className="setting-item">
-                <label className="setting-label" htmlFor="canvas-busy-cue">
-                    Busy indicator in Canvas Mode
-                </label>
-                <select
-                    id="canvas-busy-cue"
-                    className="setting-input"
-                    value={settings.canvasBusyCue}
-                    onChange={(e) => dispatch(setCanvasBusyCue(e.target.value as CanvasBusyCue))}
-                >
-                    <option value="sweep">Sweep across the node (default)</option>
-                    <option value="dot">Blinking dot in the node title</option>
-                </select>
-            </div>
-            <span className="help-text">
-                How a node on the canvas shows that something inside it is producing output.
-                “Sweep” runs a soft band across the node header — easy to pick out across a whole
-                canvas, and the only cue that still shows when you zoom out far enough for nodes
-                to collapse to name tiles. “Blinking dot” is quieter and animates less: a small
-                light in the node title, muted while the terminal is idle and blinking while it
-                is busy, with nothing shown on collapsed tiles. The Canvas sidebar list blinks
-                its shell icon either way.
-            </span>
             <div className="setting-item setting-item-row">
                 <label className="setting-label" htmlFor="default-editor">
                     Default editor for opening file links
@@ -1565,7 +1735,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const renderProfiles = () => (
         <div className="settings-section">
-            <h2>Shell Profiles</h2>
+            <div className="profiles-heading">
+                <h2>Shell Profiles</h2>
+                {!addingProfile && (
+                    <button
+                        type="button"
+                        className="set-default-btn"
+                        onClick={() => setAddingProfile(true)}
+                    >
+                        + Add profile
+                    </button>
+                )}
+            </div>
+            {addingProfile && (
+                <AddShellProfileForm
+                    onSubmit={handleAddProfile}
+                    onCancel={() => setAddingProfile(false)}
+                    onBrowse={window.electronAPI?.pickExecutablePath
+                        ? () => window.electronAPI!.pickExecutablePath!('Select shell executable')
+                        : undefined}
+                />
+            )}
             {settings.shellProfiles.map((profile: ShellProfile) => (
                         <div key={profile.id} className={`profile-card ${settings.defaultProfile === profile.id ? 'active-profile' : ''}`}>
                             <div className="profile-header">
@@ -1576,17 +1766,32 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                     )}
                                 </div>
 
-                                {settings.defaultProfile !== profile.id && (
-                                    <button
-                                        className="set-default-btn"
-                                        onClick={() => handleSetDefault(profile.id)}
-                                    >
-                                        Set as Default
-                                    </button>
-                                )}
+                                <div className="profile-actions">
+                                    {profile.is_custom && (
+                                        <button
+                                            type="button"
+                                            className="set-default-btn remove-profile-btn"
+                                            onClick={() => handleRemoveProfile(profile)}
+                                            disabled={removingIds.includes(profile.id)}
+                                            aria-label={`Remove profile ${profile.name}`}
+                                        >
+                                            Remove
+                                        </button>
+                                    )}
+                                    {settings.defaultProfile !== profile.id && (
+                                        <button
+                                            className="set-default-btn"
+                                            onClick={() => handleSetDefault(profile.id)}
+                                        >
+                                            Set as Default
+                                        </button>
+                                    )}
+                                </div>
                             </div>
 
-                            <div className="profile-path">{profile.path}</div>
+                            <div className="profile-path">
+                                {profile.path}{profile.args?.length ? ` ${profile.args.join(' ')}` : ''}
+                            </div>
 
                             <div className="cwd-input-group" style={{ marginTop: '1rem' }}>
                                 <label className="setting-label">Start In Directory</label>
@@ -1731,7 +1936,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         <>
                 <div className="settings-section">
                     <div className="connections-heading">
-                        <h2>Connections</h2>
+                        <h2>{categories.find(category => category.id === 'connections')?.label}</h2>
                         <span className={`instance-badge ${IS_DEV ? 'dev' : 'prod'}`}>
                             ● {IS_DEV ? 'Dev' : 'Production'}
                         </span>
@@ -1811,6 +2016,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                             {!mcpPortDirty && fallbackNote(mcpPort, effective?.mcpPort)}
                         </div>
                         {conflictNote('MCP Server')}
+                        {/* Plan 047: the corporate-proxy case. Applies to shells spawned after
+                            the change — env is handed over at spawn and never rewritten. */}
+                        <label className="toggle-row">
+                            <input
+                                type="checkbox"
+                                checked={settings.exemptLoopbackFromProxy}
+                                onChange={(e) => dispatch(setExemptLoopbackFromProxy(e.target.checked))}
+                            />
+                            <span>Bypass the system proxy for localhost in shells TermFlow starts</span>
+                        </label>
+                        <p className="help-text">
+                            When HTTP_PROXY or HTTPS_PROXY is set, new terminals get{' '}
+                            <code>NO_PROXY</code> with localhost, 127.0.0.1 and ::1 appended (existing
+                            entries are kept), so an agent running in the terminal reaches this MCP
+                            server directly instead of through the proxy. Applies to terminals opened
+                            after the change.
+                        </p>
                     </div>
 
                     {/* Network access */}
@@ -1905,7 +2127,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
                 {showMcpModal && (
                     // This modal WRITES an agent's MCP config, so it must name the port this
-                    // instance actually serves: the configured one sends Claude/Codex/Gemini
+                    // instance actually serves: the configured one sends Claude/Codex/Antigravity
                     // to whichever instance owns 42032, which on a second profile is not us.
                     <McpConnectModal
                         interfaces={interfaces}
@@ -1959,12 +2181,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     <label className="setting-label">Application updates</label>
                     {updateStatus.state === 'available' ? (
                         <>
-                            <p className="help-text">
-                                Version <strong>{updateStatus.version}</strong> is available. Updating keeps
-                                your terminals running — they reattach to the new version automatically.
-                            </p>
+                            {updateAvailability?.mode === 'full' ? (
+                                <div data-testid="update-full-notice">
+                                    <p className="help-text">
+                                        Version <strong>{updateStatus.version}</strong> is available. This update
+                                        closes <strong>all terminals</strong> when it is applied; you are asked to
+                                        confirm first.
+                                    </p>
+                                    {fullUpdateReasonLines(updateAvailability.reasons).map((line) => (
+                                        <p key={line} className="help-text" style={{ marginTop: 4 }}>{line}</p>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="help-text">
+                                    Version <strong>{updateStatus.version}</strong> is available. Updating keeps
+                                    your terminals running — they reattach to the new version automatically.
+                                </p>
+                            )}
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                                <button className="save-btn apply-btn" onClick={doUpdateAndRestart} disabled={applyingUpdate || !!updateBlockedReason}>
+                                <button className="save-btn apply-btn" onClick={() => void runUpdate()} disabled={applyingUpdate || !!updateBlockedReason}>
                                     {applyingUpdate ? 'Updating…' : `Update to ${updateStatus.version} & Restart`}
                                 </button>
                                 <button className="link-btn" onClick={() => void refreshUpdateStatus()} disabled={checkingUpdate || applyingUpdate}>
@@ -1976,6 +2211,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                     ⚠ {updateBlockedReason}
                                 </p>
                             )}
+                            <ConfirmDialog
+                                isOpen={fullUpdateConfirmation !== null}
+                                destructive
+                                title={fullUpdateDialogTitle(fullUpdateConfirmation?.version ?? '')}
+                                message={fullUpdateConfirmation && (
+                                    <div data-testid="update-full-dialog">
+                                        <p>{fullUpdateDialogLead(fullUpdateConfirmation)}</p>
+                                        {fullUpdateReasonLines(fullUpdateConfirmation.reasons).map((line) => (
+                                            <p key={line} style={{ marginTop: 8 }}>{line}</p>
+                                        ))}
+                                    </div>
+                                )}
+                                onConfirm={() => {
+                                    const agreed = fullUpdateConfirmation;
+                                    setFullUpdateConfirmation(null);
+                                    if (agreed) void runUpdate(agreed);
+                                }}
+                                onCancel={() => setFullUpdateConfirmation(null)}
+                                confirmText="Close terminals & update"
+                                cancelText="Cancel"
+                            />
                         </>
                     ) : (
                         <p className="help-text">
@@ -2058,11 +2314,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'notifications': return renderNotifications();
             case 'startup': return renderStartup();
             case 'profiles': return renderProfiles();
+            case 'ssh': return <SshConnectionsPanel />;
             case 'automations': return <AutomationsPanel />;
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
             case 'peers': return <PeersPanel />;
             case 'snippets': return <SnippetsPanel focusSearchSignal={snippetsEntry} />;
+            case 'permissions': return isMac ? <PermissionsSection /> : renderAppearance();
             case 'updates': return renderUpdates();
             case 'about': return <AboutLegalPanel />;
             default: return null;
@@ -2083,7 +2341,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             <aside className="settings-sidebar">
                 <div className="settings-sidebar-title">Settings</div>
                 <nav className="settings-nav">
-                    {categories.map((cat) => (
+                    {categories.filter((cat) => cat.id !== 'permissions' || isMac).map((cat) => (
                         <button
                             key={cat.id}
                             className={`settings-nav-item ${activeCategory === cat.id ? 'active' : ''}`}
@@ -2112,7 +2370,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                             {Math.round(zoom * 100)}%
                         </button>
                     )}
-                    <button className="save-btn" onClick={handleSaveSettings}>Save Settings</button>
+                    {activeCategory !== 'ssh' && <button className="save-btn" onClick={handleSaveSettings}>Save Settings</button>}
                 </div>
             </div>
 

@@ -38,6 +38,10 @@ export const TERMINAL_BOUND_FIELDS = [
   'notifyMuted',
   'sessionKey',
   'seededForTabId',
+  'elevated',
+  'apiCreated',
+  'titleColor',
+  'ssh',
 ] as const;
 
 /** The terminal-bound half of a pane node — everything that must follow the terminal. */
@@ -271,6 +275,36 @@ export function findSessionKeyByTerminalId(
 }
 
 
+/**
+ * Is the pane holding `terminalId` running its pty-host session at High
+ * integrity (Administrator)? Mirrors `findSessionKeyByTerminalId` — same
+ * search, different field — so `TerminalPane`'s two spawn call sites (mount
+ * and restart-in-place) read the SAME source of truth instead of each
+ * threading a prop that could drift from the tree (plan 045, R8).
+ */
+export function findElevatedByTerminalId(
+  treesByTabId: Record<string, PaneNode | null>,
+  terminalId: string,
+): boolean {
+  const search = (node: PaneNode | null): boolean | undefined => {
+    if (!node) return undefined;
+    // `undefined` is the normal legacy/non-admin value.  It must still count
+    // as a match: otherwise this search carries on into another malformed
+    // duplicate leaf and can borrow that leaf's elevation state.
+    if (node.type === 'terminal' && node.terminalId === terminalId) return node.elevated ?? false;
+    for (const c of node.children ?? []) {
+      const found = search(c);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  for (const tree of Object.values(treesByTabId)) {
+    const found = search(tree);
+    if (found !== undefined) return found;
+  }
+  return false;
+}
+
 export function findTabIdByTerminalId(
   treesByTabId: Record<string, PaneNode | null>,
   terminalId: string,
@@ -409,4 +443,35 @@ export function tabHasNoPanes(
   tabId: string,
 ): boolean {
   return treesByTabId[tabId] == null;
+}
+
+/** All terminal leaf nodes in a tree, in depth-first order. */
+export function getPaneLeaves(node: PaneNode | null | undefined): PaneNode[] {
+  if (!node) return [];
+  if (node.type === 'terminal') return [node];
+  if (node.children) return node.children.flatMap((c) => getPaneLeaves(c));
+  return [];
+}
+
+/** Find a terminal leaf by its terminalId across all tabs' trees. */
+export function findLeafByTerminalId(
+  treesByTabId: Record<string, PaneNode | null>,
+  terminalId: string,
+): PaneNode | null {
+  const find = (node: PaneNode | null): PaneNode | null => {
+    if (!node) return null;
+    if (node.type === 'terminal' && node.terminalId === terminalId) return node;
+    if (node.type === 'split' && node.children) {
+      for (const c of node.children) {
+        const found = find(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  for (const tabId of Object.keys(treesByTabId)) {
+    const leaf = find(treesByTabId[tabId]);
+    if (leaf) return leaf;
+  }
+  return null;
 }

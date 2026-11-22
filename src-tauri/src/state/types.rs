@@ -18,6 +18,17 @@ use super::render::FocusReportingTracker;
 /// the screen snapshot that follows it doesn't paint over it.
 pub const REPLAY_SEPARATOR: &str = "\r\n\x1b[2m──── session restored ──── \x1b[0m\r\n\r\n";
 
+/// A restored terminal's one-shot replay for the renderer's first hydration: the previous
+/// session's scrollback (blob + [`REPLAY_SEPARATOR`]) and where the renderer must put its
+/// cursor afterwards (see `restore_frame`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayPrefix {
+    pub text: String,
+    /// The row (1-based) the shell's prompt will be on in ConPTY's frame. `None`: leave the
+    /// cursor where the replay ended.
+    pub anchor_row: Option<u16>,
+}
+
 /// The boot window's label (Tauri's default when `tauri.conf.json` defines no
 /// explicit `label`). Also the fallback target for API/MCP terminal routing.
 pub const DEFAULT_ACTIVE_WINDOW: &str = "main";
@@ -27,21 +38,28 @@ pub const DEFAULT_ACTIVE_WINDOW: &str = "main";
 /// 2J-cleared frames never enter scrollback, so this stays TUI-safe.
 pub const SCROLLBACK_LINES: usize = 5000;
 
-/// Exclusive recovery/registration ownership for one pty-host session.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HostSessionClaimState {
-    Reserved,
-    RegistrationInProgress,
-    Registered,
-}
-
-#[derive(Clone, Debug)]
-pub struct HostSessionClaim {
-    pub state: HostSessionClaimState,
-    pub pid: u32,
-    /// Process identity currently registered under this session, if any. This
-    /// stops a stale exit callback from retiring a replacement's claim.
-    pub process_id: Option<String>,
+/// One surviving host of an older generation. It keeps serving the shells it
+/// already holds; new terminals are never routed to it while a current host is
+/// usable.
+#[derive(Clone)]
+pub struct FrozenHost {
+    pub id: crate::elevated_host::FrozenId,
+    /// Install-dir generation of the host binary; `None` for a legacy host
+    /// whose generation cannot be shown.
+    pub generation: Option<String>,
+    pub endpoint: String,
+    pub client: crate::pty_host_client::PtyHostClient,
+    /// Bumped on every reconnect so a callback from a superseded connection
+    /// can recognise itself as stale and do nothing.
+    pub epoch: u64,
+    pub build_id: Option<String>,
+    /// When the host's record was last written. Among older hosts, the most
+    /// recently advertised one is the preferred place for a new terminal when the
+    /// current host is unusable; a heuristic, not build chronology.
+    pub advertised: std::time::SystemTime,
+    /// Whether the host process image lives inside the updater's payload, i.e.
+    /// would not survive a payload swap. `None` is unknown.
+    pub exe_in_payload: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -109,9 +127,8 @@ pub struct Terminal {
     /// has no rename verb, so a renamed leaf would orphan a live session
     /// (design 014 §A2).
     ///
-    /// `== renderer_terminal_id` for anything created on this build. It differs
-    /// ONLY for a terminal migrated from a pre-014 build, where it keeps the old
-    /// `tb-` key so an already-armed session still reattaches after the upgrade.
+    /// New hosted shells use `<leaf>~<32 hex>`. Restored shells keep their
+    /// exact key, including legacy keys and keys recovered under a new leaf.
     ///
     /// Empty when deserialising a pre-014 payload; callers treat empty as
     /// "fall back to the leaf".
@@ -172,16 +189,6 @@ pub fn session_key_of(t: &Terminal) -> String {
         return t.session_key.clone();
     }
     t.renderer_terminal_id.clone().unwrap_or_else(|| t.id.clone())
-}
-
-/// Mint a process id: `pc-` + 9 chars, matching the renderer's `utils/id.ts`
-/// shape so every id space looks alike apart from its prefix.
-///
-/// PER RUN, deliberately. A process id identifies one PTY run and must not
-/// survive a restart — that is exactly what makes `tm-` (the durable leaf) the
-/// id MCP hands out to agents instead (design 014 §A3).
-pub fn mint_process_id() -> String {
-    format!("pc-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..9])
 }
 
 fn default_terminal_cols() -> u16 {
@@ -275,6 +282,38 @@ pub enum McpProcessHandle {
     },
 }
 
+/// What the MCP sidecar was launched with: the facts a stand-in holder must reproduce. Derived
+/// from the same locals as the environment the process was spawned with (`mcp_launch_env`), so it
+/// describes what is actually listening, not what the config says now.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpLaunch {
+    /// The effective `MCP_PORT`.
+    pub port: u16,
+    /// `MCP_HOST`: `0.0.0.0` or `127.0.0.1`.
+    pub bind_host: String,
+    /// The bearer token the sidecar enforces; `None` exactly when it runs open.
+    pub auth_token: Option<String>,
+}
+
+// Written by hand: a derived `Debug` would print the token into any log that formats it.
+impl std::fmt::Debug for McpLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpLaunch")
+            .field("port", &self.port)
+            .field("bind_host", &self.bind_host)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// A running MCP sidecar and the launch it came from. They live in one slot cell, so install,
+/// stale-generation and removal rules apply to both and there is no second field to keep in step.
+#[derive(Debug)]
+pub struct McpProcess {
+    pub handle: McpProcessHandle,
+    pub launch: McpLaunch,
+}
+
 use std::sync::Mutex;
 use std::collections::VecDeque;
 
@@ -283,6 +322,7 @@ use std::collections::VecDeque;
 /// select a replacement child between checking and removing it.
 pub struct GenerationSlot<T> {
     next_generation: u64,
+    exhausted: bool,
     current: Option<(u64, T)>,
 }
 
@@ -291,10 +331,24 @@ mod generation_slot_tests {
     use super::GenerationSlot;
 
     #[test]
+    fn exhausted_generation_refuses_spawn_and_stop_invalidates_the_last_claim() {
+        let mut slot = GenerationSlot::new();
+        slot.next_generation = u64::MAX - 1;
+        let generation = slot.claim_generation().unwrap();
+        assert_eq!(generation, u64::MAX);
+        assert_eq!(slot.install_if_current(generation, "control"), Ok(None));
+        assert_eq!(slot.take(), Some("control"));
+        assert!(slot.claim_generation().is_err());
+        assert_eq!(slot.install_if_current(generation, "late"), Err("late"));
+        assert!(!slot.is_present());
+        assert_eq!(slot.next_generation, u64::MAX);
+    }
+
+    #[test]
     fn a_stale_spawn_cannot_replace_a_newer_slot_or_clear_it() {
         let mut slot = GenerationSlot::new();
-        let old = slot.claim_generation();
-        let new = slot.claim_generation();
+        let old = slot.claim_generation().unwrap();
+        let new = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(old, "old"), Err("old"));
         assert_eq!(slot.install_if_current(new, "new"), Ok(None));
         assert!(!slot.clear_if_current(old));
@@ -305,13 +359,108 @@ mod generation_slot_tests {
     #[test]
     fn replacement_returns_the_displaced_handle_and_stop_invalidates_a_spawn_claim() {
         let mut slot = GenerationSlot::new();
-        let first = slot.claim_generation();
+        let first = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(first, "first-child"), Ok(None));
-        let replacement = slot.claim_generation();
+        let replacement = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(replacement, "replacement-child"), Ok(Some("first-child")));
-        let in_flight = slot.claim_generation();
+        let in_flight = slot.claim_generation().unwrap();
         assert_eq!(slot.take(), Some("replacement-child"));
         assert_eq!(slot.install_if_current(in_flight, "late-child"), Err("late-child"));
+    }
+
+    // ---- GenerationSlot<McpProcess>: the launch record travels with its process ----
+
+    use super::{McpLaunch, McpProcess, McpProcessHandle};
+
+    /// A process that has already exited, carrying a launch record only `port` identifies.
+    fn process(port: u16) -> McpProcess {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+        #[cfg(windows)]
+        let mut child = std::process::Command::new("cmd").args(["/c", "exit", "0"]).spawn().expect("spawn a trivial child");
+        #[cfg(not(windows))]
+        let mut child = std::process::Command::new("sh").args(["-c", "true"]).spawn().expect("spawn a trivial child");
+        assert!(child.wait().expect("reap the trivial child").success());
+        McpProcess {
+            handle: McpProcessHandle::Legacy(child),
+            launch: McpLaunch { port, bind_host: "127.0.0.1".into(), auth_token: Some(format!("tok-{port}")) },
+        }
+    }
+
+    #[test]
+    fn the_handover_projection_reads_the_installed_launch_and_the_configured_port() {
+        use crate::app_config::NetworkConfig;
+        use crate::state::mcp_handover::{handover_inputs, HandoverInputs};
+        let network = NetworkConfig { mcp_port: 4300, ..NetworkConfig::defaults() };
+        let mut slot = GenerationSlot::new();
+
+        assert_eq!(
+            handover_inputs(&slot, &network),
+            HandoverInputs { launch: None, configured_port: 4300 },
+            "an empty slot has no launch, and the configured port still comes from the config"
+        );
+
+        let generation = slot.claim_generation().unwrap();
+        let installed = process(4311);
+        let expected = installed.launch.clone();
+        assert!(slot.install_if_current(generation, installed).is_ok(), "the generation is current");
+        let inputs = handover_inputs(&slot, &network);
+        assert_eq!(inputs.launch, Some(expected.clone()), "the installed launch, field by field");
+        assert_eq!((expected.port, expected.bind_host.as_str(), expected.auth_token.as_deref()), (4311, "127.0.0.1", Some("tok-4311")));
+        assert_eq!(inputs.configured_port, 4300);
+        assert_ne!(inputs.configured_port, expected.port, "the effective port is not the configured one");
+
+        slot.take();
+        assert_eq!(handover_inputs(&slot, &network).launch, None, "a removed process takes its launch with it");
+    }
+
+    fn current_port(slot: &GenerationSlot<McpProcess>) -> Option<u16> {
+        slot.current().map(|p| p.launch.port)
+    }
+
+    #[test]
+    fn a_stale_spawns_install_is_refused_and_its_launch_never_becomes_current() {
+        let mut slot = GenerationSlot::new();
+        let old = slot.claim_generation().unwrap();
+        let new = slot.claim_generation().unwrap();
+        let refused = slot.install_if_current(old, process(1001)).expect_err("the stale generation is refused");
+        assert_eq!(refused.launch.port, 1001, "the refused process comes back with its own launch");
+        assert_eq!(current_port(&slot), None, "nothing is current after a refusal");
+        assert!(slot.install_if_current(new, process(1002)).unwrap().is_none());
+        assert_eq!(current_port(&slot), Some(1002));
+        // and a stale install after the newer one is installed still changes nothing
+        let again = slot.install_if_current(old, process(1003)).expect_err("still stale");
+        assert_eq!(again.launch.port, 1003);
+        assert_eq!(current_port(&slot), Some(1002));
+    }
+
+    #[test]
+    fn take_and_take_if_current_remove_the_launch_with_the_process() {
+        let mut slot = GenerationSlot::new();
+        let g = slot.claim_generation().unwrap();
+        slot.install_if_current(g, process(2001)).unwrap();
+        assert_eq!(slot.take().map(|p| p.launch.port), Some(2001));
+        assert_eq!(current_port(&slot), None, "take removed the launch");
+
+        let g = slot.claim_generation().unwrap();
+        slot.install_if_current(g, process(2002)).unwrap();
+        assert!(slot.take_if_current(g + 1).is_none(), "another generation takes nothing");
+        assert_eq!(current_port(&slot), Some(2002), "and leaves the launch in place");
+        assert_eq!(slot.take_if_current(g).map(|p| p.launch.port), Some(2002));
+        assert_eq!(current_port(&slot), None, "take_if_current removed the launch");
+    }
+
+    #[test]
+    fn a_stale_clear_leaves_the_newer_launch_and_a_current_clear_removes_it() {
+        let mut slot = GenerationSlot::new();
+        let old = slot.claim_generation().unwrap();
+        slot.install_if_current(old, process(3001)).unwrap();
+        let new = slot.claim_generation().unwrap();
+        let displaced = slot.install_if_current(new, process(3002)).unwrap().expect("the first process is displaced");
+        assert_eq!(displaced.launch.port, 3001, "a replacement returns the displaced process with its launch");
+        assert!(!slot.clear_if_current(old), "the stale termination clears nothing");
+        assert_eq!(current_port(&slot), Some(3002));
+        assert!(slot.clear_if_current(new));
+        assert_eq!(current_port(&slot), None);
     }
 }
 
@@ -319,19 +468,23 @@ impl<T> GenerationSlot<T> {
     pub fn new() -> Self {
         Self {
             next_generation: 0,
+            exhausted: false,
             current: None,
         }
     }
 
-    pub fn claim_generation(&mut self) -> u64 {
-        self.next_generation = self.next_generation.wrapping_add(1);
-        self.next_generation
+    pub fn claim_generation(&mut self) -> Result<u64, String> {
+        if self.exhausted { return Err("process generation exhausted".into()); }
+        match self.next_generation.checked_add(1) {
+            Some(generation) => { self.next_generation = generation; Ok(generation) }
+            None => { self.exhausted = true; Err("process generation exhausted".into()) }
+        }
     }
 
     /// Installs a spawned child only if no later spawn has claimed the slot.
     /// The caller must terminate the returned stale child itself.
     pub fn install_if_current(&mut self, generation: u64, handle: T) -> Result<Option<T>, T> {
-        if self.next_generation == generation {
+        if !self.exhausted && self.next_generation == generation {
             Ok(self.current.replace((generation, handle)).map(|(_, displaced)| displaced))
         } else {
             Err(handle)
@@ -364,21 +517,18 @@ impl<T> GenerationSlot<T> {
     pub fn take(&mut self) -> Option<T> {
         // Stop is a lifecycle boundary: a child which has claimed a generation
         // but has not installed yet must fail installation after this point.
-        self.claim_generation();
+        let _ = self.claim_generation();
         self.current.take().map(|(_, handle)| handle)
     }
 
     pub fn is_present(&self) -> bool {
         self.current.is_some()
     }
-}
 
-/// An in-flight cross-window pane drag. The source window registers it; the
-/// window the user releases over claims it (and the source removes its pane).
-#[derive(Clone)]
-pub struct GlobalDrag {
-    pub token: String,
-    pub source_label: String,
+    /// The installed value, whichever generation installed it.
+    pub fn current(&self) -> Option<&T> {
+        self.current.as_ref().map(|(_, value)| value)
+    }
 }
 
 // Generic over the Tauri runtime `R` (defaults to `Wry`, the production runtime)
@@ -392,6 +542,8 @@ pub struct GlobalDrag {
 // (only `AppHandle<R>` is, for any `R: Runtime`). Every field is an `Arc`/`String`/
 // `PathBuf`/`AppHandle<R>`, all cheaply cloneable independent of `R: Clone`.
 pub struct AppState<R: Runtime = Wry> {
+    pub ssh_sessions: Arc<crate::ssh::session::SessionRegistry>,
+    pub(crate) ssh_launches: Arc<crate::ssh::launch::LaunchRegistry>,
     // Folder passed to the first GUI instance. The boot window already exists, so
     // the renderer consumes this once instead of the backend creating a second one.
     // Arc-shared like every sibling field so `Clone` shares (not snapshots) it — the
@@ -411,6 +563,7 @@ pub struct AppState<R: Runtime = Wry> {
     // the same shard — i.e. creating or closing a colliding terminal stalled for
     // the full sleep. Mirrors the `terminal_history` Arc pattern below.
     pub shell_writer_channels: Arc<DashMap<String, Arc<Mutex<Box<dyn std::io::Write + Send>>>>>,
+    pub local_processes: Arc<DashMap<String, crate::pty_manager::LocalProcess>>,
     pub ptys: Arc<DashMap<String, Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     // Broadcast channel for PTY output
     pub output_tx: broadcast::Sender<ChannelPayload>,
@@ -457,7 +610,7 @@ pub struct AppState<R: Runtime = Wry> {
     pub tmux_sessions: Arc<DashMap<String, Mutex<TmuxSession>>>,
     // MCP process handle and generation are one atomic ownership slot. A stale
     // lifecycle operation may only take the generation it installed.
-    pub mcp_process: Arc<Mutex<GenerationSlot<McpProcessHandle>>>,
+    pub mcp_process: Arc<Mutex<GenerationSlot<McpProcess>>>,
     // termflow-fabric peering sidecar handle for graceful shutdown. `None` when
     // the fabric binary is absent (open-core builds run fine without it).
     pub fabric_process: Arc<Mutex<GenerationSlot<tauri_plugin_shell::process::CommandChild>>>,
@@ -467,6 +620,11 @@ pub struct AppState<R: Runtime = Wry> {
     // When true, closing the last window hides to the tray instead of exiting, so
     // peering keeps running in the background (wired by the tray/background task).
     pub keep_running_in_background: Arc<AtomicBool>,
+    // Plan 047: when true (the default), a shell spawned while HTTP_PROXY/HTTPS_PROXY
+    // is set receives NO_PROXY with loopback appended, so an agent inside it reaches
+    // the MCP server on localhost instead of the corporate web gateway. Seeded from
+    // the instance config at startup; read at every spawn.
+    pub exempt_loopback_from_proxy: Arc<AtomicBool>,
     // Current resolved network settings (ports, expose flag, access token).
     pub network: Arc<RwLock<crate::app_config::NetworkConfig>>,
     // The ports this instance ACTUALLY serves on. Distinct from `network`, which
@@ -485,11 +643,6 @@ pub struct AppState<R: Runtime = Wry> {
     pub jwt_secret: String,
     // Tauri AppHandle for emitting events
     pub app_handle: AppHandle<R>,
-    // Single-use payloads handed off when detaching a tab/pane into a new window
-    // (or dropping a pane onto another window). Keyed by a token passed via URL.
-    pub detach_payloads: Arc<DashMap<String, serde_json::Value>>,
-    // The in-flight cross-window pane drag, if any (Phase 4 target-claims broker).
-    pub active_global_drag: Arc<Mutex<Option<GlobalDrag>>>,
     // Each window's display title (the active tab's title), keyed by window label.
     // The renderer reports this; the Window menu is built from it (race-free, vs.
     // reading back the freshly-set native title which may not have committed yet).
@@ -543,13 +696,7 @@ pub struct AppState<R: Runtime = Wry> {
     pub history_dirty: Arc<DashMap<String, ()>>,
     // One-shot restore prefix (previous-session scrollback) per processId, staged by
     // create_terminal and consumed by the /snapshot endpoint on first hydration.
-    pub replay_prefix: Arc<DashMap<String, String>>,
-    // Per-terminal serialization for history persistence (review 062): held across
-    // snapshot→render→upsert so write order always matches snapshot order (a slow
-    // periodic-flush render can't overwrite a newer exit snapshot), and taken by
-    // close_terminal around cleanup+row-delete so an in-flight persist can't
-    // resurrect an explicitly-deleted row.
-    pub history_persist_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    pub replay_prefix: Arc<DashMap<String, ReplayPrefix>>,
     // The window label that API/MCP-created terminals route to. The create event is
     // BROADCAST with this label in its payload; each window ignores it unless it
     // matches its own label (the proven app:close-requested pattern — a bare emit_to
@@ -571,19 +718,39 @@ pub struct AppState<R: Runtime = Wry> {
     // The connected sidecar client, when the pty-host flag is enabled and a
     // connection has been established. None otherwise (in-process spawn path).
     pub pty_host: Arc<Mutex<Option<crate::pty_host_client::PtyHostClient>>>,
-    // Terminal ids (tab_id) whose PTY lives in the sidecar, not in `ptys`/
-    // `shell_writer_channels`. write/resize/close/repaint route to the client
-    // for these; everything else is unchanged.
-    pub host_terminals: Arc<DashMap<String, ()>>,
+    // Terminal ids (tab_id) whose PTY lives in a sidecar, not in `ptys`/
+    // `shell_writer_channels`. write/resize/close/repaint route to the
+    // relevant client for these; everything else is unchanged. The value
+    // says WHICH sidecar (plan 045): `Primary` (this field's original,
+    // always-on meaning) or `Elevated` (the admin-tab sidecar). Never
+    // inserted/removed directly outside `commands::terminal::spawn_routed`
+    // (insert) and `AppState::forget_host_terminal` (remove) — see that
+    // method's doc and its source-assertion test.
+    pub host_terminals: Arc<DashMap<String, crate::elevated_host::HostChannel>>,
+    /// Surviving hosts of older generations, one entry per host. Touched only
+    /// in short synchronous sections; never held across an `.await`.
+    pub frozen_hosts: Arc<std::sync::Mutex<Vec<FrozenHost>>>,
+    /// Source of `FrozenId`s; ids are never reused within a run.
+    pub frozen_host_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// Admission to the hosts: who may start or adopt sessions, and when exit,
+    /// offload, update or a retirement may proceed. Never held across an `.await`.
+    pub host_table: super::host_table::HostTable,
+    /// What each surviving host answered; unanswered hosts hold restoring panes.
+    pub host_barrier: super::host_adoption::Barrier,
+    pub(crate) permission_status_flight: super::permissions::StatusFlight,
+    /// What the surviving hosts reported holding of the MCP port, for MCP startup to reclaim.
+    pub mcp_reclaim: super::mcp_reclaim::McpReclaim,
+    /// The hold a sibling's arm request keeps until its disarm.
+    pub sibling_hold: Arc<super::host_lifecycle::SiblingSlot>,
+    /// The elevated ("Open admin Tab") sidecar's connection manager (plan
+    /// 045). Lazily connected on the first elevated spawn request; torn down
+    /// when the last `Elevated` `host_terminals` entry is removed.
+    pub elevated_host: Arc<crate::elevated_host::ElevatedHost>,
     /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
     /// type so it is unit-testable without a Tauri AppHandle.
     pub identity: crate::identity_index::IdentityIndex,
-    // Sessions the sidecar still held when we connected (survived a hot-swap),
-    // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
-    // `create_host_terminal` reattaches to (instead of respawning) any tab_id
-    // present here, restoring the real pid.
-    pub host_session_claims: Arc<DashMap<String, HostSessionClaim>>,
-    pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
+    /// Shared injectable source of opaque shell-run identities.
+    pub ids: super::IdAllocator,
     pub host_restore_released: Arc<AtomicBool>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
     // hot-swap (core restart). Set by spawn_routed's reattach branch, drained once by the
@@ -616,20 +783,41 @@ pub struct AppState<R: Runtime = Wry> {
     // every session twice (duplicate replay into live parsers). A queued pass
     // re-snapshots after the first finishes, so its replay is ~empty.
     pub host_recovering: Arc<tokio::sync::Mutex<()>>,
-    // Closes that could not reach the host (pipe was down): host_close records
-    // the tab here and the next successful connect delivers the deferred Close
-    // — otherwise the session lingers alive in the host as an adoptable zombie
-    // the user explicitly closed (review 007 C-2).
-    pub host_close_pending: Arc<DashMap<String, ()>>,
+    // Set once a session key was found registered on one host while another host
+    // also reported it, so the user is told about that only once.
+    pub duplicate_session_noticed: Arc<AtomicBool>,
+    // Set true the moment a `webview_recovery` handler first claims a browser-
+    // process death, and NEVER cleared: every window shares ONE WebView2
+    // browser process, so one death fires N per-window `ProcessFailed`
+    // handlers (some still queued when the first one has already failed), and
+    // no webview survives to fail a second time. The tray's "Restart, keep
+    // terminals" does not consult it, so a failed automatic restore is still
+    // retryable from there (see `webview_recovery::report_restart_failure`).
+    pub recovering: Arc<AtomicBool>,
+    // Set while `restart_keeping_terminals` runs (auto-recovery OR the tray
+    // item), cleared by its failure paths, kept on success because the process
+    // is exiting. Two concurrent runs would each spawn a successor.
+    pub restart_in_flight: Arc<AtomicBool>,
+    // Monotonic instant taken when this `AppState` was built (Tauri `setup`,
+    // after the builder and plugins ran) — the process-uptime proxy
+    // `webview_recovery::decide` uses to tell "just launched and immediately
+    // died again" (a crash loop — hand off to the tray) from "ran fine for a
+    // while, then died" (worth an automatic relaunch). It undercounts true
+    // process uptime by the startup cost, which only makes the loop guard
+    // slightly more conservative.
+    pub started_at: Arc<std::time::Instant>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
     fn clone(&self) -> Self {
         Self {
+            ssh_sessions: self.ssh_sessions.clone(),
+            ssh_launches: self.ssh_launches.clone(),
             pending_open_path: self.pending_open_path.clone(),
             terminals: self.terminals.clone(),
             root_leaf_claims: self.root_leaf_claims.clone(),
             shell_writer_channels: self.shell_writer_channels.clone(),
+            local_processes: self.local_processes.clone(),
             ptys: self.ptys.clone(),
             output_tx: self.output_tx.clone(),
             terminal_history: self.terminal_history.clone(),
@@ -653,14 +841,13 @@ impl<R: Runtime> Clone for AppState<R> {
             fabric_process: self.fabric_process.clone(),
             fabric_control_port: self.fabric_control_port,
             keep_running_in_background: self.keep_running_in_background.clone(),
+            exempt_loopback_from_proxy: self.exempt_loopback_from_proxy.clone(),
             network: self.network.clone(),
             effective_endpoints: self.effective_endpoints.clone(),
             api_shutdown: self.api_shutdown.clone(),
             network_op_lock: self.network_op_lock.clone(),
             jwt_secret: self.jwt_secret.clone(),
             app_handle: self.app_handle.clone(),
-            detach_payloads: self.detach_payloads.clone(),
-            active_global_drag: self.active_global_drag.clone(),
             window_titles: self.window_titles.clone(),
             windows: self.windows.clone(),
             flush_acks: self.flush_acks.clone(),
@@ -674,22 +861,31 @@ impl<R: Runtime> Clone for AppState<R> {
             canvas_nodes: self.canvas_nodes.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
-            history_persist_locks: self.history_persist_locks.clone(),
             active_window: self.active_window.clone(),
             main_window: self.main_window.clone(),
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
+            frozen_hosts: self.frozen_hosts.clone(),
+            frozen_host_seq: self.frozen_host_seq.clone(),
+            host_table: self.host_table.clone(),
+            host_barrier: self.host_barrier.clone(),
+            permission_status_flight: self.permission_status_flight.clone(),
+            mcp_reclaim: self.mcp_reclaim.clone(),
+            sibling_hold: self.sibling_hold.clone(),
+            elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
-            host_session_claims: self.host_session_claims.clone(),
-            host_restore_pending_windows: self.host_restore_pending_windows.clone(),
+            ids: self.ids.clone(),
             host_restore_released: self.host_restore_released.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
             pty_host_connecting: self.pty_host_connecting.clone(),
             host_stream_offsets: self.host_stream_offsets.clone(),
             host_recovering: self.host_recovering.clone(),
-            host_close_pending: self.host_close_pending.clone(),
+            duplicate_session_noticed: self.duplicate_session_noticed.clone(),
+            recovering: self.recovering.clone(),
+            restart_in_flight: self.restart_in_flight.clone(),
+            started_at: self.started_at.clone(),
         }
     }
 }
@@ -768,7 +964,8 @@ pub(crate) fn retarget_owning_tab(
     // Nothing inside takes another lock, so this cannot deadlock against the
     // read-only occupancy scan in `create_terminal`.
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.owning_tab_id.as_deref() != Some(owner) {
@@ -812,7 +1009,8 @@ pub(crate) fn set_display_label(
         .map(str::to_string);
     // `iter_mut`, not scan-then-`get_mut`: the match and the write happen under the same shard guard.
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.display_label != next {
@@ -839,7 +1037,8 @@ pub(crate) fn set_title_color(
         .filter(|color| !color.is_empty())
         .map(str::to_string);
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.title_color != next {
@@ -905,9 +1104,8 @@ mod terminal_identity_serde_tests {
         }
     }
 
-    /// Design 014 §A2: the four spaces must be simultaneously representable and
-    /// must survive a round trip. `session_key` differs from the leaf ONLY for a
-    /// terminal migrated from a pre-014 build, which is the case pinned here.
+    /// The identity spaces round-trip independently, including exact legacy
+    /// session keys whose renderer leaf has changed.
     #[test]
     fn every_identity_round_trips_including_a_migrated_session_key() {
         let mut t = sample();
@@ -947,11 +1145,10 @@ mod terminal_identity_serde_tests {
 
     #[test]
     fn mint_process_id_is_prefixed_and_unique() {
-        let a = super::mint_process_id();
-        let b = super::mint_process_id();
-        assert!(a.starts_with("pc-"), "got {a}");
+        let a = crate::state::mint_process_id().unwrap();
+        let b = crate::state::mint_process_id().unwrap();
+        assert!(regex::Regex::new(r"^pc-[0-9a-f]{32}$").unwrap().is_match(&a), "got {a}");
         assert_ne!(a, b, "two mints must not collide");
-        assert_eq!(a.len(), "pc-".len() + 9, "9 chars after the prefix, matching utils/id.ts");
     }
 
     /// The EMITTED key must stay `tab_id`. `#[serde(alias = "tab_id")]` would
@@ -1159,19 +1356,14 @@ mod retarget_owning_tab_tests {
         assert_eq!(t.renderer_terminal_id.as_deref(), Some("tm-x"));
     }
 
-    /// The map is keyed by the PROCESS id; the renderer only ever knows the leaf.
     #[test]
-    fn it_matches_on_the_leaf_not_on_the_map_key() {
+    fn an_explicit_process_reference_updates_only_that_process() {
         let terminals = one_split_pane();
-        assert_eq!(
-            retarget_owning_tab(&terminals, "pc-1", "tb-b"),
-            Ok(false),
-            "the map key is not a renderer identity"
-        );
-        assert_eq!(
-            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
-            Some("tb-a"),
-        );
+        assert_eq!(retarget_owning_tab(&terminals, "pc-missing", "tb-b"), Ok(false));
+        assert_eq!(terminals.get("pc-1").unwrap().owning_tab_id.as_deref(), Some("tb-a"));
+        assert_eq!(retarget_owning_tab(&terminals, "pc-1", "tb-b"), Ok(true));
+        assert_eq!(terminals.get("pc-1").unwrap().owning_tab_id.as_deref(), Some("tb-b"));
+        assert_eq!(terminals.get("pc-1").unwrap().renderer_terminal_id.as_deref(), Some("tm-x"));
     }
 
     /// Panes move freely; a leaf with no live PTY (never spawned, already exited,

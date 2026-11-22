@@ -23,6 +23,21 @@
     }
 
     #[test]
+    fn opaque_process_and_host_session_keys_round_trip_in_identity_responses() {
+        let mut terminal = identity_sample();
+        terminal.id = "pc-0123456789ab4cde8fab0123456789ab".into();
+        terminal.session_key = "tm-original~0123456789ab4cde8fab0123456789ac".into();
+        let value = terminal_identity_json(&terminal, "ui", crate::state::Marker::Current);
+        let decoded: serde_json::Value = serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap();
+        assert_eq!(decoded["processId"], terminal.id);
+        assert_eq!(decoded["id"], terminal.id);
+        assert_eq!(decoded["sessionKey"], terminal.session_key);
+        assert_eq!(decoded["terminalId"], "tm-9f2c1a4b7");
+        let terminal: crate::state::Terminal = serde_json::from_str(&serde_json::to_string(&terminal).unwrap()).unwrap();
+        assert_eq!(terminal.session_key, "tm-original~0123456789ab4cde8fab0123456789ac");
+    }
+
+    #[test]
     fn parent_title_colour_reads_only_the_resolved_parent_leaf() {
         let terminals = DashMap::new();
         let mut parent = identity_sample();
@@ -38,6 +53,31 @@
         assert_eq!(parent_title_color(&terminals, Some("tm-parent")).as_deref(), Some("#a855f7"));
         assert_eq!(parent_title_color(&terminals, Some("tm-sibling")).as_deref(), Some("#06b6d4"));
         assert_eq!(parent_title_color(&terminals, Some("tm-gone")), None);
+    }
+
+    /// The renderer needs two things beyond the replay text to put its cursor where ConPTY believes
+    /// the prompt is, and not to throw away the shell's own output as a snapshot would let it.
+    #[test]
+    fn a_restore_snapshot_says_it_is_prefix_only_and_carries_its_anchor_only_when_it_has_one() {
+        for row in [1u16, 7, 24] {
+            let anchored = restore_snapshot_body(&crate::state::ReplayPrefix { text: "abc".into(), anchor_row: Some(row) }, 24, 80);
+            assert_eq!(anchored, serde_json::json!({ "snapshot": "abc", "rows": 24, "cols": 80, "prefixOnly": true, "anchorRow": row }));
+        }
+        let plain = restore_snapshot_body(&crate::state::ReplayPrefix { text: "abc".into(), anchor_row: None }, 24, 80);
+        assert_eq!(plain, serde_json::json!({ "snapshot": "abc", "rows": 24, "cols": 80, "prefixOnly": true }));
+        assert!(plain.get("anchorRow").is_none(), "an absent anchor is absent, not null: the renderer leaves the cursor alone");
+    }
+
+    /// The wire-shape test above is vacuous if the handler builds its restore response another way.
+    #[test]
+    fn the_snapshot_handler_serves_a_staged_restore_through_the_restore_body() {
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        let handler = &source[source.find("pub(crate) async fn get_terminal_snapshot(").expect("handler")..];
+        let handler = &handler[..handler.find("\n}\n").expect("end of handler")];
+        assert!(handler.contains("state.replay_prefix.remove(&id)"));
+        assert!(handler.contains("return Json(restore_snapshot_body(&prefix, rows, cols));"));
+        // The screen-based snapshot is the terminal's real screen: it must NOT claim to be prefix-only.
+        assert_eq!(handler.matches("prefixOnly").count(), 0, "prefixOnly belongs to restore_snapshot_body alone");
     }
 
     #[test]
@@ -58,7 +98,7 @@
     /// its own object; it does not.
     #[test]
     fn the_shared_identity_payload_carries_no_canvas_node_block() {
-        let v = terminal_identity_json(&identity_sample(), "ui");
+        let v = terminal_identity_json(&identity_sample(), "ui", crate::state::Marker::Current);
         assert!(
             v.get("node").is_none(),
             "the node block must be merged at the get_terminal call site, not here —              otherwise list_terminals pays for it on every entry"
@@ -70,7 +110,7 @@
     /// every existing API/MCP client (D4).
     #[test]
     fn an_identity_response_carries_all_three_ids_under_exact_keys() {
-        let v = terminal_identity_json(&identity_sample(), "ui");
+        let v = terminal_identity_json(&identity_sample(), "ui", crate::state::Marker::Current);
         assert_eq!(v["id"], json!("pc-abc123def"));
         assert_eq!(v["processId"], json!("pc-abc123def"));
         assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
@@ -78,6 +118,18 @@
         assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
         assert_eq!(v["mode"], json!("ui"));
         assert_eq!(v["promptHook"], json!(true));
+    }
+
+    /// The marker the tab strip draws is read from this key. A terminal on an older
+    /// host says so, and one on the running build's says that too: the key is
+    /// never left out for the reader to default.
+    #[test]
+    fn an_identity_response_says_which_generation_serves_the_terminal() {
+        use crate::state::Marker;
+        let previous = terminal_identity_json(&identity_sample(), "ui", Marker::Previous);
+        assert_eq!(previous["generation"], json!("previous"));
+        let current = terminal_identity_json(&identity_sample(), "ui", Marker::Current);
+        assert_eq!(current["generation"], json!("current"));
     }
 
     /// Design 011 §7 test 5 asserted `leaf == owner` for a renderer-created tab
@@ -91,7 +143,7 @@
         let mut t = identity_sample();
         t.renderer_terminal_id = Some("tm-9f2c1a4b7".into());
         t.owning_tab_id = Some("tb-4e8d0c2f1".into());
-        let v = terminal_identity_json(&t, "ui");
+        let v = terminal_identity_json(&t, "ui", crate::state::Marker::Current);
         assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
         assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
         assert_ne!(v["terminalId"], v["owningTabId"]);
@@ -105,7 +157,7 @@
         let mut t = identity_sample();
         t.renderer_terminal_id = None;
         t.owning_tab_id = None;
-        let v = terminal_identity_json(&t, "ui");
+        let v = terminal_identity_json(&t, "ui", crate::state::Marker::Current);
         assert_eq!(v["terminalId"], json!(null));
         assert_eq!(v["tabId"], json!(null));
         assert_eq!(v["owningTabId"], json!(null));

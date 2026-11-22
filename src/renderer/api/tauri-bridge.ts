@@ -1,15 +1,26 @@
+import type { SshAPI, SshMetricsAPI, SshSessionView, SshPromptReceipt, SshLaunchEvent, SshMetricsWatchReceipt, SshMetricsResumeReceipt } from '../types/ssh';
 import { invoke } from '@tauri-apps/api/core';
+import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
-import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
+import type { HostGeneration, TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
+import type { ExpectedPermissionSubject, PermissionKind, PermissionView } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
-import { apiTokenKey } from '../services/profileScope';
+import { getStoredApiToken, setStoredApiToken } from '../services/profileScope';
 import { apiBase, invalidateApiBase } from './apiBase';
+import { paneIncarnations } from '../services/paneIncarnations';
+
+async function transferPageArgs(): Promise<{ pg: number }> {
+  if (paneIncarnations.ended) throw new Error('transfer page ended');
+  const page = await paneIncarnations.pageIdentity();
+  if (!page) throw new Error('transfer requires a desktop page');
+  return { pg: page.pg };
+}
 
 export interface NetworkConfig {
   apiPort: number;
@@ -28,8 +39,45 @@ export interface EffectiveEndpoints {
 export type UpdateStatus =
   | { state: 'notInstalled' }
   | { state: 'upToDate' }
-  | { state: 'available'; version: string }
+  | { state: 'available'; version: string; markerMode: UpdateMarkerMode }
   | { state: 'unavailable' };
+
+/** What a release's own notes ask of an update, as the check that found it reports it. */
+export type UpdateMarkerMode = 'offload' | 'full';
+
+/** Why an update has to close every terminal (mirrors the Rust `FullReason`). */
+export type FullUpdateReason =
+  | { kind: 'marker' }
+  | { kind: 'hostInPayload'; host: string }
+  | { kind: 'hostOriginUnknown'; host: string };
+
+/** What `updateAvailable` says an update would do (mirrors the Rust `Availability`). */
+export interface UpdateAvailability {
+  mode: 'offload' | 'full';
+  reasons: FullUpdateReason[];
+}
+
+/** What a full update closes and why, handed back by `updateAndRestart` for the user to agree to. */
+export interface UpdateConfirmation {
+  version: string;
+  shellCount: number;
+  /** At least one host did not say what it holds: `shellCount` is a lower bound. */
+  unknown: boolean;
+  reasons: FullUpdateReason[];
+}
+
+/** The agreement sent back with `updateAndRestart`; `targetVersion` is the confirmation's `version`. */
+export interface UpdateConfirmToken {
+  targetVersion: string;
+  shellCount: number;
+  unknown: boolean;
+  reasons: FullUpdateReason[];
+}
+
+/** What `updateAndRestart` resolves to (mirrors the Rust `UpdateRestart`). */
+export type UpdateRestart =
+  | { outcome: 'started' }
+  | ({ outcome: 'needsConfirmation' } & UpdateConfirmation);
 
 /** Retention policy of the PTY host the app is connected to, not a discovery record. */
 export type ConnectedHostRetention =
@@ -44,7 +92,9 @@ export interface NetworkInterfaceInfo {
 }
 
 // Define the interface to match existing usage
-interface ElectronAPI {
+interface ElectronAPI extends SshAPI, SshMetricsAPI {
+  pickFile?: (title?: string) => Promise<string | null>;
+  ssh?: import('../types/ssh').SshBridgeApi & import('../types/ssh').SshLaunchApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
     offset: number;
@@ -58,7 +108,7 @@ interface ElectronAPI {
   /// directly. `screen` is the whole viewport in one string, not a row array.
   getTerminalScreenText: (terminalId: string) => Promise<{ screen: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => Promise<string>;
   /// Windows: make THIS window the owner of the shell's ConPTY pseudo-console
   /// window, so dialogs a console program parents to `GetConsoleWindow()` (the
   /// `az login` WAM prompt) open in front instead of behind the app. Fired on
@@ -91,6 +141,7 @@ interface ElectronAPI {
   updateTerminalName: (id: string, name: string) => Promise<boolean>;
   getTerminalCwd: (processId: string) => Promise<string | null>;
   getTerminalCwds: (processIds: string[]) => Promise<Record<string, string | null>>;
+  getTerminalGenerations: () => Promise<Record<string, HostGeneration>>;
   /// Backlog 011: drain the reattach prompt-gate hook for a terminal id (Some only
   /// when it was reattached after a core-restart hot-swap; null otherwise). Used to
   /// re-seed the command-suggest prompt gate after createTerminal resolves.
@@ -104,7 +155,7 @@ interface ElectronAPI {
   openDevtools: () => Promise<void>;
   openPath: (path: string) => Promise<void>;
   openInEditor: (editor: string, path: string, line?: number, col?: number) => Promise<void>;
-  pickExecutablePath: () => Promise<string | null>;
+  pickExecutablePath: (title?: string) => Promise<string | null>;
   pickSnippetsExportPath: () => Promise<string | null>;
   pickSnippetsImportPath: () => Promise<string | null>;
   exportSnippetsFile: (path: string, json: string) => Promise<void>;
@@ -114,6 +165,8 @@ interface ElectronAPI {
   onTerminalData: (callback: (id: string, data: string) => void) => void;
   onTerminalExit: (callback: (id: string, code: number, cwd?: string | null) => void) => void;
   getShellProfiles: () => Promise<any[]>;
+  addShellProfile: (profile: { name: string; path: string; args: string[]; cwd?: string }) => Promise<any>;
+  deleteShellProfile: (id: string) => Promise<void>;
   getExecutableIcon: (path: string) => Promise<string>;
   getSystemInfo: () => Promise<any>;
   getConfig: () => Promise<any>;
@@ -161,6 +214,9 @@ interface ElectronAPI {
   /// THIS instance only. A sibling profile is not consulted: offload arms our own
   /// pty-host and exits this process, so it cannot reach one (design 014 B1.2).
   hotswapAvailable: () => Promise<void>;
+  macosPermissionStatus: () => Promise<PermissionView>;
+  requestMacosPermission: (kind: PermissionKind, expected?: ExpectedPermissionSubject) => Promise<PermissionView>;
+  openMacosPermissionPane: (kind: PermissionKind) => Promise<void>;
   /// Move persisted scrollback from an old renderer leaf to a new one, for the
   /// design-014 migration of pre-014 tb- root leaves (StateManager restore).
   renameTerminalHistory: (from: string, to: string) => Promise<void>;
@@ -168,13 +224,19 @@ interface ElectronAPI {
   /// kills every process under the install root. Rejects naming any sibling that
   /// cannot be prepared. Deliberately separate from hotswapAvailable — the two
   /// verdicts differ, and sharing one made the panel disagree with the button.
-  updateAvailable: () => Promise<void>;
+  /// Resolves with the mode the update would run in; `full` closes every terminal
+  /// and lists why. Still rejects with the reason when the update cannot run.
+  /// `markerMode` is the one the update check reported for the release; leave it out
+  /// when no check has found one yet.
+  updateAvailable: (markerMode?: UpdateMarkerMode) => Promise<UpdateAvailability>;
   /// Check for a Velopack update. `unavailable` = no updater in this build.
   checkForUpdates: () => Promise<UpdateStatus>;
   /// The running app's version (from the Tauri config at build time).
   getAppVersion: () => Promise<string>;
-  /// Download + arm + apply a Velopack update, keeping terminals alive.
-  updateAndRestart: () => Promise<void>;
+  /// Download + apply a Velopack update. Offload keeps terminals alive; an update
+  /// that must close them resolves `needsConfirmation` until called again with the
+  /// `confirm` made from that answer. `started` means the app is exiting.
+  updateAndRestart: (confirm?: UpdateConfirmToken) => Promise<UpdateRestart>;
   getActiveTabAndPane: () => Promise<any>;
   createTerminalInTab: (tabId: string, paneId: string, profile: string, name: string) => Promise<any>;
   getTabs: () => Promise<any>;
@@ -185,17 +247,14 @@ interface ElectronAPI {
   flushSessionAck: () => Promise<void>;
   /** Plan 018: every window id the backend registry currently holds. */
   listWindowSessionIds: () => Promise<string[]>;
-  reportHostRestoreSettled: (windowLabel: string) => Promise<void>;
-  // Detach / cross-window pane handoff
-  stashDetachPayload: (token: string, payload: any) => Promise<void>;
-  takeDetachPayload: (token: string) => Promise<any | null>;
+  // Detach / cross-window pane transfers
   createDetachedWindow: (token: string, x?: number, y?: number) => Promise<string>;
   createNewWindow: () => Promise<string>;
   getWindowLabel: () => string;
   // Canvas connection graph (plan/013 Task 18) — see the note in `types/electron.d.ts`.
   canvasApiRequest: (path: string, init?: { method?: string; body?: unknown }) => Promise<unknown>;
   // Cross-window drag broker (Phase 4)
-  beginGlobalPaneDrag: (token: string, payload: any) => Promise<void>;
+  beginGlobalPaneDrag: (token: string) => Promise<void>;
   claimGlobalPaneDrag: (token: string) => Promise<any | null>;
   resolveOrphanGlobalDrag: (token: string) => Promise<boolean>;
   cancelGlobalPaneDrag: (token: string) => Promise<void>;
@@ -226,6 +285,7 @@ interface ElectronAPI {
   fabricStatus: () => Promise<FabricStatus>;
   // Background mode (Plan 010)
   setKeepRunningInBackground: (enabled: boolean) => Promise<void>;
+  setExemptLoopbackFromProxy: (enabled: boolean) => Promise<void>;
   // Terminal Automations (Plan 028)
   listAutomations: () => Promise<AutomationRule[]>;
   getAutomationRuntime: () => Promise<AutomationStatePayload>;
@@ -275,10 +335,11 @@ console.log('Initializing Tauri Bridge...');
 // The auth token is per-instance CONFIG (not an address), so it still comes from
 // `get_network_config`. When exposed on the network the backend enforces it on ALL
 // requests, including this renderer's loopback calls; harmless in localhost mode.
+// D5: on an elevated instance, setStoredApiToken keeps it in memory only.
 invoke<{ authToken: string }>('get_network_config')
   .then((cfg) => {
     if (cfg?.authToken) {
-      localStorage.setItem(apiTokenKey(), cfg.authToken);
+      setStoredApiToken(cfg.authToken);
     }
   })
   .catch(() => { /* the token stays whatever a previous session stored */ });
@@ -299,11 +360,44 @@ export function getWindowsBuildNumber(): number {
 }
 
 const buildAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem(apiTokenKey());
+  const token = getStoredApiToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
+async function listenSsh<T>(event: string, listener: (view: T) => void): Promise<UnlistenFn> {
+  let active = true;
+  const unlisten = await listen<T>(event, e => { if (active) listener(e.payload); });
+  const dispose = () => { if (!active) return; active = false; unlisten(); };
+  trackUnlisten(Promise.resolve(dispose));
+  return dispose;
+}
+const SSH_METRICS_PAGE_HEADER = 'x-termflow-page';
+async function invokeSshMetrics<T>(command: string, terminalId: string, consumerId: string, pg?: number): Promise<T> {
+  if (pg === undefined || !Number.isSafeInteger(pg) || pg <= 0) throw { code: 'invalid-page' };
+  return invoke<T>(command, { terminalId, consumerId }, { headers: { [SSH_METRICS_PAGE_HEADER]: String(pg) } });
+}
+
 const tauriBridge: ElectronAPI = {
+  ssh: createSshBridge(invoke, listen),
+  sshSessionOpen: async (terminalId: string, connectionId: string) => invoke<SshSessionView>('ssh_session_open', { terminalId, connectionId }),
+  sshSessionState: async (terminalId: string) => invoke<SshSessionView>('ssh_session_state', { terminalId }),
+  sshSessionClose: async (terminalId: string, generation?: number) => invoke<void>('ssh_session_close', { terminalId, generation }),
+  sshSessionReconnect: async (terminalId: string) => invoke<SshSessionView>('ssh_session_reconnect', { terminalId }),
+  sshSessionSubmitSecret: async (terminalId: string, secret: string, remember: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_session_submit_secret', { terminalId, secret, remember, ...receipt }),
+  sshSessionTrustHost: async (terminalId: string, accept: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_session_trust_host', { terminalId, accept, ...receipt }),
+  sshTestConnection: async (connectionId: string) => invoke<{ probeId: string }>('ssh_test_connection', { connectionId }),
+  sshTestState: async (probeId: string) => invoke<SshSessionView>('ssh_test_state', { probeId }),
+  sshTestClose: async (probeId: string) => invoke<void>('ssh_test_close', { probeId }),
+  sshTestSubmitSecret: async (probeId: string, secret: string, remember: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_submit_secret', { probeId, secret, remember, ...receipt }),
+  sshTestTrustHost: async (probeId: string, accept: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_trust_host', { probeId, accept, ...receipt }),
+  onSshLaunchState: (listener) => listenSsh<SshLaunchEvent>('ssh-launch:state', listener),
+  onSshSessionState: (listener) => listenSsh('ssh-session:state', listener),
+  onSshTestState: (listener) => listenSsh('ssh-test:state', listener),
+  sshMetricsWatch: (terminalId, consumerId, pg) => invokeSshMetrics<SshMetricsWatchReceipt>('ssh_metrics_watch', terminalId, consumerId, pg),
+  sshMetricsUnwatch: (terminalId, consumerId, pg) => invokeSshMetrics<void>('ssh_metrics_unwatch', terminalId, consumerId, pg),
+  sshMetricsResume: (terminalId, consumerId, pg) => invokeSshMetrics<SshMetricsResumeReceipt>('ssh_metrics_resume', terminalId, consumerId, pg),
+  onSshMetricsSample: listener => listenSsh('ssh-metrics:sample', listener),
+  onSshMetricsControl: listener => listenSsh('ssh-metrics:control', listener),
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {
     const response = await fetch(`${await apiBase()}/terminals/${terminalId}/output?lines=${lines}&offset=${offset}`, {
       headers: {
@@ -388,7 +482,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Terminal Operations
-  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => {
+  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => {
     // We pass profile (id) to Rust, it resolves to path/args
     // We also pass cwd if provided; use fitted size when known, else fall back to 80×24
     return invoke('create_terminal', {
@@ -400,10 +494,12 @@ const tauriBridge: ElectronAPI = {
       // Tauri maps camelCase JS keys onto snake_case Rust parameters, so this
       // reaches `create_terminal(… owning_tab_id: Option<String>)`.
       owningTabId,
-      // The pty-host session key for a MIGRATED pane, whose host session is
-      // still keyed by its old `tb-` id. Undefined for every pane created on
-      // this build, where the host key follows the leaf (design 014 A2.1).
+      // Exact persisted/recovered host key, including legacy sessions. Without
+      // an override the backend discovers own-leaf sessions or mints a new key.
       sessionKey,
+      // Plan 045: spawn against the elevated sidecar instead of the primary one.
+      elevated,
+      ...(sshLaunchConnectionId === undefined ? {} : { sshLaunchConnectionId }),
     });
   },
 
@@ -458,6 +554,10 @@ const tauriBridge: ElectronAPI = {
     return invoke('get_terminal_cwds', { ids: processIds });
   },
 
+  getTerminalGenerations: async () => {
+    return invoke('get_terminal_generations');
+  },
+
   takeReattachPromptHook: async (id) => {
     const r = await invoke<unknown>('take_reattach_prompt_hook', { id });
     // Version-skew safety (e.g. dev hot-reload against an older core): an old
@@ -489,11 +589,15 @@ const tauriBridge: ElectronAPI = {
   // Settings "Default editor" Browse… button. Opens a native single-file picker.
   // Filters surface common executables per-OS while still letting the user pick
   // any file (e.g. a Unix binary with no extension) via "All files".
-  pickExecutablePath: async () => {
+  pickFile: async (title?: string) => {
+    const selection = await openFileDialog({ multiple:false, directory:false, title:title ?? 'Select file' });
+    return typeof selection === 'string' ? selection : null;
+  },
+  pickExecutablePath: async (title?: string) => {
     const selection = await openFileDialog({
       multiple: false,
       directory: false,
-      title: 'Select editor executable',
+      title: title ?? 'Select editor executable',
       filters: [
         { name: 'Executables', extensions: ['exe', 'bat', 'cmd', 'com', 'app'] },
         { name: 'All files', extensions: ['*'] },
@@ -570,6 +674,15 @@ const tauriBridge: ElectronAPI = {
       console.error('Failed to get shell profiles', error);
       return [];
     }
+  },
+
+  // Settings → Shell Profiles: user-defined profiles, persisted by the backend.
+  addShellProfile: async (profile) => {
+    return invoke('add_shell_profile', { profile });
+  },
+
+  deleteShellProfile: async (id: string) => {
+    await invoke('delete_shell_profile', { id });
   },
 
   getExecutableIcon: async (path: string) => {
@@ -722,12 +835,12 @@ const tauriBridge: ElectronAPI = {
     // what came back is the CONFIGURED port, and the restart is what decides which
     // one is actually ours.
     invalidateApiBase();
-    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+    if (cfg?.authToken) setStoredApiToken(cfg.authToken);
     return cfg;
   },
   rotateAuthToken: async () => {
     const cfg = await invoke<NetworkConfig>('rotate_auth_token');
-    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+    if (cfg?.authToken) setStoredApiToken(cfg.authToken);
     return cfg;
   },
   listNetworkInterfaces: async () => invoke('list_network_interfaces'),
@@ -746,16 +859,18 @@ const tauriBridge: ElectronAPI = {
   },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
   connectedHostRetention: async () => invoke<ConnectedHostRetention>('connected_host_retention'),
-  updateAvailable: async () => {
-    await invoke('update_available');
-  },
+  updateAvailable: async (markerMode) =>
+    invoke<UpdateAvailability>('update_available', { markerMode: markerMode ?? null }),
 
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
+  macosPermissionStatus: () => invoke('macos_permission_status'),
+  requestMacosPermission: (kind, expected) => invoke('request_macos_permission', { kind, expected }),
+  openMacosPermissionPane: async (kind) => { await invoke('open_permission_pane', { kind }); },
   renameTerminalHistory: async (from: string, to: string) => {
     await invoke('rename_terminal_history', { from, to });
   },
   checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
-  updateAndRestart: async () => { await invoke('update_and_restart'); },
+  updateAndRestart: async (confirm) => invoke<UpdateRestart>('update_and_restart', { confirm: confirm ?? null }),
   // `@tauri-apps/api/app`'s getVersion() is exactly this invoke; calling it
   // directly avoids importing the app module (whose image.cjs can't load in
   // the jsdom test environment).
@@ -790,19 +905,10 @@ const tauriBridge: ElectronAPI = {
   listWindowSessionIds: async () => {
     return invoke('list_window_session_ids');
   },
-  reportHostRestoreSettled: async (windowLabel) => {
-    await invoke('report_host_restore_settled', { windowLabel });
-  },
 
-  // Detach / cross-window pane handoff
-  stashDetachPayload: async (token, payload) => {
-    await invoke('stash_detach_payload', { token, payload });
-  },
-  takeDetachPayload: async (token) => {
-    return invoke('take_detach_payload', { token });
-  },
+  // Detach / cross-window pane transfers
   createDetachedWindow: async (token, x, y) => {
-    return invoke('create_detached_window', { token, x, y });
+    return invoke('create_detached_window', { token, x, y, ...await transferPageArgs() });
   },
   createNewWindow: async () => {
     return invoke('create_new_window');
@@ -831,17 +937,17 @@ const tauriBridge: ElectronAPI = {
     // DELETE answers 204 with no body; `.json()` on that throws.
     return response.status === 204 ? null : response.json();
   },
-  beginGlobalPaneDrag: async (token, payload) => {
-    await invoke('begin_global_pane_drag', { token, payload });
+  beginGlobalPaneDrag: async (token) => {
+    await invoke('begin_global_pane_drag', { token, ...await transferPageArgs() });
   },
   claimGlobalPaneDrag: async (token) => {
-    return invoke('claim_global_pane_drag', { token });
+    return invoke('claim_global_pane_drag', { token, ...await transferPageArgs() });
   },
   resolveOrphanGlobalDrag: async (token) => {
-    return invoke('resolve_orphan_global_drag', { token });
+    return invoke('resolve_orphan_global_drag', { token, ...await transferPageArgs() });
   },
   cancelGlobalPaneDrag: async (token) => {
-    await invoke('cancel_global_pane_drag', { token });
+    await invoke('cancel_global_pane_drag', { token, ...await transferPageArgs() });
   },
 
   // Tab tear-off preview window
@@ -857,7 +963,7 @@ const tauriBridge: ElectronAPI = {
 
   // Cross-window tab drop: hit-test the release point against other windows.
   resolveTabDrop: async (token, x, y) => {
-    return invoke('resolve_tab_drop', { token, x, y });
+    return invoke('resolve_tab_drop', { token, x, y, ...await transferPageArgs() });
   },
 
   // Rebuild the native Window menu so its window list reflects current titles.
@@ -906,6 +1012,11 @@ const tauriBridge: ElectronAPI = {
   // Background mode (Plan 010): persist + mirror into the Rust AppState atomic.
   setKeepRunningInBackground: async (enabled) => {
     await invoke('set_keep_running_in_background', { enabled });
+  },
+
+  // Loopback proxy exemption (Plan 047): persist + mirror into the Rust AppState atomic.
+  setExemptLoopbackFromProxy: async (enabled) => {
+    await invoke('set_exempt_loopback_from_proxy', { enabled });
   },
 
   // --- Terminal Automations (Plan 028) ---
@@ -1008,6 +1119,22 @@ if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('peer:event', {
       detail: event.payload,
     }));
+  }));
+
+  // Host-connection edges. The pty-host connects lazily (first terminal) and can
+  // drop (sleep/wake); the Settings Updates panel caches an offload preflight
+  // that is a function of that connection and re-samples on these. Global: the
+  // connection is per process, not per window.
+  for (const name of ['pty-host:connected', 'pty-host:disconnected'] as const) {
+    trackUnlisten(listen(name, () => {
+      window.dispatchEvent(new CustomEvent('pty-host:state', { detail: name }));
+    }));
+  }
+
+  // Two hosts claiming the same terminal sessions: announced once per run by the
+  // backend, shown by GlobalHostNotices. Global, like the connection edges above.
+  trackUnlisten(listen('pty-host:duplicate-session', (event: any) => {
+    window.dispatchEvent(new CustomEvent('pty-host:duplicate-session', { detail: event.payload }));
   }));
 
   // Tray "Peers…" menu item (Plan 010): open Settings → Peers. Global (the tray

@@ -1,7 +1,7 @@
 use crate::app_config::{self, NetworkConfig};
 use crate::state::AppState;
 use std::net::SocketAddr;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(serde::Serialize)]
 pub struct NetworkInterface {
@@ -22,8 +22,15 @@ fn host_octets(expose: bool) -> [u8; 4] {
 /// A localhost HTTP client with a bounded timeout, so health/probe GETs never hang on
 /// a service that accepts the TCP connection but never answers (a blackholed port).
 /// Returns None only if the client backend fails to build (effectively never).
+///
+/// `no_proxy` is load-bearing: reqwest honours `HTTP_PROXY`/`HTTPS_PROXY` by default
+/// and only exempts hosts listed in `NO_PROXY`. Corporate machines commonly set the
+/// former without listing `localhost`, so every loopback probe would be sent to the
+/// web gateway, which answers with an HTML block page — read by `probe_port_owner` as
+/// "someone foreign owns this port" and by the health checks as "not our server".
 pub fn localhost_client(timeout_ms: u64) -> Option<reqwest::Client> {
     reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
         .ok()
@@ -96,7 +103,7 @@ pub(crate) enum RebindPlan {
 /// Choose the sequence for rebinding `target`.
 ///
 /// `serving` is the address we are ACTUALLY on — `None` when we hold nothing (stopped, or
-/// suppressed for an elevated profile). That distinction is the whole point: this used to
+/// when port binding failed). That distinction is the whole point: this used to
 /// compare `target` against the CONFIGURED address, so a second instance that owned nothing
 /// still matched "same address" and went down the stop-then-rebind path — onto a port a
 /// sibling was serving, which `SO_REUSEADDR` would have let it hijack rather than refuse.
@@ -221,7 +228,7 @@ pub async fn restart_api_server(state: AppState, cfg: &NetworkConfig) -> Result<
     // an address a second instance never held — sending it down the stop-then-rebind path
     // for a port belonging to a sibling.
     //
-    // `None` = we hold nothing (stopped, or suppressed for an elevated profile), which is
+    // `None` = we hold nothing (stopped, or when port binding failed), which is
     // never "the same address" as a port we are about to bind.
     let old_addr = {
         let net = state.network.read();
@@ -256,6 +263,7 @@ pub async fn restart_api_server(state: AppState, cfg: &NetworkConfig) -> Result<
                     cfg.api_port,
                     crate::net_ports::DEFAULT_SPAN,
                     &state.instance_id,
+                    &[],
                 )
                 .await
             };
@@ -389,9 +397,10 @@ pub async fn set_network_config(
     // API auth gate and status reads see the new values immediately rather than the
     // stale ones during sidecar startup (matches rotate_auth_token's ordering).
     *state.network.write() = cfg.clone();
-    // Only respawn the sidecar when its env actually changed — a no-op apply
+    // Only respawn the sidecar when its env actually changed, API moved, or it was not running — a no-op apply
     // shouldn't drop every client's in-memory MCP session.
-    if crate::mcp_respawn_needed(&old, &cfg) || api_moved {
+    let mcp_was_alive = crate::mcp_alive(&state);
+    if crate::mcp_respawn_needed(&old, &cfg) || (api_moved && mcp_was_alive) || !mcp_was_alive {
         // Unlike the boot path there is no walk-forward fallback here, so a sidecar that
         // came up is on exactly the configured port — but it still has to be RECORDED, or
         // Settings keeps reporting the boot-time one. Recorded ONLY on success: publishing
@@ -406,6 +415,7 @@ pub async fn set_network_config(
         crate::fabric_manager::respawn_fabric(app.clone(), (*state).clone()).await;
     }
 
+    let _ = app.emit("server-status:changed", ());
     app_config::save(&app, &cfg)?;
     Ok(cfg)
 }
@@ -426,10 +436,10 @@ pub async fn rotate_auth_token(
     // Axum server here: the port/host are unchanged, the gate reads the token
     // from shared state, and restarting would drop every UI connection and race
     // the same-port rebind (the Windows "Port did not free up" failure). Only a
-    // networked sidecar needs a respawn, since it receives the token via env at
-    // spawn time; in localhost mode the sidecar's token env is empty, so the
-    // rotation is a no-op for it and respawning would needlessly drop every MCP
-    // session (mcp_respawn_needed encodes exactly that).
+    // sidecar whose API requires auth (networked mode or elevated loopback) needs a
+    // respawn, since it receives the token via env at spawn time; in unauthenticated
+    // localhost mode the sidecar's token env is empty, so the rotation is a no-op for
+    // it and respawning would needlessly drop every MCP session (mcp_respawn_needed encodes exactly that).
     *state.network.write() = cfg.clone();
     if crate::mcp_respawn_needed(&old, &cfg) {
         // The ports do not change here, but the sidecar can still fail to come back — and a
@@ -437,11 +447,12 @@ pub async fn rotate_auth_token(
         let started = crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
         state.effective_endpoints.write().mcp_port = started.then_some(cfg.mcp_port);
     }
-    // Unlike the MCP sidecar (token only matters in networked mode), the fabric ALWAYS
+    // Unlike the MCP sidecar (token only matters when auth is required), the fabric ALWAYS
     // authenticates to the core with this token, so a rotation always leaves it stale (M6).
     if crate::fabric_manager::fabric_respawn_needed(&old, &cfg) {
         crate::fabric_manager::respawn_fabric(app.clone(), (*state).clone()).await;
     }
+    let _ = app.emit("server-status:changed", ());
     app_config::save(&app, &cfg)?;
     Ok(cfg)
 }
@@ -489,6 +500,7 @@ pub async fn stop_servers(state: State<'_, AppState>, target: String) -> Result<
         "[NET] stop_servers: target={} (api={} mcp={} fabric={})",
         target, api, stop_mcp, api
     );
+    let _ = state.app_handle.emit("server-status:changed", ());
     Ok(())
 }
 
@@ -545,6 +557,7 @@ pub async fn start_servers(
         "[NET] start_servers: target={} (api={} mcp={}) api_moved={}",
         target, api, mcp, api_moved
     );
+    let _ = app.emit("server-status:changed", ());
     Ok(())
 }
 
@@ -691,5 +704,86 @@ mod stop_surrenders_port_tests {
         let eff = state.effective_endpoints.read();
         assert_eq!(eff.api_port, None);
         assert_eq!(eff.mcp_port, Some(42036));
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // A loopback server answering one request with a 200 JSON body.
+    fn health_endpoint() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback health listener");
+        let url = format!("http://{}/health", listener.local_addr().expect("listener address"));
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept health request");
+            let mut sink = [0_u8; 1024];
+            let _ = stream.read(&mut sink);
+            stream
+                .write_all(b"HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 2
+Connection: close
+
+{}")
+                .expect("reply to health request");
+        });
+        url
+    }
+
+    /// reqwest reads HTTP_PROXY once per process, so the env must be in place before any
+    /// client exists: re-run this test binary with the env set and drive the `#[ignore]`d
+    /// probe below. The corporate shape: a proxy configured, `localhost` absent from NO_PROXY.
+    #[test]
+    fn localhost_client_ignores_a_machine_wide_http_proxy() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+        let exe = std::env::current_exe().expect("test binary path");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "network_commands::proxy_tests::probe_under_http_proxy",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("http_proxy", "http://127.0.0.1:9")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .expect("re-run test binary");
+        assert!(
+            output.status.success(),
+            "probe failed:
+--- stdout ---
+{}
+--- stderr ---
+{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "driven by localhost_client_ignores_a_machine_wide_http_proxy in a child process"]
+    async fn probe_under_http_proxy() {
+        // Control: the seam is only proven live if a default client DOES obey the proxy.
+        // Port 9 has no listener, so an obeying client fails at connect; a vacuous env
+        // (not picked up) would let this succeed and fail the test loudly instead.
+        let control = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(1500))
+            .build()
+            .expect("build control client");
+        let control_result = control.get(health_endpoint()).send().await;
+        assert!(
+            control_result.is_err(),
+            "HTTP_PROXY was not honoured by a default client — the control is inert"
+        );
+
+        // The fix: a loopback client reaches the local listener regardless of HTTP_PROXY.
+        let client = localhost_client(1500).expect("build localhost client");
+        let response = client.get(health_endpoint()).send().await.expect("loopback GET must bypass the proxy");
+        assert!(response.status().is_success());
     }
 }

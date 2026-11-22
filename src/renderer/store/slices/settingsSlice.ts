@@ -7,6 +7,7 @@ import type { CanvasWheelMode } from '../../components/Canvas/canvasGestures';
 // Same arrangement, same reason: the cue names are the node renderer's vocabulary, and a
 // second copy here would let the setting drift into a value the canvas cannot render.
 import type { CanvasBusyCue } from '../../components/Canvas/canvasBusyCue';
+import type { TabRunningCue } from '../../components/Tabs/tabRunningCue';
 
 export interface ShellProfile {
   id: string;
@@ -16,6 +17,9 @@ export interface ShellProfile {
   env: Record<string, string>;
   icon?: string;
   cwd?: string;
+  is_wsl?: boolean;
+  /** User-defined in Settings (stored in profiles.json), so it can be removed. */
+  is_custom?: boolean;
 }
 
 export interface Theme {
@@ -182,12 +186,17 @@ interface SettingsState {
   // Canvas Mode only — a wheel in a normal pane is untouched by this setting either way.
   canvasWheelMode: CanvasWheelMode;
   // How a canvas NODE reports that a process inside it is producing output (plan/023):
-  //  - 'sweep' (default): a gradient band crosses the node header once per period. Readable
-  //    at a glance across a canvas, and the only cue that survives the chip tier.
+  //  - 'pulse' (default): the header band, bright/dim once a second — matches the tab strip's
+  //    default. Like the sweep, it survives the chip tier.
+  //  - 'sweep': a gradient band steps across the node header, 5 moves a second.
   //  - 'dot': a small status light in the title area — muted when idle, accent-coloured and
-  //    blinking when busy. Nothing moves, and nothing renders at the chip tier.
+  //    blinking when busy. Nothing renders at the chip tier.
   // Canvas Mode only, and NODES only — the sidebar's row icon blinks either way.
   canvasBusyCue: CanvasBusyCue;
+  // How a tab in the strip shows that its process is producing output (see tabRunningCue.ts):
+  // 'pulse' (default, bright/dim once a second), 'animated' (a stepped sweep), 'static' (the
+  // band, parked), or 'off'.
+  tabRunningCue: TabRunningCue;
   // Sparse map of shortcutActions.ts actionId -> user-chosen combo string.
   // Absent key = use that action's registry default. See
   // docs/041-keyboard-shortcuts-customization-design.md.
@@ -197,6 +206,11 @@ interface SettingsState {
   // background; when false (default), closing the last window exits the app.
   // Persisted + mirrored into the Rust AppState via setKeepRunningInBackground.
   keepRunningInBackground: boolean;
+  // Plan 047: when true (default), a shell spawned while HTTP_PROXY/HTTPS_PROXY is set
+  // gets NO_PROXY with localhost appended, so an agent inside it reaches the MCP
+  // server directly instead of through a corporate web gateway. Persisted + mirrored
+  // into the Rust AppState via setExemptLoopbackFromProxy; applies to new terminals.
+  exemptLoopbackFromProxy: boolean;
   // Launch TermFlow automatically at OS login (Windows Run key, macOS LaunchAgent,
   // Linux autostart .desktop) via tauri-plugin-autostart. NOT persisted to config.json
   // — the OS registration is the source of truth; this field mirrors isEnabled() for
@@ -261,9 +275,11 @@ const initialState: SettingsState = {
   snippetsSortMode: 'lastUsed',
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
-  canvasBusyCue: 'sweep',
+  canvasBusyCue: 'pulse',
+  tabRunningCue: 'pulse',
   customKeybindings: {},
   keepRunningInBackground: false,
+  exemptLoopbackFromProxy: true,
   launchAtLogin: false,
   notifySoundEnabled: false,
   notifyToastEnabled: false,
@@ -490,6 +506,14 @@ const settingsSlice = createSlice({
       }
     },
 
+    setTabRunningCue: (state, action: PayloadAction<TabRunningCue>) => {
+      state.tabRunningCue = action.payload;
+      // Save to config file
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('tabRunningCue', state.tabRunningCue);
+      }
+    },
+
     // Bulk-replace the whole agent→schema map. Persists like the other setters
     // (used on config load — re-persisting the loaded value is idempotent, same
     // as setColorSchema/setFontSize — and on Settings "Discard Changes" revert).
@@ -635,6 +659,13 @@ const settingsSlice = createSlice({
       window.electronAPI?.setKeepRunningInBackground?.(action.payload);
     },
 
+    // Plan 047: same single-persistence shape as setKeepRunningInBackground — the
+    // Rust command writes the config file AND the atomic the spawn paths read.
+    setExemptLoopbackFromProxy: (state, action: PayloadAction<boolean>) => {
+      state.exemptLoopbackFromProxy = action.payload;
+      window.electronAPI?.setExemptLoopbackFromProxy?.(action.payload);
+    },
+
     // Launch-at-login: mirror the OS registration state into the store for the toggle
     // UI. NOT persisted via setConfigValue — tauri-plugin-autostart's enable()/disable()
     // owns the actual OS registration; this is only the reflected value.
@@ -707,6 +738,7 @@ export const {
   setCommandSuggestions,
   setCanvasWheelMode,
   setCanvasBusyCue,
+  setTabRunningCue,
   setAgentColorSchemes,
   setAgentColorScheme,
   removeAgentColorScheme,
@@ -722,6 +754,7 @@ export const {
   setCustomKeybinding,
   resetCustomKeybinding,
   setKeepRunningInBackground,
+  setExemptLoopbackFromProxy,
   setLaunchAtLogin,
   setNotifySoundEnabled,
   setNotifyToastEnabled,

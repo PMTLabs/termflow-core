@@ -262,8 +262,8 @@ describe('cellToStringIndex bridges cells and characters', () => {
     expect(body).not.toBeNull();
     // The column reaches the stitched line through `cellToStringIndex` and nothing else.
     expect(body![0]).toMatch(/const inRow = cellToStringIndex\(line, at\.col\);/);
-    expect(body![0])
-      .toMatch(/linkAtIndex\(\s*info\.text,\s*rowStart \+ \(inRow - rowIndent\)\s*\)/);
+    expect(body![0]).toMatch(/const idx = rowStart \+ \(inRow - rowIndent\);/);
+    expect(body![0]).toMatch(/linkAtIndex\(\s*info\.text,\s*idx\s*\)/);
     // ...and NOT the raw column, which is the defect this whole block exists for.
     expect(body![0]).not.toMatch(/rowStart \+ at\.col/);
     /**
@@ -275,6 +275,12 @@ describe('cellToStringIndex bridges cells and characters', () => {
      */
     expect(body![0]).toMatch(/const rowIndent = info\.rowIndents\[r\];/);
     expect(body![0]).toMatch(/if \(inRow < rowIndent\) return null;/);
+    // The mirror of the indent refusal, added with G1's second tier: a hard-wrapped row that
+    // stopped SHORT of the grid has blank cells after its content that the stitched text does
+    // not carry, so an index at or past the next row's start is a click on nothing — and,
+    // unclamped, a hit on the reconstructed path's head.
+    expect(body![0]).toMatch(/const nextStart = info\.rowStarts\[r \+ 1\];/);
+    expect(body![0]).toMatch(/if \(nextStart !== undefined && idx >= nextStart\) return null;/);
     // And the stitch is asked for the grid width, or it can only ever see a soft wrap.
     expect(body![0]).toMatch(/collectWrappedLine\(buf, bufferRow, term\.cols\)/);
   });

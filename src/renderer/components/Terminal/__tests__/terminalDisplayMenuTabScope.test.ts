@@ -7,11 +7,14 @@
  * canvas 2D context jsdom lacks). The RULE these lines invoke is exercised for real in
  * `hooks/__tests__/useDismissOnTabDeactivate.test.tsx`, and the identical wiring on the pane is
  * mounted for real in `Panes/__tests__/paneMenuTabScope.test.tsx`; what this file guards is that
- * the four floating surfaces THIS component owns are actually handed to it.
+ * the three floating surfaces THIS component owns are actually handed to it. (A fourth,
+ * `schemaPicker`, was removed 2026-09-16: the agent color-scheme picker is a submenu INSIDE
+ * `contextMenu` now — `customFlyout` — rather than a floating surface of its own, so clearing
+ * `contextMenu` already takes it with it.)
  *
  * The load-bearing case is the last one. Both dismissal paths in this file — the tab switch and
  * the canvas relocation — mean "this menu can no longer be where it thinks it is", and both have
- * to list every surface. A fifth surface added to the component has two places to be registered,
+ * to list every surface. A fourth surface added to the component has two places to be registered,
  * and listing it in one is exactly the kind of half-fix that leaves a menu stranded on screen in
  * only one of the two situations. Comparing the two lists to EACH OTHER, rather than each to a
  * hard-coded roster, is what makes the assertion survive the surfaces changing.
@@ -68,9 +71,9 @@ describe('TerminalDisplay dismisses its menus when its tab is switched away from
     expect(CODE).toContain('useDismissOnTabDeactivate(isActive,');
   });
 
-  it('clears all four floating surfaces', () => {
+  it('clears all three floating surfaces', () => {
     expect(clearedSlots(dismissBody())).toEqual([
-      'setContextMenu', 'setPathPicker', 'setSchemaPicker', 'setSnippetsMenu',
+      'setContextMenu', 'setPathPicker', 'setSnippetsMenu',
     ]);
   });
 

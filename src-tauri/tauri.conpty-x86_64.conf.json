@@ -1,0 +1,9 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "resources": {
+      "binaries/conpty/x86_64/conpty.dll": "resources/binaries/conpty/x86_64/conpty.dll",
+      "binaries/conpty/x86_64/OpenConsole.exe": "resources/binaries/conpty/x86_64/OpenConsole.exe"
+    }
+  }
+}

@@ -28,7 +28,7 @@ import { getAllTerminalIds } from '../store/slices/paneTreeOps';
 import { currentWindowId } from './windowScope';
 import { terminalIdsInOtherWindows } from './sessionKeepSet';
 import { apiBase } from '../api/apiBase';
-import { apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { getStoredApiToken, currentProfile, isForeignInstance } from './profileScope';
 
 /** The fields this module reads from `GET /api/processes`. Structural on
  *  purpose: the endpoint returns more, and none of the rest is our business. */
@@ -417,7 +417,7 @@ export interface LiveTerminalRows {
  */
 export async function fetchLiveTerminalRows(): Promise<LiveTerminalRows> {
   const base = await apiBase();
-  const token = localStorage.getItem(apiTokenKey());
+  const token = getStoredApiToken();
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
   const [identityRes, processes] = await Promise.all([

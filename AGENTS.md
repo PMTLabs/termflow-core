@@ -5,7 +5,6 @@
 >
 > **Agent-Specific Instructions:**
 > - Claude agents: Read `CLAUDE.md` after this file
-> - Gemini agents: Read `GEMINI.md` after this file
 >
 > This is one of four TermFlow repositories (see the parent workspace `../CLAUDE.md`). `termflow-core` is the free, open-core desktop app — the only repo required to build/run TermFlow. Product planning/backlog/progress docs live in the sibling **`termflow-fabric`** repo (`docs/backlog`, `docs/core`, `docs/design`, `docs/plan`, `docs/progress`, `docs/review`), not here — this repo's own `docs/` only holds public-safe CI/guide content.
 

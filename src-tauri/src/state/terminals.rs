@@ -14,9 +14,35 @@ use std::sync::Mutex;
 use super::render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, tail_text_with};
 use super::reattach::plan_reattach;
 use super::types::*;
+use super::host_registry;
+use crate::elevated_host::{FrozenId, HostChannel};
 
 fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> bool {
     pending_windows == 0 && !already_released
+}
+
+/// What the 60 s sweep does at a tick. The sweep is the periodic retry for hosts
+/// and sessions that were not reachable at start-up (the router retries creates
+/// on its own), so it must outlive anything that is merely *trying* to exit: an
+/// update that backs out clears the `exiting` mark its own flush set. A Quit never
+/// clears the mark; only the sticky exit quiesce means the process is going away
+/// for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SweepTick {
+    Run,
+    /// An exit may be under way: leave this tick alone, look again at the next.
+    Skip,
+    Stop,
+}
+
+pub(super) fn sweep_tick(exiting: bool, lifecycle: Option<super::host_table::QuiesceReason>) -> SweepTick {
+    if lifecycle == Some(super::host_table::QuiesceReason::Exit) {
+        SweepTick::Stop
+    } else if exiting {
+        SweepTick::Skip
+    } else {
+        SweepTick::Run
+    }
 }
 
 /// May a claimed sweep KEEP the one-shot flag? Only a sweep that actually ran
@@ -32,7 +58,7 @@ fn sweep_claim_survives(completed: bool) -> bool {
 /// Reconcile a host answer with the ownership that existed before asking for it.
 /// Ownership observed after the answer was built can suppress recovery of an
 /// orphan, but cannot prove that the older answer killed that new terminal.
-fn plan_reconnect(
+pub(super) fn plan_reconnect(
     teardown_tabs: &[String],
     sessions: &[termflow_pty_protocol::SessionMeta],
     saved_offsets: &std::collections::HashMap<String, u64>,
@@ -44,11 +70,8 @@ fn plan_reconnect(
     plan
 }
 
-fn session_needs_surface(is_registered: bool) -> bool { !is_registered }
-
-fn claim_is_owned_by(claim: &HostSessionClaim, process_id: &str) -> bool {
-    claim.process_id.as_deref() == Some(process_id)
-}
+#[cfg(test)]
+pub(super) fn session_needs_surface(is_registered: bool) -> bool { !is_registered }
 
 pub const HOST_SESSION_CONTENDED: &str = "host-session-contended";
 
@@ -60,6 +83,21 @@ mod restore_sweep_gate_tests {
     fn waits_for_every_window_then_releases_when_last_is_destroyed() {
         assert!(!restore_sweep_may_release(1, false));
         assert!(restore_sweep_may_release(0, false));
+    }
+
+    #[test]
+    fn the_sweep_survives_an_exit_that_is_only_being_attempted() {
+        use super::{sweep_tick, SweepTick};
+        use crate::state::QuiesceReason;
+        assert_eq!(sweep_tick(false, None), SweepTick::Run);
+        // A flush that may yet be abandoned (an update that backs out) or a quit in
+        // progress: this tick is skipped, the next one looks again.
+        assert_eq!(sweep_tick(true, None), SweepTick::Skip);
+        assert_eq!(sweep_tick(true, Some(QuiesceReason::Update)), SweepTick::Skip);
+        assert_eq!(sweep_tick(false, Some(QuiesceReason::Update)), SweepTick::Run);
+        // Only the sticky exit quiesce ends it, whatever the flag says.
+        assert_eq!(sweep_tick(false, Some(QuiesceReason::Exit)), SweepTick::Stop);
+        assert_eq!(sweep_tick(true, Some(QuiesceReason::Exit)), SweepTick::Stop);
     }
 
     #[test]
@@ -105,30 +143,32 @@ mod restore_sweep_gate_tests {
 
     #[test]
     fn surfaced_orphans_are_reserved_before_the_recovery_event_is_emitted() {
-        let source = include_str!("terminals.rs").replace("\r\n", "\n");
+        let source = include_str!("host_adoption/panes.rs").replace("\r\n", "\n");
         let body = source
-            .rfind("\n    pub(crate) fn surface_host_orphans")
+            .find("\npub(in crate::state) fn surface_orphans")
             .map(|start| &source[start..])
-            .and_then(|rest| rest.split("    /// Clone out the connected client").next())
-            .expect("surface_host_orphans body");
-        let reserve = body.find("self.reserve_host_session(&orphan.tab_id, orphan.pid);").expect("orphan must reserve its listed PID");
-        let emit = body.find("self.app_handle.emit").expect("orphan must emit recovery event");
-        assert!(reserve < emit, "reservation must precede recovery emission");
+            .and_then(|rest| rest.split("/// Reconcile").next())
+            .expect("surface_orphans body");
+        let eligible = body.find(".keys().recover_listed(channel, &orphan.tab_id").expect("orphan must use the atomic listed-key recovery decision");
+        let emit = body.find("port.announce_recovered(").expect("orphan must emit recovery event");
+        assert!(eligible < emit, "listed-key qualification must precede recovery emission");
+        let authority = crate::state::source_scan::production(include_str!("host_keys/effects.rs"));
+        let decision = crate::state::source_scan::fn_body(&authority, "fn recover_listed(");
+        let coalesce = decision.find("pending_deliveries.insert(").unwrap();
+        assert!(decision.find("Some(&KeyState::Listed)").unwrap() < coalesce);
+        assert!(coalesce < decision.find("delivery.send(Box::new(move ||").unwrap());
+        assert!(decision.contains("let mut inner = self.lock()"));
     }
 
     #[test]
     fn host_claim_retirement_uses_atomic_owner_guard_at_every_site() {
         let source = include_str!("terminals.rs").replace("\r\n", "\n");
-        let retirement = source
-            .rfind("\n    pub fn forget_host_session_claim_if_owner")
-            .map(|start| &source[start..])
-            .and_then(|rest| rest.split("    /// Resolve either a PTY process id").next())
-            .expect("claim retirement body");
-        assert!(retirement.contains("remove_if"), "claim retirement must use DashMap::remove_if atomically");
-        assert!(
-            retirement.contains("claim_is_owned_by(claim, process_id)"),
-            "claim retirement must check that the stored claim belongs to process_id"
-        );
+        let retirement = crate::state::source_scan::fn_body(&source, "pub fn retire_host_process(");
+        assert!(retirement.contains("self.host_table.keys().exit_process(process_id)"));
+        let keys = include_str!("host_keys.rs");
+        let end = crate::state::source_scan::fn_body(keys, "pub fn exit_process(");
+        assert!(end.contains("self.lock()") && end.contains("KeyState::Bound(process.to_string())"),
+            "ending must check the stored process under the key mutex");
         let teardown = source
             .rfind("\n    pub fn teardown_host_terminal")
             .map(|start| &source[start..])
@@ -139,54 +179,16 @@ mod restore_sweep_gate_tests {
         // outright — which would leak the claim and bring back the exit-then-Restart
         // refusal this retirement exists to prevent. Pin the presence too.
         assert!(
-            teardown.contains("forget_host_session_claim_if_owner(&key, id)"),
+            teardown.contains("retire_host_process(id)"),
             "teardown must still retire the claim it owns"
         );
     }
 }
 
 impl<R: Runtime> AppState<R> {
-    /// Reserve a listed host session for the renderer which already knows it.
-    /// This is an entry operation so recovery cannot slip a second owner between
-    /// the observation and reservation.
-    pub fn reserve_host_session(&self, session_key: &str, pid: u32) {
-        self.host_session_claims.entry(session_key.to_string()).or_insert(HostSessionClaim {
-            state: HostSessionClaimState::Reserved, pid, process_id: None,
-        });
-    }
-
-    /// Claim a session for backend registration. A recovery create consumes the
-    /// Reserved entry established from the host's authoritative listing.
-    pub fn claim_host_registration(&self, session_key: &str) -> Result<Option<u32>, String> {
-        use dashmap::mapref::entry::Entry;
-        match self.host_session_claims.entry(session_key.to_string()) {
-            Entry::Vacant(v) => {
-                v.insert(HostSessionClaim { state: HostSessionClaimState::RegistrationInProgress, pid: 0, process_id: None });
-                Ok(None)
-            }
-            Entry::Occupied(mut o) => match o.get().state {
-                HostSessionClaimState::Reserved => {
-                    let pid = o.get().pid;
-                    o.get_mut().state = HostSessionClaimState::RegistrationInProgress;
-                    Ok(Some(pid))
-                }
-                HostSessionClaimState::Registered => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is already registered")),
-                _ => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is claimed by another recovery")),
-            }
-        }
-    }
-
-    pub fn host_session_registered(&self, session_key: &str, process_id: &str) {
-        if let Some(mut claim) = self.host_session_claims.get_mut(session_key) {
-            claim.process_id = Some(process_id.to_string());
-            claim.state = HostSessionClaimState::Registered;
-        }
-    }
-
-    /// Retire only the registration owned by this exact process. A late Exit for
-    /// an old process must not erase a replacement which reused the session key.
-    pub fn forget_host_session_claim_if_owner(&self, session_key: &str, process_id: &str) {
-        self.host_session_claims.remove_if(session_key, |_, claim| claim_is_owned_by(claim, process_id));
+    /// Exit cleanup is qualified by the exact process, never by a reused leaf.
+    pub fn retire_host_process(&self, process_id: &str) {
+        self.host_table.keys().exit_process(process_id);
     }
 
     /// Resolve either a PTY process id (`pc-*`) or a renderer leaf (`tb-*` / `tm-*`)
@@ -216,10 +218,13 @@ impl<R: Runtime> AppState<R> {
             .unwrap_or_else(|_| "auto-terminal-default-secret-2025-fix".to_string());
 
         Self {
+            ssh_sessions: crate::commands::ssh_session::native_registry(app_handle.clone()),
+            ssh_launches: Default::default(),
             pending_open_path: Arc::new(std::sync::Mutex::new(None)),
             terminals: Arc::new(DashMap::new()),
             root_leaf_claims: Arc::new(RootLeafClaims::default()),
             shell_writer_channels: Arc::new(DashMap::new()),
+            local_processes: Arc::new(DashMap::new()),
             ptys: Arc::new(DashMap::new()),
             output_tx,
             terminal_history: Arc::new(DashMap::new()),
@@ -243,14 +248,13 @@ impl<R: Runtime> AppState<R> {
             fabric_process: Arc::new(Mutex::new(crate::state::GenerationSlot::new())),
             fabric_control_port: crate::app_config::resolve_fabric_control_port(),
             keep_running_in_background: Arc::new(AtomicBool::new(false)),
+            exempt_loopback_from_proxy: Arc::new(AtomicBool::new(true)),
             network: Arc::new(RwLock::new(network)),
             effective_endpoints: Arc::new(RwLock::new(Default::default())),
             api_shutdown: Arc::new(Mutex::new(None)),
             network_op_lock: Arc::new(tokio::sync::Mutex::new(())),
             jwt_secret,
             app_handle,
-            detach_payloads: Arc::new(DashMap::new()),
-            active_global_drag: Arc::new(Mutex::new(None)),
             window_titles: Arc::new(DashMap::new()),
             windows: Arc::new(crate::window_registry::WindowTracker::load_default()),
             flush_acks: Arc::new(DashMap::new()),
@@ -268,22 +272,31 @@ impl<R: Runtime> AppState<R> {
             canvas_nodes: Arc::new(RwLock::new(std::collections::HashMap::new())),
             history_dirty: Arc::new(DashMap::new()),
             replay_prefix: Arc::new(DashMap::new()),
-            history_persist_locks: Arc::new(DashMap::new()),
             active_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             main_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
+            frozen_hosts: Arc::new(Mutex::new(Vec::new())),
+            frozen_host_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_table: super::host_table::HostTable::new(),
+            host_barrier: super::host_adoption::Barrier::new(),
+            permission_status_flight: super::permissions::StatusFlight::default(),
+            mcp_reclaim: super::mcp_reclaim::McpReclaim::new(),
+            sibling_hold: Arc::default(),
+            elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
-            host_session_claims: Arc::new(DashMap::new()),
-            host_restore_pending_windows: Arc::new(DashMap::new()),
+            ids: super::IdAllocator::default(),
             host_restore_released: Arc::new(AtomicBool::new(false)),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
             host_stream_offsets: Arc::new(DashMap::new()),
             host_recovering: Arc::new(tokio::sync::Mutex::new(())),
-            host_close_pending: Arc::new(DashMap::new()),
+            duplicate_session_noticed: Arc::new(AtomicBool::new(false)),
+            recovering: Arc::new(AtomicBool::new(false)),
+            restart_in_flight: Arc::new(AtomicBool::new(false)),
+            started_at: Arc::new(std::time::Instant::now()),
         }
     }
 
@@ -474,7 +487,9 @@ impl<R: Runtime> AppState<R> {
     }
 
     /// Render this terminal's FULL buffer (scrollback + visible screen) as a styled,
-    /// replayable byte stream for persistence — soft-wrapped rows joined, no
+    /// replayable byte stream for the live ED3 repair (`/full_scrollback`, which
+    /// keeps the cursor tail; persistence uses `persisted_scrollback_snapshot`) —
+    /// soft-wrapped rows joined, no
     /// screen-clear, so 2J-cleared transient frames (full-screen TUIs) are excluded by
     /// construction. Returns None when the whole buffer is blank.
     ///
@@ -483,6 +498,25 @@ impl<R: Runtime> AppState<R> {
     /// same parser mutex (feed_screen), and holding it across a 5000-row render would
     /// stall output delivery for every terminal (see output-pipeline-architecture).
     pub fn full_scrollback_snapshot(&self, id: &str) -> Option<Vec<u8>> {
+        self.render_scrollback(id, true)
+    }
+
+    /// The same dump WITHOUT the cursor-restore tail, for persistence.
+    ///
+    /// The tail is an ABSOLUTE `CUP` into the visible screen of a still-running
+    /// program, which is only meaningful to a client that replays the blob into a
+    /// terminal that program is live in (the ED3 repair). A persisted blob is
+    /// replayed into a NEW session's xterm, where that position points into the
+    /// middle of the just-drawn history: the "session restored" divider and the
+    /// fresh shell's prompt were then painted over the old TUI's rows, and the
+    /// cursor sat mid-screen until Ctrl+L. Seen with Claude Code: its last cursor sat
+    /// above rows that replay below it. Any stored cursor jump INTO already replayed
+    /// content does the same.
+    pub fn persisted_scrollback_snapshot(&self, id: &str) -> Option<Vec<u8>> {
+        self.render_scrollback(id, false)
+    }
+
+    fn render_scrollback(&self, id: &str, with_cursor: bool) -> Option<Vec<u8>> {
         let mut screen = {
             let entry = self.terminal_screens.get(id)?;
             let parser = match entry.lock() {
@@ -495,6 +529,9 @@ impl<R: Runtime> AppState<R> {
             parser.screen().clone()
         };
         let mut blob = render_full_scrollback(&mut screen)?;
+        if !with_cursor {
+            return Some(blob);
+        }
         // render_full_scrollback replays plain rows with no position tracking, so a
         // client that resets and writes this blob (the ED3 resize-wipe repair path)
         // would otherwise leave the cursor wherever the last line's newline landed —
@@ -510,14 +547,73 @@ impl<R: Runtime> AppState<R> {
     }
 
 
-    /// True if `id`'s PTY is hosted by the sidecar (not local `ptys`/writers).
+    /// True if `id`'s PTY is hosted by a sidecar (not local `ptys`/writers) —
+    /// either the primary or the elevated one.
     pub fn is_host_owned(&self, id: &str) -> bool {
         self.host_terminals.contains_key(id)
     }
 
-    /// Lazily connect (spawning if needed) the PTY-host sidecar client, wiring
-    /// its inbound Stdout into the existing output broadcast and its Exit/Gap
-    /// into cleanup+emit / repaint. Idempotent.
+    /// Which sidecar (if any) serves `id`'s PTY.
+    fn host_channel_for(&self, id: &str) -> Option<HostChannel> {
+        self.host_terminals.get(id).map(|e| *e.value())
+    }
+
+    /// The connected client actually serving `channel` — the primary sidecar
+    /// for `Primary`, the elevated sidecar for `Elevated`, the registered
+    /// frozen host for `Frozen`. `None` when that sidecar is not currently
+    /// connected (or a frozen host has been retired) — caller must surface the
+    /// failure, never silently fall back to another one (plan 045 R7).
+    fn client_for_channel(&self, channel: HostChannel) -> Option<crate::pty_host_client::PtyHostClient> {
+        match channel {
+            HostChannel::Primary => self.pty_host_clone(),
+            HostChannel::Elevated => self.elevated_host.client_clone(),
+            HostChannel::Frozen(id) => self.frozen_client(id),
+        }
+    }
+
+    /// The SINGLE place `host_terminals` entries are ever removed (plan 045
+    /// T4). Beyond removing, it derives the elevated sidecar's refcount: if
+    /// the removed entry was `Elevated` and none remain, it tears the
+    /// elevated connection down. A fifth call site that bypasses this and
+    /// removes directly would silently stop that teardown from ever firing —
+    /// `state::source_tests::host_terminals_is_only_removed_through_forget_host_terminal`
+    /// pins that nothing else does.
+    pub fn forget_host_terminal(&self, id: &str) {
+        self.host_table.routes().remove_process(id);
+        let Some((_, channel)) = self.host_terminals.remove(id) else {
+            return;
+        };
+        self.notify_terminal_generations();
+        if matches!(channel, HostChannel::Frozen(_)) {
+            // The last pane of an older host is gone: let its retirement ticker
+            // look at the host now instead of at its next tick.
+            if !self.host_terminals.iter().any(|e| *e.value() == channel) {
+                self.host_table.nudge_ticker(channel);
+            }
+            return;
+        }
+        if channel != HostChannel::Elevated {
+            return;
+        }
+        let still_elevated = self
+            .host_terminals
+            .iter()
+            .any(|e| *e.value() == HostChannel::Elevated);
+        if still_elevated {
+            return;
+        }
+        let elevated_host = self.elevated_host.clone();
+        let table = self.host_table.clone();
+        let Some(epoch) = elevated_host.client_clone().and_then(|c| c.session_epoch(HostChannel::Elevated)) else { return; };
+        tauri::async_runtime::spawn(async move {
+            elevated_host.shutdown_idle(&table, epoch).await;
+        });
+    }
+
+    /// Lazily connect (spawning if needed) the current PTY-host sidecar client,
+    /// wiring its inbound Stdout into the existing output broadcast and its
+    /// Exit/Gap into cleanup+emit / repaint, and adopt every surviving host of an
+    /// older generation beside it (`host_adoption`). Idempotent.
     ///
     /// Boxed: the on_disconnect closure built inside spawns a task that
     /// re-enters this function (reconnect_after_pipe_drop), which with an
@@ -527,253 +623,299 @@ impl<R: Runtime> AppState<R> {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
     {
-        Box::pin(self.ensure_pty_host_inner())
+        Box::pin(super::host_adoption::ensure_hosts(self))
     }
 
-    async fn ensure_pty_host_inner(&self) -> Result<(), String> {
-        {
-            if self.pty_host_client().is_some() {
-                return Ok(());
-            }
-        }
-        // Single-flight: serialize concurrent connect attempts (multi-pane
-        // startup) so the sidecar is connected exactly once.
-        let _connect_guard = self.pty_host_connecting.lock().await;
-        // Re-check under the guard — a prior holder may have connected already.
-        {
-            if self.pty_host_client().is_some() {
-                return Ok(());
-            }
-        }
-        // RP-1: install the host into the update-stable runtime dir and run it
-        // from there (outside the swapped app payload) so it survives an update.
-        let launch = crate::pty_host_client::resolve_host_launch().ok_or_else(|| {
-            "pty-host sidecar executable could not be resolved (set TERMFLOW_PTY_HOST_BIN)".to_string()
-        })?;
-        let sidecar = launch.path;
-        let pipe = crate::pty_host_client::resolve_pipe();
-        let token = crate::pty_host_client::resolve_token();
+    /// Adopt the hosts that survived, without starting a current host when none was discovered: the
+    /// boot's round, before the MCP port is chosen. Boxed like `ensure_pty_host`, and for the same
+    /// reason.
+    pub fn adopt_survivors(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+    {
+        Box::pin(super::host_adoption::adopt_survivors(self))
+    }
 
-        // RP-2 discovery: read a running host's advertisement (if any) BEFORE
-        // touching the wire, so we never speak an incompatible protocol at it and
-        // never force-kill sessions we can't control (design 003 §10.3, C3).
-        // No record ⇒ legacy host (or none) on the well-known pipe — v1 as today.
-        let record = crate::pty_host_client::record_path()
-            .and_then(|p| match termflow_pty_protocol::read_record(&p) {
-                Ok(r) => r,
-                Err(e) => {
-                    log::warn!("[HOTSWAP] unreadable host discovery record ({e}); treating as legacy");
-                    None
-                }
-            });
-        // Advertised host pid (if any): connect_or_spawn refuses to spawn a
-        // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
-        let record_pid = record.as_ref().map(|r| r.pid);
-        match crate::pty_host_client::host_build_disposition(record.as_ref(), launch.build_id.as_deref()) {
-            crate::pty_host_client::HostBuildDisposition::Current => {}
-            crate::pty_host_client::HostBuildDisposition::Stale { observed, expected } => log::warn!(
-                "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
-            ),
-            crate::pty_host_client::HostBuildDisposition::Unknown => log::warn!(
-                "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow"
-            ),
+    /// Re-run adoption for surviving hosts that were skipped, busy or never
+    /// answered, whether or not the current host is up. Boxed like
+    /// `ensure_pty_host`, and for the same reason.
+    pub fn rediscover_hosts(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+    {
+        Box::pin(super::host_adoption::rediscover_hosts(self))
+    }
+
+    /// Lazily connect the elevated sidecar (plan 045), launching it via UAC on
+    /// first use. Idempotent and single-flighted so two concurrent "Open admin
+    /// Tab" clicks produce exactly one UAC prompt (`ElevatedHost::connecting`
+    /// mirrors `pty_host_connecting`). Deliberately far simpler than
+    /// `ensure_pty_host`: no discovery record, no adoption, no
+    /// `list_sessions` — the elevated sidecar is always freshly launched, never
+    /// a survivor from a prior run.
+    ///
+    /// Boxed for the same reason as `ensure_pty_host`: kept as a plain async fn
+    /// it would need to be `Send`, and nothing here builds a self-referential
+    /// future cycle, so this is a simpler box than that one's — but the crate
+    /// convention (`ensure_pty_host`) is to expose these as boxed futures, and
+    /// consistency here costs nothing.
+    pub fn ensure_elevated_host(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+    {
+        Box::pin(async {
+            let _guard = self.ensure_elevated_host_for_placement().await?;
+            Ok(())
+        })
+    }
+
+    pub(crate) async fn ensure_elevated_host_for_placement(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        self.elevated_host.ensure_for_placement(|| self.ensure_elevated_host_inner()).await
+    }
+
+    #[cfg(windows)]
+    async fn ensure_elevated_host_inner(&self) -> Result<(), String> {
+        if self.elevated_host.is_connected() {
+            return Ok(());
         }
-        let connect_plan = crate::pty_host_client::plan_connection(record);
-        let (pipe, attach_acks) = match &connect_plan {
-            crate::pty_host_client::ConnectPlan::LegacyOrNone => {
-                log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
-                (pipe, false)
+        // The caller retains connecting through setup and placement.
+        // Re-checked here (not just trusted from the renderer's cached
+        // `get_admin_tab_support` answer) so a stale or tampered renderer can
+        // never drive an elevated spawn past this gate.
+        let support = crate::commands::get_admin_tab_support();
+        if !support.supported {
+            return Err(format!("elevated tabs are not available ({})", support.reason));
+        }
+
+        let profile_key = crate::profile::current().info().key;
+        let survivor_path = crate::pty_host_client::runtime_host_dir()
+            .map(|d| crate::elevated_host::survivor::survivor_record_path(&d, &profile_key));
+
+        let mut survivor_record = None;
+        if let Some(ref path) = survivor_path {
+            if path.exists() {
+                if let Ok(Some(rec)) = termflow_pty_protocol::rendezvous::read_elevated_survivor(path) {
+                    let live_process = crate::elevated_host::survivor::open_live_process(&rec);
+                    // The record is writable by any process of this user and its pipe name goes onto the
+                    // command line of an ELEVATED helper, so a name that is not plainly a
+                    // rendezvous pipe is dropped like a stale record, never launched.
+                    let pipe_ok = termflow_pty_protocol::is_valid_rendezvous_pipe_name(&rec.rendezvous_pipe);
+                    if !pipe_ok {
+                        log::warn!("[ADMIN] ignoring survivor record with a malformed rendezvous pipe name");
+                    }
+                    match (pipe_ok, live_process) {
+                        (true, Some(proc)) => survivor_record = Some((rec, proc)),
+                        _ => crate::elevated_host::survivor::cleanup_dead_survivor_record(path, rec.instance_id),
+                    }
+                }
             }
-            crate::pty_host_client::ConnectPlan::Bootstrap {
-                endpoint,
-                version,
-                instance_id,
-                host_caps,
-                lifecycle: _,
-            } => {
-                let acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
-                log::info!(
-                    "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
-                     caps={host_caps:#x} endpoint={endpoint} (attach_acks={acks})"
-                );
-                (endpoint.clone(), acks)
+        }
+
+        let listener = crate::elevated_host::pipe_server::AdminPipeListener::create(&profile_key)
+            .map_err(|e| format!("could not create the admin pipe: {e}"))?;
+
+        let is_survivor_reconnect = survivor_record.is_some();
+        let (launched, token, stream) = if let Some((survivor, survivor_proc)) = survivor_record {
+            let fresh_token = uuid::Uuid::new_v4().simple().to_string();
+            let gui_pid = std::process::id();
+            let params = crate::elevated_host::launch::build_reconnect_parameters(
+                survivor.host_pid,
+                &survivor.rendezvous_pipe,
+                &listener.name,
+                gui_pid,
+                &fresh_token,
+            );
+            log::info!("[ADMIN] launching reconnect helper for surviving elevated pty-host (pid {})", survivor.host_pid);
+            let helper = match crate::elevated_host::launch::run_as(params).await {
+                crate::elevated_host::launch::LaunchOutcome::Cancelled => {
+                    log::info!("[ADMIN] UAC prompt was denied for reconnect; preserved survivor in hold");
+                    return Err(crate::elevated_host::ADMIN_UAC_CANCELLED.to_string());
+                }
+                crate::elevated_host::launch::LaunchOutcome::Failed(code) => {
+                    return Err(format!("could not launch the reconnect helper (code {code})"));
+                }
+                crate::elevated_host::launch::LaunchOutcome::Ok(proc) => proc,
+            };
+            self.elevated_host.wait_owned_process(Some(helper)).await;
+
+            if self.elevated_host.is_shutting_down() {
+                return Err("elevated terminal host is shutting down".into());
             }
-            crate::pty_host_client::ConnectPlan::Incompatible { instance_id } => {
-                // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
-                // sidecar path; panes fall back in-process and the running host
-                // keeps serving its (old-app) sessions untouched.
-                log::error!(
-                    "[HOTSWAP] running host instance={instance_id:x} shares no protocol \
-                     version with this app — leaving its sessions untouched"
-                );
-                return Err(
-                    "a PTY host from another TermFlow version owns your terminals; \
-                     close them there or wait for it to drain before new host-owned terminals"
-                        .to_string(),
-                );
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let stream = match listener.accept_verified(survivor.host_pid, deadline).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(format!("surviving elevated pty-host did not connect: {e}"));
+                }
+            };
+            log::info!("[ADMIN] surviving elevated pty-host reconnected and verified (pid {})", survivor.host_pid);
+            (survivor_proc, fresh_token, stream)
+        } else {
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            let log_path = crate::pty_host_client::runtime_host_dir()
+                .map(|d| d.join("host-admin.log"))
+                .unwrap_or_else(|| std::env::temp_dir().join("termflow-host-admin.log"));
+            let parameters = crate::elevated_host::launch::build_dial_out_parameters(
+                &listener.name,
+                &token,
+                &log_path,
+                survivor_path.as_deref(),
+            );
+
+            log::info!("[ADMIN] requesting elevation for the admin-tab sidecar");
+            let launched = match crate::elevated_host::launch::run_as(parameters).await {
+                crate::elevated_host::launch::LaunchOutcome::Cancelled => {
+                    log::info!("[ADMIN] UAC prompt was denied; no admin tab will open");
+                    return Err(crate::elevated_host::ADMIN_UAC_CANCELLED.to_string());
+                }
+                crate::elevated_host::launch::LaunchOutcome::Failed(code) => {
+                    return Err(format!("could not launch the elevated pty-host (code {code})"));
+                }
+                crate::elevated_host::launch::LaunchOutcome::Ok(proc) => proc,
+            };
+            log::info!("[ADMIN] elevated pty-host launched (pid {})", launched.pid);
+            if self.elevated_host.is_shutting_down() {
+                drop(listener);
+                self.elevated_host.wait_owned_process(Some(launched)).await;
+                return Err("elevated terminal host is shutting down".into());
             }
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let stream = match listener.accept_verified(launched.pid, deadline).await {
+                Ok(s) => s,
+                Err(e) => return Err(format!("elevated pty-host did not connect: {e}")),
+            };
+            log::info!("[ADMIN] elevated pty-host connected and verified (pid {})", launched.pid);
+            (launched, token, stream)
         };
 
-        // Generation for this connection: on_disconnect only nulls `pty_host` if
-        // its generation is still current (a dead old client can't clobber a new).
-        let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        let my_gen = self.elevated_host.bump_gen()?;
+        let epoch = self.host_table.reserve_epoch()?;
+        if !self.host_table.publish(HostChannel::Elevated, epoch) {
+            return Err("elevated terminal host is not admitting sessions".to_string());
+        }
+        let (rd, wr) = tokio::io::split(stream);
 
         let st_exit = self.clone();
         let st_gap = self.clone();
+        let st_resolve = self.clone();
         let st_disc = self.clone();
         let deps = crate::pty_host_client::PtyHostDeps {
             lifecycle_token: token.clone(),
             output_tx: self.output_tx.clone(),
             output_produced: self.output_produced.clone(),
+            // Structurally identical to the primary's on_exit (persist, forget,
+            // unindex, cleanup, emit) — kept as its own closure rather than
+            // shared, so a change to one sidecar's exit handling can never
+            // silently move the other's (see also `on_disconnect` below, which
+            // is NOT identical: this client never reconnects in place).
             on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {
                 use tauri::Emitter;
-                // Mirror the in-process reader's exit path: capture cwd (from the
-                // sidecar or our own OSC tracking), clean up, notify the UI.
                 let cwd = exit_cwd
                     .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
-                // Persist the final parser state BEFORE cleanup discards it — the
-                // periodic flush only runs every 30s, so without this the session's
-                // last moments never reach the history store. Takes the PROCESS id
-                // and derives the history key from the terminal's leaf itself.
-                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
-                st_exit.host_terminals.remove(&process_id);
-                // Ring bookkeeping is keyed by the SESSION, not the process: it is
-                // the host's own offset and lives in the host's id space.
-                st_exit.host_stream_offsets.remove(&session_key);
-                st_exit.forget_host_session_claim_if_owner(&session_key, &process_id);
-                // Drop the identity lookups LAST among the removals but before the
-                // emit — a leaked entry would route a later terminal's output at a
-                // process id that no longer exists.
-                st_exit.identity.unindex(&process_id);
-                st_exit.cleanup_terminal_state(&process_id);
+                let _ = session_key;
+                if !st_exit.exit_process(&process_id) { return; }
                 let _ = st_exit.app_handle.emit(
                     "terminal:exit",
                     serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),
                 );
-                // Same as the in-process path: release the app window if a dialog
-                // this shell owned took it down with it (see console_window).
                 crate::console_window::unstick_all(&st_exit.app_handle);
             }),
             on_gap: Arc::new(move |process_id: String| {
                 st_gap.host_repaint(&process_id);
             }),
-            // Session key -> process id. The host speaks its own id space; every
-            // inbound frame is translated here before it reaches our maps
-            // (design 014 §A3). An unknown session is DROPPED, never echoed.
-            resolve_process: {
-                let st = self.clone();
-                Arc::new(move |k: &str| st.identity.process_for_session(k))
-            },
+            resolve_process: Arc::new(move |k: &str| host_registry::resolve_inbound(
+                &st_resolve.host_terminals, &st_resolve.host_table, HostChannel::Elevated, epoch, k,
+            )),
+            // This client is never reconnected in place: when its pipe drops, every
+            // terminal still registered as `Elevated` ends exactly like a normal pty exit.
+            // A host that was armed for an update outlives this process and is re-adopted
+            // by the NEXT process through its survivor record and rendezvous pipe
+            // (plan 058), which is a fresh launch of the reconnect helper, not this closure.
             on_disconnect: Arc::new(move || {
-                // Only act if THIS connection is still the current one — a stale
-                // old client's disconnect must not clobber a reconnected client.
-                if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                if st_disc.elevated_host.current_gen() != my_gen {
                     return;
                 }
-                // Pipe died (sleep/wake, sidecar crash, …). Do NOT tear the
-                // sessions down here: the host may be alive and holding every
-                // shell (it Holds while armed / children live). Drop the dead
-                // client, then reconnect-first; only sessions the host no longer
-                // has — or a failed reconnect — are torn down.
                 log::warn!(
-                    "[HOTSWAP] pty-host pipe dropped (gen {my_gen}); trying in-place reconnect"
+                    "[ADMIN] elevated pty-host pipe dropped; ending its session(s) \
+                     (no auto-relaunch, no re-prompt)"
                 );
-                *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                let st = st_disc.clone();
-                tauri::async_runtime::spawn(async move {
-                    st.reconnect_after_pipe_drop().await;
-                });
+                let Some(elevated_ids) = st_disc.elevated_host.clear_client_on(epoch, || st_disc
+                    .host_terminals.iter()
+                    .filter(|e| *e.value() == HostChannel::Elevated)
+                    .map(|e| e.key().clone()).collect::<Vec<String>>()) else { return; };
+                st_disc.host_table.routes().remove_epoch(HostChannel::Elevated, epoch);
+                for id in elevated_ids {
+                    st_disc.teardown_host_terminal(&id);
+                }
             }),
+            // Shared with the primary sidecar: session keys are globally unique
+            // `tm-`/`tb-` ids, so there is no collision between the two hosts'
+            // entries in this map (plan 045 §4.1).
             stream_offsets: self.host_stream_offsets.clone(),
         };
 
-        let (mut client, origin) =
-            crate::pty_host_client::connect_or_spawn(&sidecar, launch.build_id.as_deref(), &pipe, &token, record_pid, deps)
-                .await
-                .map_err(|e| e.to_string())?;
-        client.set_attach_acks(attach_acks);
-        client.set_lifecycle(connect_plan.retention_for(origin));
-        // Record sessions that survived a hot-swap (tab_id -> pid) so
-        // create_host_terminal reattaches instead of respawning. `None` means
-        // the host did not answer — treat as unknown, never as empty.
-        match client.list_sessions().await {
-            None => log::warn!(
-                "[HOTSWAP] host did not answer ListSessions during connect; \
-                 adoption queue left unchanged"
-            ),
-            Some(surviving) if surviving.is_empty() => {
-                log::info!("[HOTSWAP] host reports no surviving sessions (fresh host or clean start)");
-                self.host_close_pending.clear(); // authoritative: nothing left to close
+        let client = crate::pty_host_client::wire_client(rd, wr, deps);
+        client.set_peer_pid(launched.pid);
+        client.set_shutdown_control(true);
+        client.set_attach_acks(true);
+        client.bind_sessions(self.host_table.keys(), HostChannel::Elevated, epoch);
+
+        // Mandatory cold session listing adoption (plan 058 §3.4 / Blocker 7)
+        // A survivor arms a one-shot orphan pass at publication. The connecting create
+        // starts it AFTER placement, and it waits for window restore before listing again.
+        // Unclaimed keys then surface as unfocused recovered admin tabs.
+        // A held host answers this in milliseconds; a slow answer is retried rather than read as
+        // "no sessions". If a RECONNECTED survivor still cannot list its sessions, publishing it
+        // would leave live shells nobody can see or close, so the attempt fails instead.
+        let mut listing = None;
+        for _ in 0..3 {
+            listing = client.list_sessions_numbered_within(std::time::Duration::from_secs(5)).await;
+            if listing.is_some() {
+                break;
             }
-            Some(surviving) => {
-                log::info!(
-                    "[HOTSWAP] host holds {} surviving session(s): {}",
-                    surviving.len(),
-                    surviving
-                        .iter()
-                        .map(|m| format!("{}(pid {}, alive={})", m.tab_id, m.pid, m.alive))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                // Same translation as the recovery pass: `meta.tab_id` is a
-                // SESSION key and `host_terminals` is keyed by process id, so the
-                // ownership test below must go through this map. Comparing them
-                // directly makes every live pane look unowned, which queues it for
-                // adoption and lets a concurrent create re-adopt a LIVE session at
-                // offset 0 straight into its parser (review 007 F-1).
-                let owned_sessions = self.host_sessions_by_key();
-                for meta in &surviving {
-                    // A close that couldn't reach the host while the pipe was
-                    // down: deliver it now instead of re-adopting the session.
-                    if self.host_close_pending.remove(&meta.tab_id).is_some() {
-                        log::info!(
-                            "[HOTSWAP] delivering deferred close for {} (closed while disconnected)",
-                            meta.tab_id
-                        );
-                        client.close(&meta.tab_id);
-                        continue;
-                    }
-                    // Only sessions the GUI does NOT already own belong in the
-                    // adoption queue. During an in-place pipe-drop recovery the
-                    // live tabs are still registered; queueing them would let a
-                    // concurrent create re-adopt one at offset 0 straight into
-                    // its live parser (review 007 F-1).
-                    if meta.alive && !owned_sessions.contains_key(&meta.tab_id) {
-                        self.reserve_host_session(&meta.tab_id, meta.pid);
-                    }
+        }
+        match listing {
+            Some(listing) => {
+                // The awaited answer is validated like every other listing caller: a pipe that
+                // dropped (or an epoch that was superseded) during the await must not be adopted.
+                if !super::host_adoption::listing_is_current(&self.host_table, HostChannel::Elevated, epoch, &client, super::Admission::Open) {
+                    client.close_transport().await;
+                    self.host_table.routes().remove_epoch(HostChannel::Elevated, epoch);
+                    return Err("the elevated pty-host disconnected while listing its sessions".to_string());
                 }
-                // Any remaining tombstone names a session this (authoritative)
-                // list doesn't have — moot, drop them.
-                self.host_close_pending.clear();
+                log::info!("[ADMIN] adopting {} sessions from elevated host", listing.len());
+                use super::host_adoption::AdoptionPort as _;
+                self.apply_listing(HostChannel::Elevated, &client, Some(&listing));
             }
+            None if is_survivor_reconnect => {
+                // The client was wired and its epoch published above; undo both so the failed
+                // attempt leaves no route behind. The host sees the pipe close and decides for
+                // itself (it tears down: this connection has already been accepted as the GUI).
+                client.close_transport().await;
+                self.host_table.routes().remove_epoch(HostChannel::Elevated, epoch);
+                return Err("the surviving elevated pty-host did not list its sessions".to_string());
+            }
+            None => {}
         }
-        // Never leave a client published whose pipe dropped during setup — its
-        // on_disconnect fired while `pty_host` was still None, so nothing else
-        // would ever null it and every caller would hold a dead client forever
-        // (review 007 C-1b). Publish FIRST, then re-check: if the drop raced
-        // in between, we null our own publication; if it fires later, the
-        // normal generation-guarded on_disconnect nulls it.
-        *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
-        if !client.is_alive() {
-            *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            return Err("pty-host connection lost during setup".to_string());
-        }
-        // A host reaches here armed for one of two reasons: our OWN prior
-        // launch armed it before an update/offload exit (`updater.rs`), or a
-        // SIBLING's update armed it as a precaution (`hotswap_arm`). Either
-        // way, the reason to stay armed while GUI-less ends the moment a live
-        // GUI is connected and has adopted whatever it holds — nothing else
-        // ever clears `armed_deadline` on the success path, so without this a
-        // later completely normal quit sees the stale arm and Holds instead
-        // of tearing down, and the NEXT launch reattaches a session the user
-        // already asked to end. Idempotent: a no-op against an unarmed host.
-        if !client.disarm().await {
-            // Not fatal: the sidecar now also spends the arm on our first frame,
-            // and the quit path disarms again. Worth saying out loud, because a
-            // silent failure here used to be the whole defect.
-            log::warn!("[HOTSWAP] adopted host did not acknowledge the disarm");
-        }
+
+        self.elevated_host.publish(client, launched).await?;
+        if is_survivor_reconnect { self.elevated_host.arm_orphan_pass(epoch); }
         Ok(())
+    }
+
+    #[cfg(not(windows))]
+    async fn ensure_elevated_host_inner(&self) -> Result<(), String> {
+        Err("elevated tabs are only supported on Windows".to_string())
+    }
+
+    pub(crate) fn spawn_elevated_orphan_pass(&self, epoch: u64) {
+        let Some(client) = self.elevated_host.client_clone() else { return; };
+        let port = self.clone();
+        tokio::spawn(async move {
+            super::host_adoption::elevated_orphans::run(&port, &client, epoch).await;
+        });
     }
 
     /// Tear down one previously host-owned terminal that did NOT survive a pipe
@@ -781,18 +923,7 @@ impl<R: Runtime> AppState<R> {
     /// session banner. (Split out of the formerly-destructive on_disconnect.)
     pub fn teardown_host_terminal(&self, id: &str) {
         use tauri::Emitter;
-        self.persist_terminal_history(id, chrono::Utc::now().timestamp_millis());
-        // Resolve the session key BEFORE `cleanup_terminal_state` drops the record
-        // it lives on. `host_stream_offsets` is the HOST's ring bookkeeping and is
-        // keyed by the session, not by our process id — removing it by `id` leaks
-        // the entry (design 014 §A2).
-        let session_key = self.session_key_for(id);
-        self.host_terminals.remove(id);
-        if let Some(key) = session_key {
-            self.host_stream_offsets.remove(&key);
-            self.forget_host_session_claim_if_owner(&key, id);
-        }
-        self.cleanup_terminal_state(id);
+        if !self.exit_process(id) { return; }
         let _ = self.app_handle.emit(
             "terminal:exit",
             serde_json::json!({ "id": id, "exitCode": -1, "cwd": serde_json::Value::Null }),
@@ -807,198 +938,43 @@ impl<R: Runtime> AppState<R> {
     /// reconnect — get the old destructive teardown. Safe to run concurrently:
     /// ensure_pty_host is single-flight and a duplicate pass replays ~nothing
     /// (offsets have advanced past what the first pass consumed).
+    ///
+    /// Primary-only by design: an older host recovers from its own drop
+    /// (`reconnect_frozen`), and the elevated client is never reconnected in place
+    /// (a held elevated host is re-adopted by the next process instead).
     pub async fn reconnect_after_pipe_drop(&self) {
         // Single-flight (see host_recovering): a second flap queues here and
         // re-snapshots offsets once the first pass is done.
         let _recover_guard = self.host_recovering.lock().await;
-        // This whole pass runs in the HOST's id space: `plan_reattach` matches
-        // against `SessionMeta.tab_id` and `host_stream_offsets` is keyed the
-        // same way. `host_terminals` is keyed by our `pc-` process id since
-        // design 014, so comparing the two directly matches NOTHING and sends
-        // every live terminal to teardown — i.e. a transient pipe drop
-        // (sleep/wake) would destroy every shell. Translate once, here.
-        let initial_by_session = self.host_sessions_by_key();
-        let tabs: Vec<String> = initial_by_session.keys().cloned().collect();
-        // Do not return when the app currently owns no tabs: the host can still
-        // hold live sessions which must be recovered into visible terminals.
-        const BACKOFF_MS: &[u64] = &[500, 1000, 2000, 4000, 8000, 8000, 8000];
-        let mut connected = false;
-        for (i, ms) in BACKOFF_MS.iter().enumerate() {
-            // A concurrent terminal-create may already have reconnected
-            // (ensure_pty_host is single-flight); otherwise try ourselves.
-            if self.pty_host_clone().is_some() || self.ensure_pty_host().await.is_ok() {
-                connected = true;
-                break;
-            }
-            log::warn!(
-                "[HOTSWAP] reconnect attempt {}/{} failed; retrying in {ms}ms",
-                i + 1,
-                BACKOFF_MS.len()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
-        }
-        let client = if connected { self.pty_host_clone() } else { None };
-        let Some(client) = client else {
-            log::error!(
-                "[HOTSWAP] could not reconnect to any pty-host; closing {} host pane(s)",
-                tabs.len()
-            );
-            for t in &tabs {
-                self.teardown_host_terminal(t);
-            }
-            return;
-        };
-        // The generation this pass is allowed to act on. If the pipe drops (or
-        // a newer connection lands) mid-pass, a NEWER recovery owns the state —
-        // this pass must stop before any attach/teardown (review 007 C-1).
-        let my_gen = self.pty_host_gen.load(std::sync::atomic::Ordering::Acquire);
-        let still_current = || {
-            self.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) == my_gen
-                && self.pty_host_clone().is_some()
-        };
-        // Only an ANSWERED ListSessions is authority. A timeout/dead pipe must
-        // never read as "the host has no sessions" — that would tear down every
-        // live pane on a transport failure (review 007 C-1).
-        let mut sessions: Option<Vec<termflow_pty_protocol::SessionMeta>> = None;
-        for i in 0..3 {
-            if let Some(s) = client.list_sessions().await {
-                sessions = Some(s);
-                break;
-            }
-            if i < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        }
-        let Some(sessions) = sessions else {
-            log::error!(
-                "[HOTSWAP] host never answered ListSessions during recovery; \
-                 leaving {} pane(s) untouched (a later drop or create retries)",
-                tabs.len()
-            );
-            return;
-        };
-        if !still_current() {
-            log::warn!("[HOTSWAP] recovery superseded (gen {my_gen} stale); aborting pass");
-            return;
-        }
-        // `tabs` is the pre-request snapshot and is the sole destructive
-        // authority. A terminal registered after the host built this answer is
-        // absent from `sessions`, but that is not evidence it has died.
-        // Fresh ownership is useful only to suppress orphan recovery.
-        let by_session = self.host_sessions_by_key();
-        let saved: std::collections::HashMap<String, u64> = self
-            .host_stream_offsets
-            .iter()
-            .map(|e| (e.key().clone(), *e.value()))
-            .collect();
-        let plan = plan_reconnect(&tabs, &sessions, &saved, by_session.keys().cloned());
-        log::info!(
-            "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost, {} orphan(s) to recover",
-            plan.reattach.len(),
-            plan.teardown.len(),
-            plan.orphans.len()
-        );
-        self.surface_host_orphans(plan.orphans);
-        for a in plan.reattach {
-            if !still_current() {
-                log::warn!("[HOTSWAP] recovery superseded mid-reattach; aborting pass");
-                return;
-            }
-            // The pane may have been closed while the pipe was down (host_close
-            // couldn't deliver Close then). Finish the close now instead of
-            // reattaching a session nobody owns — else it lingers as a zombie.
-            // `a.tab_id` is a SESSION key; ownership lives under the process id.
-            let Some(process_id) = by_session.get(&a.tab_id).cloned() else {
-                log::info!(
-                    "[HOTSWAP] {} was closed while disconnected; closing its host session",
-                    a.tab_id
-                );
-                client.close(&a.tab_id);
-                continue;
-            };
-            if !self.host_terminals.contains_key(&process_id) {
-                log::info!(
-                    "[HOTSWAP] {} was closed while disconnected; closing its host session",
-                    a.tab_id
-                );
-                client.close(&a.tab_id);
-                continue;
-            }
-            match client.attach_confirmed(&a.tab_id, a.from_offset).await {
-                Some(true) => log::info!(
-                    "[HOTSWAP] reattached {} in place from offset {} (host-confirmed alive)",
-                    a.tab_id,
-                    a.from_offset
-                ),
-                Some(false) => log::warn!(
-                    "[HOTSWAP] reattached {} but host reports it not alive",
-                    a.tab_id
-                ),
-                None => log::info!(
-                    "[HOTSWAP] reattached {} in place from offset {} (legacy attach)",
-                    a.tab_id,
-                    a.from_offset
-                ),
-            }
-            // Dimensions live under the PROCESS id; the nudge goes to the host,
-            // so it stays addressed by the session key.
-            let (cols, rows) = self
-                .terminals
-                .get(&process_id)
-                .map(|t| (t.cols, t.rows))
-                .unwrap_or((80, 24));
-            client.nudge_repaint(&a.tab_id, cols, rows);
-            // The registered terminal remains the exclusive owner across an
-            // in-place reconnect; deleting this claim would let a late create
-            // register a second identity for the same live host session.
-        }
-        for t in plan.teardown {
-            if !still_current() {
-                log::warn!("[HOTSWAP] recovery superseded mid-teardown; aborting pass");
-                return;
-            }
-            // `t` is a SESSION key; teardown operates on the process id.
-            let Some(process_id) = by_session.get(&t).cloned() else {
-                continue; // pane already closed while disconnected — nothing to tear down
-            };
-            if !self.host_terminals.contains_key(&process_id) {
-                continue; // pane already closed while disconnected — nothing to tear down
-            }
-            log::warn!(
-                "[HOTSWAP] session {t} not held by the reconnected host; closing its pane"
-            );
-            self.teardown_host_terminal(&process_id);
-        }
+        // The legacy 7-step backoff.
+        super::host_adoption::reconnect_primary(self, super::host_adoption::RECONNECT_BACKOFF_MS).await;
     }
 
     pub fn begin_host_restore_sweep(&self, windows: impl IntoIterator<Item = String>) {
-        self.host_restore_pending_windows.clear();
+        self.host_table.keys().begin_restore_participation(windows);
         self.host_restore_released.store(false, Ordering::Release);
-        for label in windows {
-            self.host_restore_pending_windows.insert(label, ());
-        }
         let state = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                if state.exiting.load(Ordering::Acquire) { break; }
+                match sweep_tick(state.exiting.load(Ordering::Acquire), state.host_table.lifecycle_reason()) {
+                    SweepTick::Stop => break,
+                    SweepTick::Skip => continue,
+                    SweepTick::Run => {}
+                }
                 state.host_restore_released.store(false, Ordering::Release);
                 state.release_host_restore_sweep(true).await;
             }
         });
     }
 
-    pub async fn report_host_restore_settled(&self, window_label: String) {
-        self.host_restore_pending_windows.remove(&window_label);
-        if !restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) { return; }
-        self.release_host_restore_sweep(false).await;
-    }
-
-    pub async fn host_restore_window_destroyed(&self, window_label: &str) {
-        self.host_restore_pending_windows.remove(window_label);
-        if restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) {
-            self.release_host_restore_sweep(false).await;
-        }
+    /// The page/window table has already retired the qualified participant.
+    /// Host I/O runs in a separate task, never inside the ordered page stream.
+    pub(crate) fn schedule_host_restore_release(&self) {
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            state.release_host_restore_sweep(false).await;
+        });
     }
 
     async fn release_host_restore_sweep(&self, forced: bool) {
@@ -1008,7 +984,7 @@ impl<R: Runtime> AppState<R> {
         // release would return early until the periodic worker resets the flag
         // and forces another pass. The guard belongs at this choke point, not
         // in each caller.
-        if !forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
+        if !forced && !restore_sweep_may_release(self.host_table.keys().restore_pending_count(), false) { return; }
         if self.host_restore_released.swap(true, Ordering::AcqRel) { return; }
         if !sweep_claim_survives(self.run_host_restore_sweep().await) {
             // Hand the one-shot back so the backstop — or a later report — can
@@ -1019,41 +995,19 @@ impl<R: Runtime> AppState<R> {
         }
     }
 
-    /// Runs the sweep. `false` means it did NOT complete and must stay retryable.
+    /// Runs the sweep over every host. `false` means it did NOT complete and must
+    /// stay retryable.
     async fn run_host_restore_sweep(&self) -> bool {
-        if self.ensure_pty_host().await.is_err() {
-            return false;
-        }
-        let Some(client) = self.pty_host_clone() else { return false };
-        // An unanswered listing is unknown, never empty: do not surface or tear down.
-        let Some(sessions) = client.list_sessions().await else { return false };
-        let claims = self.host_sessions_by_key().into_keys().collect::<Vec<_>>();
-        let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
-        self.surface_host_orphans(plan.orphans);
-        true
+        super::host_adoption::sweep(self).await
     }
 
-    /// The sole UI emission path for live host sessions that no known tab claims.
-    pub(crate) fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>) {
-        use tauri::Emitter;
-        for orphan in orphans {
-            // A terminal can be created between a listing and this UI pass.
-            // The current ownership map, rather than a restore snapshot, is
-            // authoritative at the point recovery would become visible.
-            if !session_needs_surface(self.host_sessions_by_key().contains_key(&orphan.tab_id)) { continue; }
-            // This emission carries the authoritative PID from the host listing.
-            // Reserve it so a recovery create can never degrade into a fresh spawn
-            // merely because the reservation was absent.
-            self.reserve_host_session(&orphan.tab_id, orphan.pid);
-            let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
-            if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
-                "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
-                "rendererTerminalId": leaf_id, "sessionKey": orphan.tab_id,
-                "targetWindow": self.resolve_active_window_label(),
-            })) {
-                log::warn!("[HOTSWAP] failed to surface recovered session {}: {e}", orphan.tab_id);
-            }
-        }
+    /// Surface live host sessions that no known tab claims, as the recovery flows
+    /// do (they call the shared function directly). Only the integration tests
+    /// drive it through an `AppState`.
+    /// `channel` is the host whose listing reported `orphans`.
+    #[cfg(all(test, feature = "integration-tests"))]
+    pub(crate) fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>, channel: HostChannel) {
+        super::host_adoption::surface_orphans(self, orphans, channel);
     }
 
     /// Clone out the connected client (if any) so callers can `.await` on it
@@ -1068,7 +1022,15 @@ impl<R: Runtime> AppState<R> {
         self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Every host-owned terminal as `session_key -> process_id`.
+    /// Every terminal owned by the sidecar on `channel`, as `session_key ->
+    /// process_id`. There is deliberately no channel-less form: each caller
+    /// must say which host's listing it is reasoning about. Without the
+    /// channel filter, an elevated tab would appear in a primary pipe drop's
+    /// `tabs` but never in the primary's own `ListSessions` answer, so the
+    /// drop would classify every open admin tab as "lost" and tear it down
+    /// (the elevated client is not reconnected in place; the elevated host
+    /// tears down or holds on its own side). A check that must hold whichever
+    /// channel owns the key uses `session_registered_on_any_channel`.
     ///
     /// **The pty-host speaks only session keys.** `host_terminals`,
     /// `terminals` and the screens are keyed by our per-run `pc-` id since
@@ -1076,16 +1038,53 @@ impl<R: Runtime> AppState<R> {
     /// the host's space. Anything that compares a host answer against our
     /// registrations must go through this map, or every comparison silently
     /// fails and the terminal looks dead to us while being perfectly alive.
-    pub fn host_sessions_by_key(&self) -> std::collections::HashMap<String, String> {
-        self.host_terminals
-            .iter()
-            .filter_map(|e| {
-                let process_id = e.key().clone();
-                self.terminals
-                    .get(&process_id)
-                    .map(|t| (session_key_of(&t), process_id))
-            })
-            .collect()
+    pub fn host_sessions_by_key(&self, channel: HostChannel) -> std::collections::HashMap<String, String> {
+        host_registry::sessions_by_key(&self.host_terminals, &self.terminals, channel)
+    }
+
+    /// True if any channel — primary, elevated or frozen — has a live
+    /// registration for this session key.
+    pub fn session_registered_on_any_channel(&self, session_key: &str) -> bool {
+        host_registry::session_registered_on_any_channel(&self.host_terminals, &self.terminals, session_key)
+    }
+
+    pub fn next_frozen_id(&self) -> Result<FrozenId, String> {
+        host_registry::next_frozen_id(&self.frozen_host_seq)
+    }
+
+    /// Register a frozen host, or replace the entry of the same id: a reconnect
+    /// puts a new connection under the host the panes already name.
+    pub fn add_frozen_host(&self, host: FrozenHost) {
+        let mut hosts = self.frozen_hosts.lock().unwrap_or_else(|e| e.into_inner());
+        match hosts.iter_mut().find(|h| h.id == host.id) {
+            Some(known) => *known = host,
+            None => hosts.push(host),
+        }
+    }
+
+    pub fn remove_frozen_host(&self, id: FrozenId) -> Option<FrozenHost> {
+        let mut hosts = self.frozen_hosts.lock().unwrap_or_else(|e| e.into_inner());
+        let at = hosts.iter().position(|h| h.id == id)?;
+        Some(hosts.remove(at))
+    }
+
+    /// The client of a registered frozen host; `None` once it is retired.
+    pub fn frozen_client(&self, id: FrozenId) -> Option<crate::pty_host_client::PtyHostClient> {
+        host_registry::frozen_client(&self.frozen_hosts, id)
+    }
+
+    /// Log and announce, once, sessions that two hosts both claim to hold.
+    pub(super) fn note_duplicate_sessions(&self, session_keys: &[String]) {
+        use tauri::Emitter;
+        if session_keys.is_empty() || !host_registry::first_report(&self.duplicate_session_noticed) {
+            return;
+        }
+        let _ = self.app_handle.emit("pty-host:duplicate-session", serde_json::json!({ "sessionKeys": session_keys }));
+    }
+
+    /// Drop restore intents and unowned closes nobody refreshed within the TTL.
+    pub fn reap_expired_restore_intents(&self) {
+        self.host_table.keys().reap_expired_restore_intents(std::time::Instant::now());
     }
 
     /// Normalise any caller-supplied terminal reference to this run's map key.
@@ -1104,12 +1103,7 @@ impl<R: Runtime> AppState<R> {
     /// the "that is a tab id, use `owningTabId`" rejection lives at the MCP
     /// layer, where the agent that made the mistake actually reads the message.
     pub fn resolve_ref(&self, id: &str) -> String {
-        if id.starts_with("tm-") {
-            if let Some(process_id) = self.identity.process_for_leaf(id) {
-                return process_id;
-            }
-        }
-        id.to_string()
+        self.host_table.keys().resolve_process(id, false).unwrap_or_else(|| id.to_string())
     }
 
     /// The pty-host session key for one of OUR process ids.
@@ -1129,117 +1123,34 @@ impl<R: Runtime> AppState<R> {
     /// return true. Returns false when disconnected so the caller surfaces the
     /// failure instead of reporting a false success for dropped input.
     pub fn host_write(&self, id: &str, bytes: &[u8]) -> bool {
-        if !self.is_host_owned(id) {
-            return false;
-        }
-        let Some(session_key) = self.session_key_for(id) else { return false };
-        match self.pty_host_client().as_ref() {
-            Some(c) => {
-                c.write_stdin(&session_key, bytes);
-                true
-            }
-            None => false,
-        }
+        host_registry::route_write(self.host_table.keys(), &self.host_terminals, &self.terminals, id, bytes, &|c| self.client_for_channel(c))
+    }
+
+    pub(crate) fn host_write_admitted(&self, permit: &crate::pty_manager::input_gate::InputPermit<'_>, bytes: &[u8]) -> bool {
+        host_registry::route_write_admitted(self.host_table.keys(), permit, bytes, &|c| self.client_for_channel(c))
     }
 
     /// If `id` is host-owned AND connected, forward the resize and return true.
     pub fn host_resize(&self, id: &str, cols: u16, rows: u16) -> bool {
-        if !self.is_host_owned(id) {
-            return false;
-        }
-        let Some(session_key) = self.session_key_for(id) else { return false };
-        match self.pty_host_client().as_ref() {
-            Some(c) => {
-                c.resize(&session_key, cols, rows);
-                true
-            }
-            None => false,
-        }
+        host_registry::route_resize(self.host_table.keys(), &self.host_terminals, &self.terminals, id, cols, rows, &|c| self.client_for_channel(c))
     }
 
     /// If `id` is host-owned, forget it and (if connected) tell the sidecar to
     /// close the session. Returns true if it was host-owned (so the caller skips
     /// the local kill) even when the client is gone — there is no local process.
-    /// A close that cannot reach the host (pipe down / dead client) is recorded
-    /// in `host_close_pending` and delivered on the next successful connect, so
-    /// the session can't linger in the host as an adoptable zombie.
+    /// An ending that cannot reach the host stays pending and is delivered
+    /// before the next connection lists sessions.
     pub fn host_close(&self, id: &str) -> bool {
-        use tauri::Emitter;
-        if !self.is_host_owned(id) {
-            return false;
-        }
-        // Resolve BEFORE the removals below drop the record we read it from.
-        let session_key = self.session_key_for(id).unwrap_or_else(|| id.to_string());
-        // ...and the cwd for the same reason, one step further out: every caller runs
-        // `cleanup_terminal_state` the moment this returns, and that drops `terminal_cwds`.
-        // It is the directory the shell died in, which is what a restart-in-place resumes in
-        // (spec 045 §3.3) — the pane survives an API close, so this is not dead weight.
-        let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, id);
-        match self.pty_host_client().as_ref() {
-            Some(c) if c.is_alive() => c.close(&session_key),
-            _ => {
-                // Pending closes are replayed against the HOST later, so they
-                // must be recorded in the host id space.
-                self.host_close_pending.insert(session_key.clone(), ());
-            }
-        }
-        self.host_terminals.remove(id);
-        self.host_stream_offsets.remove(&session_key);
-        self.forget_host_session_claim_if_owner(&session_key, id);
-
-        // Announce the end HERE, because nothing downstream will.
-        //
-        // The sidecar does send an `Exit` frame for a session it closes — but it arrives
-        // ~a second later, over the pipe, and by then the caller has already run
-        // `cleanup_terminal_state`, which calls `identity.unindex`. `route_inbound` then
-        // fails to resolve the session key and DROPS the frame
-        // (`pty_host_client.rs`, "dropping Exit for unknown session"). So a host-owned
-        // close emitted nothing at all: the renderer never saw `pty:exit`, and an
-        // API/MCP-closed pane sat there with a dead shell, no session-closed banner, no
-        // ended tint and no `markTabExited`. The in-process twin has always announced —
-        // `kill_process_tree` EOFs the reader thread, which emits from `pty_manager.rs` —
-        // so this makes the two paths indistinguishable to the renderer, which is the
-        // point: it is the same event, and only the plumbing under it differs.
-        //
-        // Regression from `3eb571d` (design 014). Before it the `Exit` frame was passed
-        // straight through with no lookup, so this close DID reach the UI.
-        //
-        // `exitCode: 0` and the payload shape are copied from that in-process emit rather
-        // than invented, for the same reason: a deliberate close produces no status either
-        // way, and a second spelling of "closed" is a second thing to keep in agreement.
-        //
-        // Emitting unconditionally — including on the pipe-down branch above, where the
-        // close is only QUEUED. The terminal is over as far as this GUI is concerned the
-        // moment its state is torn down, and a deferred delivery to the host does not
-        // change that. Harmless if a future caller skips `cleanup_terminal_state` and the
-        // host's own `Exit` therefore does resolve: `markSessionClosed` is idempotent by
-        // construction, so the duplicate lands on the state it already produced.
-        let _ = self
-            .app_handle
-            .emit("terminal:exit", host_exit_payload(id, exit_cwd));
-        true
+        if self.host_channel_for(id).is_none() { return false; }
+        self.close_process(id, super::CloseStorage::Preserve)
     }
 
     /// If `id` is host-owned, force a repaint via a sidecar resize-nudge (the
     /// local jiggle can't — there is no local master). Returns true if handled.
     pub fn host_repaint(&self, id: &str) -> bool {
-        if !self.is_host_owned(id) {
-            return false;
-        }
         // `id` is the PROCESS id (our map key); the host only knows this terminal
-        // by its session key, so the nudge must be addressed in the host's id
-        // space (design 014 §A2). Reading both from the same record keeps them
-        // consistent even for a migrated terminal, where they differ.
-        let info = self
-            .terminals
-            .get(id)
-            .map(|t| (t.cols, t.rows, t.session_key.clone()));
-        if let Some((cols, rows, session_key)) = info {
-            if let Some(c) = self.pty_host_client().as_ref() {
-                c.nudge_repaint(&session_key, cols, rows);
-            }
-        }
-        true
+        // by its session key, so the nudge is addressed in the host's id space.
+        host_registry::route_repaint(self.host_table.keys(), &self.host_terminals, &self.terminals, id, &|c| self.client_for_channel(c))
     }
 
     /// Force every live PTY to repaint by jiggling its size (rows+1, then back).
@@ -1332,6 +1243,16 @@ impl<R: Runtime> AppState<R> {
     /// EOFs the reader thread's cloned reader — that's what unblocks and ends
     /// the reader thread on an explicit close.
     pub fn cleanup_terminal_state(&self, id: &str) {
+        if self.host_table.keys().owns_process(id) {
+            self.exit_process(id);
+        } else {
+            self.cleanup_terminal_maps(id);
+            self.retire_host_process(id);
+            self.forget_host_terminal(id);
+        }
+    }
+
+    pub(crate) fn cleanup_terminal_maps(&self, id: &str) {
         // FIRST STATEMENT, before anything is removed: the Automations engine keys its per-terminal
         // state by the durable `tm-` LEAF, and `terminals[id]` is the ONLY place that mapping lives.
         // `IdentityIndex` maps leaf -> process and never the reverse, and the sidecar exit path has
@@ -1339,13 +1260,11 @@ impl<R: Runtime> AppState<R> {
         // to fall back on. Reading the leaf after `terminals.remove` yields `None` and the purge
         // silently does nothing, which is invisible: the symptom is a restarted terminal that is
         // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
-        let (leaf, session_key) = self
-            .terminals
-            .get(id)
-            .map(|t| (t.renderer_terminal_id.clone(), t.session_key.clone()))
-            .unwrap_or((None, id.to_string()));
-        if let Some(leaf) = leaf {
-            self.automations.runtime.forget_terminal(&leaf);
+        let leaf = self.terminals.get(id).and_then(|t| t.renderer_terminal_id.clone());
+        if let Some(leaf) = leaf.clone() {
+            let owns_leaf = matches!(self.host_table.keys().owner_state(&leaf),
+                Some((_, super::OwnerState::Registered(s) | super::OwnerState::Closing(s))) if s.process == id);
+            if owns_leaf { self.automations.runtime.forget_terminal(&leaf); }
         }
         // `dirty` is keyed by the PROCESS id (`ChannelPayload.id` is a process id), so it is purged
         // with the id this function was given, never with the leaf. Plan 028 §7.4's table.
@@ -1356,13 +1275,23 @@ impl<R: Runtime> AppState<R> {
         // inserting into `terminal_history`, and that check only closes the
         // TOCTOU window if this method removes `terminals` before
         // `terminal_history`.
-        self.terminals.remove(id);
+        if let Some(key) = self.session_key_for(id) {
+            if let Some(channel) = self.host_channel_for(id) {
+                self.host_table.keys().cleanup_session_projection(channel, &key, id, || {
+                    self.host_stream_offsets.remove(&key);
+                });
+            }
+        }
+        self.ssh_sessions.remove_cwd_process(leaf.as_deref(), id, || {
+            self.terminals.remove(id);
+        });
         // Alongside `terminals`, and for the same reason: the identity lookups are
         // an index OF that map, so an entry outliving its terminal would resolve a
         // durable id to a process that no longer exists. One remover, at the same
         // choke point every other per-terminal map is torn down from.
         self.identity.unindex(id);
         self.shell_writer_channels.remove(id);
+        self.local_processes.remove(id);
         self.ptys.remove(id);
         self.terminal_screens.remove(id);
         self.terminal_focus_reporting.remove(id);
@@ -1371,13 +1300,8 @@ impl<R: Runtime> AppState<R> {
         self.terminal_cwds.remove(id);
         self.replay_prefix.remove(id);
         self.history_dirty.remove(id);
-        // The persist guard entry too (a late persist may re-create it via
-        // or_default; that's harmless — it then no-ops on the missing terminal).
-        self.history_persist_locks.remove(id);
-        // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
-        // in the routing set after its state is torn down.
-        self.host_terminals.remove(id);
-        self.forget_host_session_claim_if_owner(&session_key, id);
+        // Host ownership is released by the ending's effects, after its exact
+        // key has retired and any Close has entered the host FIFO.
     }
 }
 
@@ -1427,8 +1351,8 @@ mod automation_teardown_source_tests {
     fn cleanup_body() -> String {
         let source = include_str!("terminals.rs").replace("\r\n", "\n");
         let start = source
-            .find("pub fn cleanup_terminal_state(&self, id: &str) {")
-            .expect("cleanup_terminal_state must exist");
+            .find("pub(crate) fn cleanup_terminal_maps(&self, id: &str) {")
+            .expect("cleanup_terminal_maps must exist");
         let rest = &source[start..];
         let end = rest.find("\n    }\n").expect("its body must be closed at method indentation");
         let body = rest[..end].to_string();
@@ -1490,12 +1414,74 @@ mod automation_teardown_source_tests {
     }
 }
 
+/// Plan 045 T4: `host_terminals`'s value now says WHICH sidecar owns an entry,
+/// and the elevated sidecar's teardown is DERIVED from counting `Elevated`
+/// entries — a removal that bypasses `forget_host_terminal` silently stops
+/// that count (and therefore the teardown) from ever firing for that site,
+/// with no runtime symptom until someone notices an orphaned elevated
+/// process. Asserted from source, in the style of `automation_teardown_source_tests`
+/// above, since there is no way to enumerate "every call site" at runtime.
+#[cfg(test)]
+mod host_terminal_removal_source_tests {
+    /// Truncated to everything BEFORE this test module's own source: the
+    /// scan below looks for the literal substring `host_terminals.remove(`,
+    /// which this module's own assertions necessarily also contain — an
+    /// untruncated scan would flag itself as a second call site.
+    fn source() -> String {
+        let full = include_str!("terminals.rs").replace("\r\n", "\n");
+        let end = full
+            .find("mod host_terminal_removal_source_tests")
+            .unwrap_or(full.len());
+        full[..end].to_string()
+    }
+
+    /// `forget_host_terminal`'s body span (start, end byte offsets into `source()`).
+    fn forget_host_terminal_span() -> (usize, usize) {
+        let src = source();
+        let sig = "pub fn forget_host_terminal(&self, id: &str) {";
+        let start = src.find(sig).expect("forget_host_terminal must exist");
+        let rest = &src[start..];
+        let end = rest
+            .find("\n    }\n")
+            .expect("its body must be closed at method indentation")
+            + 7;
+        (start, start + end)
+    }
+
+    #[test]
+    fn host_terminals_is_only_removed_through_forget_host_terminal() {
+        let src = source();
+        let (body_start, body_end) = forget_host_terminal_span();
+        let needle = "host_terminals.remove(";
+        let mut offset = 0;
+        let mut found_in_chokepoint = false;
+        while let Some(rel) = src[offset..].find(needle) {
+            let at = offset + rel;
+            if (body_start..body_end).contains(&at) {
+                found_in_chokepoint = true;
+            } else {
+                panic!(
+                    "`host_terminals.remove(` found outside forget_host_terminal at byte {at} \
+                     — route it through forget_host_terminal instead, or the elevated \
+                     sidecar's derived refcount teardown silently stops firing for this site"
+                );
+            }
+            offset = at + needle.len();
+        }
+        assert!(
+            found_in_chokepoint,
+            "forget_host_terminal must itself call host_terminals.remove( — this guard is \
+             vacuous if that call was refactored away without updating this test"
+        );
+    }
+}
+
 /// The reported bug: `armed_deadline` (pty-host/src/manager.rs) is set once
 /// before an update/offload exit and nothing on the success path ever clears
 /// it, so a completely normal quit LATER — after the user reopened, saw a
 /// correct reattach, and simply chose Exit — still Holds instead of tearing
 /// down, and the next launch reattaches a session the user already ended.
-/// Asserted from source: `ensure_pty_host_inner` needs a live pty-host over a
+/// Asserted from source: host adoption needs a live pty-host over a
 /// real pipe/socket to exercise for real, which a unit-test process can't
 /// stand up (the `integration-tests` feature `mock_app` needs breaks the
 /// Windows test binary).
@@ -1525,7 +1511,7 @@ mod arm_lifecycle_wiring_tests {
     }
 
     fn source() -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("state").join("terminals.rs");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("state").join("host_adoption.rs");
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()))
             .replace("\r\n", "\n")
@@ -1536,12 +1522,21 @@ mod arm_lifecycle_wiring_tests {
     /// adopted its sessions and the GUI-less hold is no longer needed.
     #[test]
     fn a_successful_connect_disarms_the_host_it_adopted() {
-        let body = fn_body(&source(), "async fn ensure_pty_host_inner");
+        let source = source();
+        let settle = fn_body(&source, "async fn settle");
         assert!(
-            body.contains("client.disarm()"),
-            "ensure_pty_host_inner must disarm the host once connected — \
-             otherwise an arm from a past update/offload outlives the update \
-             it was for. Body:\n{body}"
+            settle.contains("client.disarm()"),
+            "adoption must disarm the host once connected — \
+            otherwise an arm from a past update/offload outlives the update \
+            it was for. Body:\n{settle}"
+        );
+        // Both ways a host reaches the application — newly connected, or already
+        // connected and only re-listed — go through it.
+        let adopt = fn_body(&source, "async fn adopt<");
+        assert_eq!(
+            adopt.matches("settle(&client, &settle_ctx(port,").count(),
+            2,
+            "adopt must disarm-then-list a host on both the connect and the re-list path"
         );
     }
 }
@@ -1616,7 +1611,7 @@ mod host_close_announces_tests {
     /// Or every assertion below is about an empty string.
     #[test]
     fn found_the_method_it_is_reading() {
-        assert!(body_of("host_close").contains("host_close_pending"));
+        assert!(body_of("host_close").contains("self.close_process(id, super::CloseStorage::Preserve)"));
     }
 
     /// An over-long slice makes "host_close emits" a statement about the rest of the file —
@@ -1632,7 +1627,10 @@ mod host_close_announces_tests {
     /// THE regression. Without this line an API/MCP close is silent.
     #[test]
     fn host_close_emits_terminal_exit() {
-        let body = body_of("host_close");
+        let owner = include_str!("owner_lifecycle.rs").replace("\r\n", "\n");
+        assert!(body_of("host_close").contains("self.close_process("));
+        assert!(crate::state::source_scan::fn_body(&owner, "pub fn close_process(").contains("self.end_shell("));
+        let body = crate::state::source_scan::fn_body(&owner, "fn end_shell(");
         assert!(
             body.contains("\"terminal:exit\""),
             "host_close must announce the close — the sidecar's own Exit frame is dropped \
@@ -1646,9 +1644,29 @@ mod host_close_announces_tests {
     /// the live-client arm would leave the pipe-down case silent.
     #[test]
     fn the_emit_is_after_the_match_so_a_queued_close_announces_too() {
-        let body = body_of("host_close");
-        let queued = body.find("host_close_pending.insert").expect("pipe-down arm gone");
+        let owner = include_str!("owner_lifecycle.rs").replace("\r\n", "\n");
+        let body = crate::state::source_scan::fn_body(&owner, "fn end_shell(");
+        let queued = body.find("keys().end_process(").expect("the shared ending (which queues disconnected closes) is gone");
         let emit = body.find("\"terminal:exit\"").expect("emit gone");
         assert!(emit > queued, "the emit sits inside the live-client arm; a queued close would be silent");
+    }
+}
+
+#[cfg(test)]
+mod elevated_survivor_inspection_wiring_tests {
+    #[test]
+    fn invalid_or_dead_survivor_fallback_cleans_its_record() {
+        let source = crate::state::source_scan::production(include_str!("terminals.rs"));
+        let connect = crate::state::source_scan::fn_body(
+            &source,
+            "async fn ensure_elevated_host_inner(&self)",
+        );
+        let compact: String = connect.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(
+                "match(pipe_ok,live_process){(true,Some(proc))=>survivor_record=Some((rec,proc)),_=>crate::elevated_host::survivor::cleanup_dead_survivor_record(path,rec.instance_id),}"
+            ),
+            "the rejected survivor-record arm must clean that record and its matching stand-down signal"
+        );
     }
 }

@@ -462,24 +462,28 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         expect(preview()?.textContent).toContain('Nothing would be sent');
     });
 
+    // The panel has two checkbox rows (Hide message, Insert captured values); pick by label.
+    const substituteRow = () =>
+        [...container.querySelectorAll<HTMLElement>('.au-checkrow')].find((r) => r.textContent?.includes('Insert captured values'));
+
     it('renders the substitute toggle as a real, labelled checkbox — not a styled div', async () => {
         await renderAction({ message: 'fix $1', substitute: false });
-        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]');
+        const box = substituteRow()?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
         expect(box).not.toBeNull();
         expect(box!.checked).toBe(false);
-        expect(container.querySelector('.au-checkrow')?.textContent).toContain('Insert captured values');
+        expect(substituteRow()?.textContent).toContain('Insert captured values');
     });
 
     it('checks the box once substitution is already on', async () => {
         await renderAction({ message: 'fix $1', substitute: true });
-        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]');
+        const box = substituteRow()?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
         expect(box!.checked).toBe(true);
     });
 
     it('dispatches the toggle when the checkbox is clicked', async () => {
         const dispatch = jest.fn();
         await renderAction({ message: 'fix $1', substitute: false }, { dispatch });
-        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]')!;
+        const box = substituteRow()!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
         await act(async () => box.click());
         expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { substitute: true } });
     });

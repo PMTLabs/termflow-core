@@ -42,7 +42,7 @@ fn join_under(cwd: &str, rel: &str) -> PathBuf {
 
 /// Present a canonicalized path to the renderer without Windows' `\\?\` verbatim
 /// prefix (which some handlers — explorer.exe, editors — dislike).
-fn path_to_string(p: PathBuf) -> String {
+pub(crate) fn path_to_string(p: PathBuf) -> String {
     let s = p.to_string_lossy().into_owned();
     s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
@@ -509,7 +509,7 @@ fn reveal_in_file_manager(path: &str) -> Result<(), String> {
 /// Open a (non-executable) file in the OS-native text editor for the no-editor route.
 /// Deliberately NOT the OS "run/open" association (`os_open`): a default association
 /// could execute script types, whereas a text editor only ever reads the bytes.
-fn open_in_text_editor(path: &str) -> Result<(), String> {
+pub(crate) fn open_in_text_editor(path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("notepad.exe")
@@ -543,6 +543,20 @@ fn open_in_text_editor(path: &str) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+}
+
+fn open_permission_pane_with(kind: crate::commands::permissions::PermissionKind, opener: impl FnOnce(&str) -> Result<(), String>) -> Result<(), String> {
+    use crate::commands::permissions::PermissionKind;
+    let url = match kind {
+        PermissionKind::Accessibility => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        PermissionKind::ScreenRecording => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    };
+    opener(url)
+}
+
+#[tauri::command]
+pub async fn open_permission_pane(kind: crate::commands::permissions::PermissionKind) -> Result<(), String> {
+    open_permission_pane_with(kind, os_open)
 }
 
 #[tauri::command]
@@ -629,7 +643,24 @@ pub async fn open_in_editor(
         // sensibly open a directory, so open it in the OS file manager instead.
         return os_open(&path);
     }
+    if line.is_none() && col.is_none() {
+        return launch_editor(&editor, &path);
+    }
+    launch_editor_at(&editor, &path, line, col)
+}
 
+pub(crate) fn launch_editor(editor: &str, path: &str) -> Result<(), String> {
+    launch_editor_at(editor, path, None, None)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn mac_editor_command(editor: &Path, path: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("open");
+    command.arg("-a").arg(editor).arg("--").arg(path);
+    command
+}
+
+fn launch_editor_at(editor: &str, path: &str, line: Option<u32>, col: Option<u32>) -> Result<(), String> {
     // macOS: a `.app` is a directory bundle, not an executable — `Command::new` on
     // it fails (EISDIR). The Browse picker can return such a bundle, so launch it
     // via `open -a "<bundle>" <file>` (LaunchServices opens the file in that app).
@@ -637,11 +668,7 @@ pub async fn open_in_editor(
     #[cfg(target_os = "macos")]
     {
         if editor.to_ascii_lowercase().trim_end_matches('/').ends_with(".app") {
-            return std::process::Command::new("open")
-                .arg("-a")
-                .arg(&editor)
-                .arg(&path)
-                .spawn()
+            return mac_editor_command(Path::new(editor), Path::new(path)).spawn()
                 .map(|_| ())
                 .map_err(|e| format!("Failed to launch editor '{}': {}", editor, e));
         }
@@ -650,9 +677,9 @@ pub async fn open_in_editor(
     // Resolve `code` → its real `code.cmd`/`code.exe` via PATH+PATHEXT so a bare
     // command name works like it does in the user's shell. Falls back to the
     // as-typed name (absolute paths, Unix native execvp lookup) when it can't.
-    let program = resolve_in_path(&editor)
+    let program = resolve_in_path(editor)
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| editor.clone());
+        .unwrap_or_else(|| editor.to_owned());
     // NOTE (Windows): when `program` is a `.cmd`/`.bat` shim, std runs it through
     // cmd.exe. Argument *injection* is mitigated (Rust ≥1.77.2 / CVE-2024-24576),
     // but cmd.exe still expands `%VAR%` inside the file-path arg. In practice the
@@ -661,7 +688,7 @@ pub async fn open_in_editor(
     let mut cmd = std::process::Command::new(&program);
     // Build args from the user-typed name so VS Code detection (-g go-to-line)
     // still fires even though `program` may now be `…\code.cmd`.
-    cmd.args(editor_args(&editor, &path, line, col));
+    cmd.args(editor_args(editor, path, line, col));
     // Batch shims run through cmd.exe, which — spawned from a GUI process — pops a
     // console window that flashes and closes. Some GUI editors' own `.exe` CLI
     // entry point does the same (console-subsystem launcher stub that forwards to
@@ -694,6 +721,21 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn permission_panes_are_fixed_and_external_guard_is_unchanged() {
+        use crate::commands::permissions::PermissionKind;
+        for (kind, expected) in [
+            (PermissionKind::Accessibility, "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+            (PermissionKind::ScreenRecording, "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+        ] {
+            let seen = std::cell::RefCell::new(String::new());
+            assert_eq!(super::open_permission_pane_with(kind, |url| { *seen.borrow_mut() = url.into(); Ok(()) }), Ok(()));
+            assert_eq!(*seen.borrow(), expected);
+            assert_eq!(super::open_permission_pane_with(kind, |_| Err("opener failed".into())), Err("opener failed".into()));
+            assert!(super::open_external(expected.into()).await.unwrap_err().contains("non-http(s)"));
+        }
+    }
 
     // Unique temp dir per call (no tempfile dep): pid + monotonic counter.
     static COUNTER: AtomicUsize = AtomicUsize::new(0);

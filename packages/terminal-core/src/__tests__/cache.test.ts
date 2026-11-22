@@ -4,6 +4,11 @@ import {
   MAX_TERMINAL_CACHE_ENTRIES,
   setAgentColorLock,
   refreshGlyphAtlases,
+  getTerminalScreenFingerprint,
+  areTerminalScreenFingerprintsEqual,
+  hasTerminalPendingWrites,
+  flushTerminalLiveWrites,
+  drainTerminalWrites,
 } from '../cache';
 import type { TerminalCacheEntry } from '../cache';
 import {
@@ -399,3 +404,169 @@ test('cleanupTerminalCache: a quarantined addon is not double-counted when termi
   releaseFromWebGLQuarantine(wedged);
   expect(countActiveWebGLAddons()).toBe(0);
 });
+
+describe('getTerminalScreenFingerprint & areTerminalScreenFingerprintsEqual', () => {
+  test('returns null for unknown terminal or hydrating terminal', () => {
+    expect(getTerminalScreenFingerprint('unknown-terminal')).toBeNull();
+
+    const hydratingEntry = {
+      terminal: { rows: 24, cols: 80, buffer: { active: { type: 'normal', baseY: 0, length: 24, getLine: () => undefined } } },
+      hydrating: true,
+    } as unknown as TerminalCacheEntry;
+    terminalCache.set('t-hydrating', hydratingEntry);
+    expect(getTerminalScreenFingerprint('t-hydrating')).toBeNull();
+  });
+
+  test('returns null when terminal has pending writes or coalesced buffer', () => {
+    const entry = {
+      terminal: { rows: 24, cols: 80, buffer: { active: { type: 'normal', baseY: 0, length: 24, getLine: () => undefined } } },
+      hydrating: false,
+      liveWriteBuf: 'pending text',
+    } as unknown as TerminalCacheEntry;
+    terminalCache.set('t-pending', entry);
+    expect(hasTerminalPendingWrites('t-pending')).toBe(true);
+    expect(getTerminalScreenFingerprint('t-pending')).toBeNull();
+
+    // After flush, pending writes are cleared
+    entry.liveWriteBuf = '';
+    expect(hasTerminalPendingWrites('t-pending')).toBe(false);
+  });
+
+  test('captures visible rows, buffer type, and geometry', () => {
+    const lines = ['user@host:~$ ', '', ''];
+    let nullCellReused = false;
+    const mockNullCell = {};
+    const mockTerm = {
+      rows: 3,
+      cols: 80,
+      buffer: {
+        active: {
+          type: 'normal',
+          baseY: 0,
+          length: 3,
+          getNullCell: () => mockNullCell,
+          getLine: (idx: number) => ({
+            length: lines[idx]?.length ?? 0,
+            translateToString: (trim?: boolean, start?: number, end?: number) => (trim ? lines[idx]?.trimEnd() ?? '' : lines[idx] ?? ''),
+            getCell: (_col: number, cell?: any) => {
+              if (cell === mockNullCell) nullCellReused = true;
+              return {
+                getFgColor: () => 7,
+                getBgColor: () => 0,
+                isBold: () => false,
+                isItalic: () => false,
+              };
+            },
+          }),
+        },
+      },
+    };
+    terminalCache.set('t-visible', {
+      terminal: mockTerm,
+      hydrating: false,
+    } as unknown as TerminalCacheEntry);
+
+    const fp = getTerminalScreenFingerprint('t-visible');
+    expect(fp).not.toBeNull();
+    expect(fp?.terminalId).toBe('t-visible');
+    expect(fp?.bufferType).toBe('normal');
+    expect(fp?.cols).toBe(80);
+    expect(fp?.rows).toBe(3);
+    expect(fp?.lines).toEqual(['user@host:~$', '', '']);
+    expect(fp?.attrHash).toBeDefined();
+    expect(nullCellReused).toBe(true);
+  });
+
+  test('areTerminalScreenFingerprintsEqual checks every field independently', () => {
+    const fp1 = {
+      terminalId: 't1',
+      bufferType: 'normal' as const,
+      cols: 80,
+      rows: 24,
+      length: 24,
+      baseY: 0,
+      lines: ['prompt $'],
+      attrHash: 12345,
+    };
+
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1 })).toBe(true);
+    // Independently varied fields
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, terminalId: 't2' })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, bufferType: 'alternate' as const })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, cols: 120 })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, rows: 40 })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, length: 30 })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, baseY: 6 })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, attrHash: 99999 })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, lines: ['prompt $', 'extra line'] })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, { ...fp1, lines: ['different text'] })).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, null)).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(null, fp1)).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(undefined, fp1)).toBe(false);
+  });
+
+  test('differentiates all rendering-significant cell attributes and color modes', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const path = require('path');
+    const { Terminal: RealTerminal } = require(
+      path.resolve(__dirname, '../../../../node_modules/@xterm/xterm/lib/xterm.js'),
+    );
+    const runSequence = async (seq: string): Promise<number> => {
+      const term = new RealTerminal({ cols: 10, rows: 2, allowProposedApi: true });
+      terminalCache.set('t-seq', {
+        terminal: term,
+        hydrating: false,
+      } as unknown as TerminalCacheEntry);
+      await new Promise<void>((resolve) => term.write(seq, () => resolve()));
+      const fp = getTerminalScreenFingerprint('t-seq');
+      term.dispose();
+      return fp!.attrHash!;
+    };
+
+    const hashPlain = await runSequence('hello');
+    const hashInverse = await runSequence('\x1b[7mhello\x1b[0m');
+    const hashUnderline = await runSequence('\x1b[4mhello\x1b[0m');
+    const hashDim = await runSequence('\x1b[2mhello\x1b[0m');
+    const hashBold = await runSequence('\x1b[1mhello\x1b[0m');
+    const hashItalic = await runSequence('\x1b[3mhello\x1b[0m');
+    const hashPalette = await runSequence('\x1b[38;5;1mhello\x1b[0m');
+    const hashRGB = await runSequence('\x1b[38;2;0;0;1mhello\x1b[0m');
+
+    const hashes = [
+      hashPlain,
+      hashInverse,
+      hashUnderline,
+      hashDim,
+      hashBold,
+      hashItalic,
+      hashPalette,
+      hashRGB,
+    ];
+    // Every single hash must be uniquely distinct
+    const unique = new Set(hashes);
+    expect(unique.size).toBe(hashes.length);
+  });
+
+  test('drainTerminalWrites flushes liveWriteBuf and waits for parser callback', async () => {
+    let written = '';
+    const mockTerm = {
+      write: (data: string, cb?: () => void) => {
+        written += data;
+        if (cb) cb();
+      },
+    };
+    terminalCache.set('t-drain', {
+      terminal: mockTerm,
+      liveWriteBuf: 'unflushed chunk',
+    } as unknown as TerminalCacheEntry);
+
+    let drained = false;
+    drainTerminalWrites('t-drain', () => {
+      drained = true;
+    });
+
+    expect(written).toContain('unflushed chunk');
+    expect(drained).toBe(true);
+  });
+});
+

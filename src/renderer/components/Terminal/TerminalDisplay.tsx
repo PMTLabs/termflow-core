@@ -6,17 +6,24 @@ import type { FontWeight } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
 import type { TerminalLinkHit } from '@termflow/terminal-core';
 import { ContextMenu } from './ContextMenu';
+import { broadcastMenuItems } from '../Panes/broadcastMenuItems';
+import { selectBroadcastMembers } from '../../store/slices/broadcastSlice';
+import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { automationMenuItems } from '../Automation/AutomationMenuSection';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
+import { RemoteSuggestChip } from './RemoteSuggestChip';
+import { useRemoteSuggestHint } from './useRemoteSuggestHint';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { SnippetDialog } from '../UI/SnippetDialog';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
+import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { useCommandSuggest } from './useCommandSuggest';
 import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
+import { adminTabMenuItem } from './adminTabMenuItem';
 import { nextSnippetSortMode, snippetDisplayLabel } from '../../services/snippetSearch';
 import { openSettingsTab } from '../../services/openSettings';
 import { commandHistoryService } from '../../services/commandHistoryService';
@@ -33,7 +40,7 @@ import { createMainBridge } from './MainBridge';
 import { getWindowsBuildNumber } from '../../api/tauri-bridge';
 import { store, RootState } from '../../store';
 import { setSurfaceChrome, clearSurfaceChrome } from '../../services/surfaceChrome';
-import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
+import { getSchemaTheme } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { blendEndedTint, endedRailColor } from '../../store/endedTint';
@@ -128,6 +135,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // arrangement the toggle just persisted rather than the one it opened with.
   const snippetsViewMode = useSelector((s: RootState) => s.settings.snippetsViewMode);
   const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
+  // Plan 045 — same rule: a live store read, so the admin submenu reflects
+  // profiles as they're added/removed in Settings without a reopen.
+  const shellProfiles = useSelector((s: RootState) => s.settings.shellProfiles);
   const [snippetDialogOpen, setSnippetDialogOpen] = useState(false);
   const [snippetSeedText, setSnippetSeedText] = useState<string | undefined>(undefined);
   const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
@@ -176,11 +186,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const [pathPicker, setPathPicker] = useState<{
     x: number; y: number; candidates: string[]; base?: string; line?: number; col?: number;
   } | null>(null);
-  // Backlog 007: per-agent color scheme. `agentForMenu` is the coding agent
-  // detected in this pane when the right-click menu opened (null if none);
-  // `schemaPicker` is the secondary schema-list menu it opens.
+  // Backlog 007: per-agent color scheme. `agentForMenu` is the coding agent detected in
+  // this pane when the right-click menu opened (null if none); it drives the "Color scheme
+  // for X" submenu built into the menu's own items below (`customFlyout`, 2026-09-16) — a
+  // real submenu now, not a separate popup, so opening it no longer closes the menu behind
+  // it (it used to: the old picker was a plain `click` item that opened a second, standalone
+  // `ContextMenu`, which — per ContextMenu.tsx's own contract that every plain item closes
+  // the menu — always tore the first one down first).
   const [agentForMenu, setAgentForMenu] = useState<string | null>(null);
-  const [schemaPicker, setSchemaPicker] = useState<{ x: number; y: number; agent: string } | null>(null);
+  // Reactive (unlike a one-shot `store.getState()` read) so the submenu's active-swatch
+  // highlight updates live as the user clicks through schemes without the panel closing —
+  // the same reason `TabContextMenu`'s own Color Schema flyout reads its active id this way.
+  const agentSchemaActiveId = useSelector((s: RootState) =>
+    agentForMenu ? s.settings.agentColorSchemes[agentForMenu] : undefined);
+  const globalSchemaId = useSelector((s: RootState) => s.settings.colorSchemaId);
 
   // Open a fully-resolved path via the configured editor (with line/col) or the OS
   // default handler; surface any failure as a toast. Stable identity (deps: dispatch)
@@ -219,6 +238,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // Backlog 011: suggest popup state. Routed via a ref so the once-per-terminalId
   // engine options always call the live hook callbacks (same pattern as
   // onTitleChangeRef above).
+  const broadcastActive = useSelector((s: RootState) => selectBroadcastMembers(s).includes(terminalId));
   const suggest = useCommandSuggest(engineRef, () => getCwdSnapshot(terminalId));
   const suggestRef = useRef(suggest);
   suggestRef.current = suggest;
@@ -246,10 +266,14 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * the ref is what lets that one path opt out of the refocus.
    */
   const snippetDialogOpenRef = useRef(false);
+  const snippetDeleteTargetRef = useRef<Snippet | null>(null);
   useEffect(() => {
     contextMenuOpenRef.current = contextMenu !== null;
     snippetsMenuOpenRef.current = snippetsMenu !== null;
   }, [contextMenu, snippetsMenu]);
+  useEffect(() => {
+    snippetDeleteTargetRef.current = snippetDeleteTarget;
+  }, [snippetDeleteTarget]);
   /**
    * Put the keyboard back in the terminal.
    *
@@ -266,7 +290,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * checked so the intent is stated rather than implied.
    */
   const refocusTerminal = useCallback(() => {
-    if (snippetDialogOpenRef.current) return;
+    if (snippetDialogOpenRef.current || snippetDeleteTargetRef.current !== null) return;
     engineRef.current?.focus();
   }, []);
   const closeContextMenu = useCallback(() => {
@@ -279,10 +303,6 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   }, [refocusTerminal]);
   const closePathPicker = useCallback(() => {
     setPathPicker(null);
-    refocusTerminal();
-  }, [refocusTerminal]);
-  const closeSchemaPicker = useCallback(() => {
-    setSchemaPicker(null);
     refocusTerminal();
   }, [refocusTerminal]);
   const openSnippetDialog = useCallback((seedText?: string) => {
@@ -348,21 +368,15 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    */
   const engineHostRef = useRef<HTMLElement | null>(null);
   /**
-   * Open the Snippets flyout at the terminal's CURSOR (plan/029 §6) — the keyboard
+   * Open the Snippets flyout at the center of the main window (plan/029 §6) — the keyboard
    * equivalent of right-clicking and picking Snippets.
    *
-   * Anchored at the cursor rather than at a corner because that is where the user is
-   * already looking, and because it is the point the inserted text will appear at.
-   * `getCursorPixelPosition` is relative to the engine's container and returns null when
-   * the cursor is scrolled out of view, so the container's own top-left is the fallback.
+   * Anchored at the center of the main window with increased font size.
    */
   const openSnippetsMenu = useCallback(() => {
-    const rect = engineHostRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const cursor = engineRef.current?.getCursorPixelPosition() ?? null;
     setSnippetsMenu({
-      x: rect.left + (cursor?.left ?? 0),
-      y: rect.top + (cursor ? cursor.top + cursor.cellHeight : 0),
+      x: typeof window !== 'undefined' ? Math.round(window.innerWidth / 2) : 0,
+      y: typeof window !== 'undefined' ? Math.round(window.innerHeight / 2) : 0,
       selectionText: engineRef.current?.getCopyableSelection().trim() || undefined,
     });
   }, []);
@@ -461,11 +475,12 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       if (toCanvas) suggestRef.current.close();
       // ContextMenu portals to <body> with position: fixed at literal x/y
       // (ContextMenu.tsx:63, :67), so a menu opened before the move floats at a
-      // viewport point unrelated to the terminal. Same for both pickers.
+      // viewport point unrelated to the terminal. Same for the other picker (the
+      // agent color-scheme picker is a submenu INSIDE `contextMenu` now, not a
+      // separate popup, so closing that menu already takes it with it).
       setContextMenu(null);
       setSnippetsMenu(null);
       setPathPicker(null);
-      setSchemaPicker(null);
       // The SEARCH BAR is deliberately left open with its state intact (§8): it
       // holds user-typed query/caseSensitive/wholeWord/regex (now in
       // useTerminalSearch, `plan/027` §1.3) and the SearchAddon's highlights live on
@@ -496,6 +511,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     closePopup: () => suggestRef.current.close(),
   });
 
+  // Plan 061: offer a copy-only prompt hook while ssh is the foreground program in a tab whose
+  // local shell proved it renders prompt marks. Declared after `useSurfaceRelocation` because
+  // `engineGeneration` is what tells it a new engine exists to subscribe to.
+  const remoteHint = useRemoteSuggestHint(terminalId, engineRef, engineGeneration);
+
   // Create the engine + mount it once per terminalId. Reattach existing process
   // when available. Cleanup → unmount() (NOT dispose — preserve the cache).
   useEffect(() => {
@@ -514,13 +534,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
 
     // SINGLE-USE HANDOFFS, TAKEN BEFORE THE MOUNT THAT CONSUMES THEM.
     //
-    // Both `take*` calls are DESTRUCTIVE (get-then-delete; Set.delete), and they run
-    // while the options object below is built — before `engine.mount()` can refuse.
+    // All three `take*` calls are DESTRUCTIVE (get-then-delete; Set.delete), and they
+    // run while the options object below is built — before `engine.mount()` can refuse.
     // Held in locals so the refusal path can hand them back.
     //
-    // Neither is recoverable if dropped: the cross-window prompt gate exists only in
-    // the source window, which has already let go of it, and ConPTY announced `?9001h`
-    // once at session start with no stream still replaying it. And a refusal is exactly
+    // None is recoverable if dropped: the cross-window prompt gate and Kitty state exist
+    // only in the source window, which has already let go of them, and ConPTY announced
+    // `?9001h` once at session start with no stream still replaying it. And a refusal is exactly
     // when they are non-empty — the create-branch refusal is a FIRST-EVER mount in this
     // window, i.e. the cross-window detach and the hot-swap reattach. This effect's deps
     // are `[terminalId]` only, so it does not re-run on its own; a later mount (tab
@@ -528,6 +548,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     // and permanent for the session.
     const promptGateHandoff = terminalService.takePromptGateHandoff(terminalId);
     const win32InputModeHandoff = terminalService.takeWin32InputModeHandoff(terminalId);
+    const keyboardProtocolHandoff = terminalService.takeKeyboardProtocolHandoff(terminalId);
 
     const engine = new TerminalEngine(bridge, {
       cacheKey: terminalId,
@@ -581,6 +602,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // Backlog 011: command-history suggestions. Live getter (toggle without
       // remount); popup events routed through the ref to the hook.
       commandSuggestions: () => store.getState().settings.commandSuggestions,
+      broadcastActive: () => selectBroadcastMembers(store.getState()).includes(terminalId),
       // Cross-window detach handoff: this window's terminalCache has no entry for
       // terminalId yet on first mount, so the source window's live prompt-gate
       // (stashed by attachExistingTerminal) fills the gap. Single-use — undefined
@@ -592,6 +614,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // engine ignores it off-Windows and whenever the cache entry already
       // tracks the session itself.
       initialWin32InputMode: win32InputModeHandoff,
+      // Cross-window detach handoff for the Kitty / modifyOtherKeys state the app
+      // negotiated in the source window (pushed once, never repeated). Single-use —
+      // undefined for a normal mount; a cache entry of this window's own always wins.
+      initialKeyboardProtocol: keyboardProtocolHandoff,
       onInputLineChanged: (text) => suggestRef.current.onInputLineChanged(text),
       onCommandSubmitted: (cmd) => commandHistoryService.record(cmd, getCwdSnapshot(terminalId)),
       onSuggestAction: (action) => suggestRef.current.onAction(action),
@@ -670,6 +696,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // caller's does not.
       if (promptGateHandoff) terminalService.stashPromptGate(terminalId, promptGateHandoff);
       if (win32InputModeHandoff) terminalService.markReattachedSession(terminalId);
+      if (keyboardProtocolHandoff) terminalService.stashKeyboardProtocol(terminalId, keyboardProtocolHandoff);
       engineRef.current = null;
       return () => {};
     }
@@ -768,7 +795,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   /**
    * A menu belongs to the tab it was opened in.
    *
-   * All four of these render through `ContextMenu`, which portals to `document.body` at
+   * All three of these render through `ContextMenu`, which portals to `document.body` at
    * `position: fixed`; `.tab-content`'s `visibility/opacity/content-visibility` hide only that
    * tab's own subtree, and a background tab stays mounted — so a menu opened here kept painting
    * over whichever tab the user switched to, where it reads as that tab's menu while acting on
@@ -777,8 +804,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * EDGE into inactive rather than the state, which is what keeps the Canvas overlay's menu (this
    * component, `isActive` false throughout) working.
    *
-   * The same four slots `onRelocated` clears, for the same reason and deliberately in the same
-   * order — a fifth floating surface added to this component has two places to be listed, and
+   * The agent color-scheme picker needs no slot of its own here: it is a submenu INSIDE
+   * `contextMenu` (`customFlyout`, 2026-09-16), so clearing `contextMenu` already takes it.
+   *
+   * The same three slots `onRelocated` clears, for the same reason and deliberately in the same
+   * order — a fourth floating surface added to this component has two places to be listed, and
    * they are the two closest things to each other in this file that both mean "this menu can no
    * longer be where it thinks it is".
    *
@@ -791,7 +821,6 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     setContextMenu(null);
     setSnippetsMenu(null);
     setPathPicker(null);
-    setSchemaPicker(null);
   });
 
   // Restore keyboard focus to this terminal when it becomes the active pane of
@@ -823,7 +852,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
 
   /**
    * The Snippets item, built ONCE for both of its hosts: the right-click menu and the
-   * `Ctrl+Shift+S` menu. Two call sites building their own would be two places for a
+   * `Ctrl+Shift+A` menu. Two call sites building their own would be two places for a
    * prop to be forgotten — and the toggle, the insert target and the dialog hook all
    * have to behave identically whichever way the flyout was opened.
    */
@@ -845,6 +874,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     selectionText,
   });
 
+  useEffect(() => { if (broadcastActive) suggest.close(); }, [broadcastActive, suggest.close]);
+
   const getContextMenuItems = () => {
     const engine = engineRef.current;
     const actions = engine?.getContextMenuActions();
@@ -859,7 +890,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     const selectionMode = engine?.isSelectionMode() ?? false;
     const offerSelectionMode = selectionMode || (engine?.isMouseTrackingActive() ?? false);
 
+    const state = store.getState();
+    const owningTabId = Object.keys(state.panes.treesByTabId).find(id => getAllTerminalIds(state.panes.treesByTabId[id]).includes(terminalId));
     return [
+      ...(paneId && !relocationHost ? broadcastMenuItems(state, owningTabId, dispatch) : []),
       // Pane-tree actions, and ONLY while the surface is actually in its pane (`plan/021` R2).
       //
       // The menu became reachable from the canvas overlay, where these are wrong in a way
@@ -888,19 +922,39 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         title: 'Open a new tab using your default shell profile.',
         click: () => openNewTabWithDefaultProfile(),
       },
+      // Plan 045. Always present (O2) — disabled with a tooltip when unsupported,
+      // never hidden, so a stale renderer can't drive it into a backend that
+      // will refuse it anyway.
+      adminTabMenuItem(shellProfiles),
       {
         label: 'New Window',
         icon: '🪟',
         title: 'Open a new, empty application window.',
         click: () => { void openNewWindow(); },
       },
-      // Backlog 007: color scheme for the coding agent running in this pane.
-      // Only shown when an agent is detected; opens a secondary schema list.
+      // Backlog 007: color scheme for the coding agent running in this pane. Only shown
+      // when an agent is detected; a real submenu (2026-09-16) rather than a separate
+      // popup, so opening it leaves this menu open behind it — the same as Admin Tab and
+      // Snippets, and (visually) the same wide swatch-card grid as the tab strip's own
+      // Color Schema flyout (`submenu-flyout-panel--wide`, `TabContextMenu.tsx`).
       ...(agentForMenu ? [{
         label: `Color scheme for "${agentForMenu}"`,
         icon: '🎨',
         title: `Pick a terminal color scheme for the "${agentForMenu}" agent. Applies whenever this agent runs in any pane, overriding the tab/default scheme.`,
-        click: () => setSchemaPicker({ x: contextMenu?.x ?? 0, y: contextMenu?.y ?? 0, agent: agentForMenu }),
+        customFlyout: {
+          panelClassName: 'submenu-flyout-panel submenu-flyout-panel--wide',
+          content: (
+            <ColorSchemaGrid
+              activeId={agentSchemaActiveId}
+              defaultSwatchSchemaId={globalSchemaId}
+              defaultLabel="Use tab / default"
+              onPick={(id) => {
+                if (id) dispatch(setAgentColorScheme({ agent: agentForMenu, colorSchemaId: id }));
+                else dispatch(removeAgentColorScheme({ agent: agentForMenu }));
+              }}
+            />
+          ),
+        },
       }] : []),
       { type: 'separator' as const },
       /**
@@ -1075,7 +1129,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       />
       <ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />
       {search.open && <TerminalSearchBar search={search} />}
-      {suggest.open && (
+      {remoteHint.show && !broadcastActive && <RemoteSuggestChip onDismiss={remoteHint.dismiss} />}
+      {suggest.open && !broadcastActive && (
         <CommandSuggestPopup
           suggestions={suggest.items}
           selectedIndex={suggest.selectedIndex}
@@ -1090,11 +1145,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           y={contextMenu.y}
           items={getContextMenuItems()}
           onClose={closeContextMenu}
-          suppressDismiss={snippetDialogOpen}
+          suppressDismiss={snippetDialogOpen || snippetDeleteTarget !== null}
         />
       )}
       {/* plan/029 §6 — the same flyout the right-click menu carries, opened straight from
-          the keyboard: the panel alone, at the cursor, with its search box focused. */}
+          the keyboard: the panel alone, at the center of the main window, with its search box focused. */}
       {snippetsMenu && (
         <ContextMenu
           x={snippetsMenu.x}
@@ -1102,7 +1157,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           items={[snippetsMenuItem(closeSnippetsMenu, snippetsMenu.selectionText)]}
           standaloneSubmenu={0}
           onClose={closeSnippetsMenu}
-          suppressDismiss={snippetDialogOpen}
+          suppressDismiss={snippetDialogOpen || snippetDeleteTarget !== null}
+          centered
+          className="terminal-snippets-popup"
         />
       )}
       {pathPicker && (
@@ -1122,27 +1179,6 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
             click: () => { void openResolved(c, pathPicker.line, pathPicker.col); },
           }))}
           onClose={closePathPicker}
-        />
-      )}
-      {schemaPicker && (
-        <ContextMenu
-          x={schemaPicker.x}
-          y={schemaPicker.y}
-          items={[
-            {
-              label: 'Use tab / default',
-              icon: '↩️',
-              title: `Remove the "${schemaPicker.agent}" agent color-scheme override.`,
-              click: () => dispatch(removeAgentColorScheme({ agent: schemaPicker.agent })),
-            },
-            ...COLOR_SCHEMAS.map((s) => ({
-              label: (store.getState().settings.agentColorSchemes[schemaPicker.agent] === s.id ? '✓ ' : '') + s.name,
-              icon: '🎨',
-              title: `Use ${s.name} while "${schemaPicker.agent}" is running.`,
-              click: () => dispatch(setAgentColorScheme({ agent: schemaPicker.agent, colorSchemaId: s.id })),
-            })),
-          ]}
-          onClose={closeSchemaPicker}
         />
       )}
       {/* plan/029 §6 — opened by the Snippets flyout's Add/Edit actions. Never dispatches

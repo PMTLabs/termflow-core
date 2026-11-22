@@ -42,7 +42,7 @@ impl AutomationStore {
         let mut guard = self.conn.lock().unwrap();
         let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
         let tx = conn.transaction()?;
-        let previous = Self::write_rule(&tx, rule)?;
+        let previous = self.write_rule(&tx, rule)?;
         tx.commit()?;
         Ok(previous)
     }
@@ -93,10 +93,35 @@ impl AutomationStore {
     /// not parse. No v3 exists yet, so this is prospective — but the stamp staying honest must not be
     /// read as the graph staying whole, which is exactly the sentence above invited on its own.
     pub(super) fn write_rule(
+        &self,
         tx: &rusqlite::Transaction<'_>,
         rule: &AutomationRule,
     ) -> Result<Option<i64>, AutomationStoreError> {
-        let graph = serde_json::to_string(&rule.graph)
+        let mut stored = rule.graph.clone();
+        if let Some(action) = stored.action.as_mut() {
+            if action.masked {
+                if !action.message.is_empty() {
+                    let previous: Option<String> = optional_row(tx.query_row(
+                        "SELECT graph FROM automation_rules WHERE id = ?1", [&rule.id], |r| r.get(0),
+                    ))?;
+                    let existing = previous.and_then(|json| serde_json::from_str::<AutomationGraph>(&json).ok())
+                        .and_then(|graph| graph.action)
+                        .filter(|old| old.masked)
+                        .and_then(|old| old.message_cipher)
+                        .filter(|encrypted| self.cipher.decrypt(encrypted).ok().as_deref() == Some(action.message.as_str()));
+                    action.message_cipher = Some(match existing {
+                        Some(existing) => existing,
+                        None => self.cipher.encrypt(&action.message).map_err(|_| {
+                            AutomationStoreError::Invalid("Can't hide this message: no system keystore is available. Turn off Hide message to save it.".into())
+                        })?,
+                    });
+                }
+                action.message.clear();
+            } else {
+                action.message_cipher = None;
+            }
+        }
+        let graph = serde_json::to_string(&stored)
             .map_err(|e| AutomationStoreError::Invalid(format!("graph is not serialisable: {e}")))?;
         let target_mode = enum_to_db(&rule.target_mode)?;
         let criterion = enum_to_db(&rule.criterion)?;
@@ -265,7 +290,7 @@ impl AutomationStore {
         // rule runs and `deliver` presses a bare Enter into the terminal - the exact R10 outcome this
         // gate exists to prevent.
         if enabled {
-            let rule = Self::read_rule_on(&tx, rule_id)?
+            let rule = self.read_rule_on(&tx, rule_id)?
                 .ok_or_else(|| AutomationStoreError::Invalid(format!("no rule {}", rule_id)))?;
             Self::refuse_if_invalid(&rule)?;
         }
@@ -371,7 +396,7 @@ impl AutomationStore {
         // editor's Duplicate button is gated only on the draft HAVING an id - deliberately not on the
         // in-flight save that `disabled={saving}` guards for the Save button - so Save followed by
         // Duplicate before the round trip commits clones the version the save is replacing.
-        let original = Self::read_rule_on(&tx, id)?
+        let original = self.read_rule_on(&tx, id)?
             .ok_or_else(|| AutomationStoreError::Invalid(format!("no such rule {id}")))?;
         let mut copy = original.clone();
         copy.id = format!("au-{}", uuid::Uuid::new_v4());
@@ -403,7 +428,7 @@ impl AutomationStore {
             }
             v
         };
-        Self::write_rule(&tx, &copy)?;
+        self.write_rule(&tx, &copy)?;
 
         let mut order = Vec::with_capacity(existing.len() + 1);
         for rule_id in existing {

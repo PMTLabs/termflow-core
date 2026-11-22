@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { CanvasEdge, addEdge, removeEdge, selectEdge } from '../../store/slices/canvasSlice';
 import { createEdge, reconnectEdge } from '../../services/canvasGraph';
+import { captureCanvasEffect } from '../../services/canvasEffect';
 import { worldPoint } from './canvasMutations';
 import { exceedsDragSlop } from './canvasGestures';
 import { Rect } from './canvasGeometry';
@@ -51,6 +52,7 @@ interface Link {
    * drag is holding.
    */
   reconnect?: { edge: CanvasEdge; end: WireEnd };
+  current: () => boolean;
 }
 
 export interface WireDragState {
@@ -185,6 +187,7 @@ export function useWireDrag(
     const box = started.viewport.getBoundingClientRect();
     link.current = {
       ...started.link,
+      current: captureCanvasEffect(started.link.reconnect ? [started.link.reconnect.edge.from, started.link.reconnect.edge.to] : [started.link.anchorId], started.link.reconnect?.edge, () => latest.current.edges),
       rect: { left: box.left, top: box.top },
       origin: { x: e.clientX, y: e.clientY },
       moved: false,
@@ -208,6 +211,7 @@ export function useWireDrag(
     const onMove = (e: PointerEvent) => {
       const l = link.current;
       if (!l) return;
+      if (!l.current()) { end(); return; }
       // Below the slop this press is still a candidate click: no ghost, no target highlight,
       // no revealed ports. Once past it, it is a drag for good — `moved` never goes back, so a
       // drag that happens to return to its origin does not turn into a click on release.
@@ -238,6 +242,7 @@ export function useWireDrag(
       const l = link.current;
       if (!l) return;
       end();
+      if (!l.current()) return;
 
       // A press that never travelled is a CLICK on the port: offer a shell profile and create
       // a terminal already connected to this one (item 4). It cannot also be a drop — the
@@ -257,6 +262,8 @@ export function useWireDrag(
 
       const to = linkTargetId(terminalIdAt(e.clientX, e.clientY), l.anchorId);
       if (!to) return;
+      const endpointCurrent = captureCanvasEffect([to]);
+      const current = () => l.current() && endpointCurrent();
 
       if (l.reconnect) {
         const { edge, end } = l.reconnect;
@@ -264,8 +271,8 @@ export function useWireDrag(
         // Dropped back where it started, or on the node at the other end. Neither is a failure,
         // and neither may cost the user the connection they were holding.
         if (!pair) return;
-        void reconnectEdge(edge, pair.from, pair.to).then((done) => {
-          if (!done) return;
+        void reconnectEdge(edge, pair.from, pair.to, current).then((done) => {
+          if (!done || !current()) return;
           // Only what the SERVER agreed to. A delete that failed leaves the old wire in the
           // mirror, where it belongs: it is still stored, and hiding it here would make it
           // reappear on the next restart with nothing to explain it.
@@ -283,7 +290,7 @@ export function useWireDrag(
       // so the delete would target something that does not exist and leave the real edge
       // behind. A duplicate pair comes back as the EXISTING row, which is the id we want.
       void createEdge(l.anchorId, to).then((edge) => {
-        if (edge) dispatch(addEdge(edge));
+        if (edge && current()) dispatch(addEdge(edge));
       });
     };
 

@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
+import { capturePaneEffect } from '../../services/paneEffect';
+import { findLeaf } from '../../store/slices/paneTreeOps';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import {
@@ -18,6 +20,7 @@ import { cleanupTerminalCache } from '../Terminal/TerminalDisplay';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { closePaneNonBlocking } from '../../services/paneClose';
+import { forgetRemoteHint } from '../Terminal/remoteSuggestHint';
 import './PaneManager.css';
 
 interface PaneManagerProps {
@@ -57,6 +60,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
 
   // Pane pending close confirmation (mirrors the tab-close confirm flow).
   const [pendingClosePaneId, setPendingClosePaneId] = React.useState<string | null>(null);
+  const pendingCloseCurrent = useRef<() => boolean>(() => false);
 
   const handleSplit = useCallback((paneId: string, direction: 'horizontal' | 'vertical') => {
     // Centralised in paneActions so the split buttons and the right-click menu
@@ -67,8 +71,10 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
 
   // Request close: show the confirmation dialog instead of closing immediately.
   const handleClose = useCallback((paneId: string) => {
+    const node = findLeaf(paneTree ?? null, paneId);
+    pendingCloseCurrent.current = node?.terminalId ? capturePaneEffect(node.terminalId, paneId) : () => false;
     setPendingClosePaneId(paneId);
-  }, []);
+  }, [paneTree]);
 
   // Non-blocking close (P0 — Faster Pane Close): the pane must disappear from
   // the UI immediately on confirm, so the backend PTY teardown (a multi-second
@@ -93,6 +99,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
 
     closePaneNonBlocking({
       terminalId,
+      paneId,
       // Remove the pane from the tab that OWNS it, not from whichever tab is active.
       //
       // `closePane` mutates `state.paneTree` — the active tab's tree — but this component
@@ -106,10 +113,11 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       removeFromUi: () => dispatch(
         tabId ? removePaneFromTab({ tabId, paneId }) : closePane(paneId),
       ),
-      closeTerminal: (id) => terminalService.closeTerminal(id),
+      closeTerminal: (id, pi) => terminalService.closeTerminal(id, pi),
       clearCwdSnapshot,
       releaseSurface: cleanupTerminalCache,
       clearSessionExit: (id) => dispatch(clearSessionClosed({ terminalId: id })),
+      forgetRemoteHint,
     });
   }, [dispatch, paneTree, tabId]);
 
@@ -237,7 +245,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
         title="Close Pane"
         message={`Are you sure you want to close "${pendingPaneName || 'this pane'}"? Any running process will be terminated.`}
         onConfirm={() => {
-          if (pendingClosePaneId) performClose(pendingClosePaneId);
+          if (pendingClosePaneId && pendingCloseCurrent.current()) performClose(pendingClosePaneId);
           setPendingClosePaneId(null);
         }}
         onCancel={() => setPendingClosePaneId(null)}

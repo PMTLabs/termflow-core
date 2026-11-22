@@ -2,6 +2,10 @@
 // `services/automationEvents.ts` — a `.d.ts` cannot hold runtime values, and the whole
 // point of those constants is that they are imported rather than spelled inline. The
 // runtime payload is also what `get_automation_runtime` returns, so it is needed here.
+import type { SshAPI, SshMetricsAPI } from './ssh';
+// SSH IPC census: ssh_session_open, ssh_session_state, ssh_session_close, ssh_session_reconnect, ssh_session_submit_secret, ssh_session_trust_host, ssh_test_connection, ssh_test_state, ssh_test_close, ssh_test_submit_secret, ssh_test_trust_host
+// SSH file IPC census: ssh_fs_list, ssh_fs_stat, ssh_fs_mkdir, ssh_fs_create, ssh_fs_rename, ssh_fs_delete, ssh_fs_chmod, ssh_fs_chown,
+// ssh_fs_download, ssh_fs_open, ssh_fs_open_with, ssh_fs_insert_path, ssh_fs_edit_stop, ssh_fs_edit_list
 import type { AutomationStatePayload } from '../services/automationEvents';
 
 // Faithful styled snapshot of a terminal's current visible screen, used for
@@ -10,6 +14,10 @@ export interface TerminalSnapshot {
   snapshot: string;
   rows: number;
   cols: number;
+  // Restore replay only (see terminal-core's TerminalSnapshot): the snapshot is a previous
+  // session's scrollback, not the screen, and `anchorRow` is where the cursor must end up.
+  prefixOnly?: boolean;
+  anchorRow?: number;
 }
 
 export interface NetworkConfig {
@@ -34,7 +42,7 @@ export interface EffectiveEndpoints {
 export type UpdateStatus =
   | { state: 'notInstalled' }
   | { state: 'upToDate' }
-  | { state: 'available'; version: string }
+  | { state: 'available'; version: string; markerMode: import('../api/tauri-bridge').UpdateMarkerMode }
   | { state: 'unavailable' };
 
 export interface NetworkInterfaceInfo {
@@ -87,6 +95,12 @@ export interface FabricStatus {
 }
 
 /**
+ * Whether the host serving a terminal belongs to the running build. `previous` also covers a
+ * host whose generation cannot be shown, so it is never read as `current` by default.
+ */
+export type HostGeneration = 'current' | 'previous';
+
+/**
  * One live terminal process as reported by `GET /api/processes`.
  * `id` is the backend processId (matches TerminalService `process.id`, NOT the
  * UI terminalId stored on pane nodes). `currentApp.name` is the foreground
@@ -120,7 +134,24 @@ export interface DirUsageRow {
   lastUsedAt: number;
 }
 
-export interface ElectronAPI {
+export type PermissionKind = 'accessibility' | 'screenRecording';
+export type PermState = 'granted' | 'notGranted' | 'unsupported' | 'unknown';
+export interface PermissionView {
+  epoch: number;
+  target: 'host' | 'hostLegacy' | 'app' | 'unresolved';
+  subject: { pid?: number; generation?: string; bundleId?: string };
+  accessibility: PermState;
+  screenRecording: PermState;
+  otherHosts: { pid: number; generation?: string; reason: 'legacy' | 'differentIdentity' | 'appAttributed' | 'unverified' }[];
+  appSessions: boolean;
+  error?: string | null;
+}
+
+export type ExpectedPermissionSubject = PermissionView['subject'] & { target: PermissionView['target'] };
+
+export interface ElectronAPI extends SshAPI, SshMetricsAPI {
+  pickFile?: (title?: string) => Promise<string | null>;
+  ssh?: import('./ssh').SshBridgeApi & import('./ssh').SshLaunchApi;
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
@@ -156,7 +187,7 @@ export interface ElectronAPI {
   getActiveProcesses?: () => Promise<ActiveProcess[]>;
 
   // Terminal management
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => Promise<string>;
   /**
    * Windows: make the calling window the owner of this shell's ConPTY
    * pseudo-console window, so console-app dialogs parented to
@@ -197,6 +228,9 @@ export interface ElectronAPI {
   /** Batched `getTerminalCwd`, keyed by process id. One process scan for all of
    *  them — see the `get_terminal_cwds` command for why that matters. */
   getTerminalCwds?: (processIds: string[]) => Promise<Record<string, string | null>>;
+  /** Which terminals run on a host older than this build, by renderer leaf id. Changes are
+   *  announced by the `terminal:generations` event; see `services/hostGeneration.ts`. */
+  getTerminalGenerations?: () => Promise<Record<string, HostGeneration>>;
   /** Backlog 011 + design 006: drain the reattach prompt-gate seed for a terminal
    *  id — `{promptHook, atPrompt}` once if it was reattached after a core-restart
    *  hot-swap, else `null`. Lets the renderer re-seed the command-suggest gate the
@@ -221,7 +255,7 @@ export interface ElectronAPI {
 
   // Settings: native "Browse…" picker for the Default editor executable.
   // Resolves to the chosen path, or null if the user cancelled the dialog.
-  pickExecutablePath?: () => Promise<string | null>;
+  pickExecutablePath?: (title?: string) => Promise<string | null>;
 
   // Snippets import/export (plan/029 §8). Two narrow, purpose-built commands rather
   // than a general read/write pair — see the note on the Rust side (commands.rs).
@@ -244,6 +278,8 @@ export interface ElectronAPI {
 
   // System info
   getShellProfiles: () => Promise<any[]>;
+  addShellProfile?: (profile: { name: string; path: string; args: string[]; cwd?: string }) => Promise<any>;
+  deleteShellProfile?: (id: string) => Promise<void>;
   getExecutableIcon?: (path: string) => Promise<string>;
   getSystemInfo: () => Promise<any>;
 
@@ -315,16 +351,27 @@ export interface ElectronAPI {
   /** Preflight: resolves if an offload would keep all terminals alive, rejects
    *  with the reason if it would currently be refused. */
   hotswapAvailable?: () => Promise<void>;
+  macosPermissionStatus?: () => Promise<PermissionView>;
+  requestMacosPermission?: (kind: PermissionKind, expected?: ExpectedPermissionSubject) => Promise<PermissionView>;
+  openMacosPermissionPane?: (kind: PermissionKind) => Promise<void>;
   /** Move persisted scrollback between renderer leaves (design 014 migration). */
   renameTerminalHistory?: (from: string, to: string) => Promise<void>;
   /** Preflight for a Velopack update: ours PLUS every sibling, because the
    *  apply kills every process under the install root. Separate from
-   *  hotswapAvailable because the two verdicts genuinely differ (design 014 B4). */
-  updateAvailable?: () => Promise<void>;
+   *  hotswapAvailable because the two verdicts genuinely differ (design 014 B4).
+   *  Resolves with the mode the update would run in (`full` closes every
+   *  terminal, with the reasons); rejects with the reason when it cannot run. */
+  updateAvailable?: (
+    markerMode?: import('../api/tauri-bridge').UpdateMarkerMode,
+  ) => Promise<import('../api/tauri-bridge').UpdateAvailability>;
   /** Check for a Velopack update. `unavailable` = no updater in this build. */
   checkForUpdates?: () => Promise<UpdateStatus>;
-  /** Download + arm + apply a Velopack update, keeping terminals alive. */
-  updateAndRestart?: () => Promise<void>;
+  /** Download + apply a Velopack update. An update that must close the terminals
+   *  resolves `needsConfirmation` until called again with the `confirm` made from
+   *  that answer; `started` means the app is exiting. */
+  updateAndRestart?: (
+    confirm?: import('../api/tauri-bridge').UpdateConfirmToken,
+  ) => Promise<import('../api/tauri-bridge').UpdateRestart>;
   /** The running app's version (from the Tauri config at build time). */
   getAppVersion?: () => Promise<string>;
 
@@ -334,11 +381,8 @@ export interface ElectronAPI {
   flushSessionAck?: () => Promise<void>;
   /** Plan 018: every window id the backend registry currently holds. */
   listWindowSessionIds?: () => Promise<string[]>;
-  reportHostRestoreSettled?: (windowLabel: string) => Promise<void>;
 
-  // Detach / cross-window pane handoff (Tauri only)
-  stashDetachPayload?: (token: string, payload: any) => Promise<void>;
-  takeDetachPayload?: (token: string) => Promise<any | null>;
+  // Detach / cross-window pane transfers (Tauri only)
   createDetachedWindow?: (token: string, x?: number, y?: number) => Promise<string>;
   createNewWindow?: () => Promise<string>;
   getWindowLabel?: () => string;
@@ -351,7 +395,7 @@ export interface ElectronAPI {
   // `path` is relative to `/api` (e.g. `/canvas/graph`). Resolves to the parsed JSON body, or
   // null for a 204. Rejects on a non-2xx so a caller can tell "no edges" from "no answer".
   canvasApiRequest?: (path: string, init?: { method?: string; body?: unknown }) => Promise<unknown>;
-  beginGlobalPaneDrag?: (token: string, payload: any) => Promise<void>;
+  beginGlobalPaneDrag?: (token: string) => Promise<void>;
   claimGlobalPaneDrag?: (token: string) => Promise<any | null>;
   resolveOrphanGlobalDrag?: (token: string) => Promise<boolean>;
   cancelGlobalPaneDrag?: (token: string) => Promise<void>;
@@ -389,6 +433,8 @@ export interface ElectronAPI {
   // into the Rust AppState atomic that the window-close/exit guard reads. Tauri-only
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
+  // Plan 047: loopback proxy exemption for spawned shells. Optional for the same reason.
+  setExemptLoopbackFromProxy?: (enabled: boolean) => Promise<void>;
 
   // Terminal Automations (Plan 028) — the fifteen commands of `automation_commands.rs`.
   // The first twelve are in the order that file declares them; the three id-only writers
@@ -611,6 +657,8 @@ export interface AutomationCondStep {
 }
 
 export interface AutomationActionStep {
+  masked?: boolean;
+  messageCipher?: string;
   message: string;
   sendTo: AutomationSendTo;
   /**

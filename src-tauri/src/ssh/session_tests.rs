@@ -1,0 +1,473 @@
+use super::*;
+use crate::ssh::tests::*;
+#[tokio::test]
+async fn with_session_denies_every_nonconnected_state() {
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    f.connected().await;
+    let e = f.registry.entry("tm-a", false).unwrap();
+    for state in [
+        SessionState::Connecting,
+        SessionState::NeedsSecret,
+        SessionState::NeedsHostkey,
+        SessionState::Disconnected,
+        SessionState::Error,
+    ] {
+        e.inner.lock().view.state = state;
+        assert!(matches!(
+            f.registry.lease("tm-a"),
+            Err(SessionError::NotConnected)
+        ));
+    }
+    e.inner.lock().view.state = SessionState::Connected;
+    assert!(f.registry.lease("tm-a").is_ok());
+    f.registry.shutdown().await;
+}
+struct Inspect {
+    token: Mutex<Option<CancellationToken>>,
+    checked: std::sync::atomic::AtomicBool,
+}
+impl EventSink for Inspect {
+    fn emit(&self, _: &'static str, view: &SessionView) {
+        if view.state == SessionState::Disconnected {
+            if let Some(token) = self.token.lock().as_ref() {
+                assert!(
+                    token.is_cancelled(),
+                    "lease was not revoked before disconnected publication"
+                );
+                self.checked.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn lease_revoked_before_disconnected_published() {
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let inspect = Arc::new(Inspect {
+        token: Mutex::new(None),
+        checked: std::sync::atomic::AtomicBool::new(false),
+    });
+    let old = f.registry.deps.read().clone();
+    f.registry
+        .configure(Dependencies {
+            targets: old.targets.clone(),
+            streams: old.streams.clone(),
+            agents: old.agents.clone(),
+            secrets: old.secrets.clone(),
+            events: inspect.clone(),
+            known_hosts: old.known_hosts.clone(),
+            home: old.home.clone(),
+        })
+        .unwrap();
+    let (_, lease) = f.connected().await;
+    *inspect.token.lock() = Some(lease.cancellation());
+    let mut transitions = f.registry.subscribe_transitions("tm-a").unwrap();
+    transitions.borrow_and_update();
+    f.registry.disconnect("tm-a", "ended");
+    assert!(inspect.checked.load(Ordering::SeqCst));
+    assert!(lease.cancellation().is_cancelled());
+    assert_eq!(transitions.borrow().state, SessionState::Disconnected);
+    assert!(matches!(
+        f.registry.lease("tm-a"),
+        Err(SessionError::NotConnected)
+    ));
+    f.registry.shutdown().await;
+}
+#[tokio::test]
+async fn transitions_follow_generation() {
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let first = f.registry.open("tm-a", "c-a", false, || true).unwrap();
+    let mut watch = f.registry.subscribe_transitions("tm-a").unwrap();
+    assert_eq!(
+        *watch.borrow_and_update(),
+        SessionPhase {
+            generation: first.generation,
+            state: SessionState::Connecting
+        }
+    );
+    let v = wait_state(&f.registry, "tm-a", false, SessionState::NeedsSecret).await;
+    f.registry
+        .submit_secret(
+            "tm-a",
+            false,
+            Some(v.generation),
+            v.prompt_id.as_deref(),
+            f.server.password.clone(),
+            false,
+        )
+        .unwrap();
+    f.registry
+        .on_launch_lifecycle(
+            "tm-a",
+            v.generation,
+            1,
+            LaunchState::Running,
+            Some("pc-a".into()),
+        )
+        .unwrap();
+    wait_state(&f.registry, "tm-a", false, SessionState::Connected).await;
+    assert_eq!(
+        *watch.borrow_and_update(),
+        SessionPhase {
+            generation: first.generation,
+            state: SessionState::Connected
+        }
+    );
+    f.registry.disconnect("tm-a", "ended");
+    assert_eq!(
+        *watch.borrow_and_update(),
+        SessionPhase {
+            generation: first.generation,
+            state: SessionState::Disconnected
+        }
+    );
+    let second = f.registry.reconnect("tm-a", || true).unwrap();
+    let mut watch2 = f.registry.subscribe_transitions("tm-a").unwrap();
+    let v = wait_state(&f.registry, "tm-a", false, SessionState::NeedsSecret).await;
+    f.registry
+        .submit_secret(
+            "tm-a",
+            false,
+            Some(v.generation),
+            v.prompt_id.as_deref(),
+            f.server.password.clone(),
+            false,
+        )
+        .unwrap();
+    f.registry
+        .on_launch_lifecycle(
+            "tm-a",
+            v.generation,
+            1,
+            LaunchState::Running,
+            Some("pc-b".into()),
+        )
+        .unwrap();
+    wait_state(&f.registry, "tm-a", false, SessionState::Connected).await;
+    assert!(second.generation > first.generation);
+    assert_eq!(
+        *watch2.borrow_and_update(),
+        SessionPhase {
+            generation: second.generation,
+            state: SessionState::Connected
+        }
+    );
+    f.registry.shutdown().await;
+}
+#[tokio::test]
+async fn replacement_cannot_publish_old_connected() {
+    struct DynamicTargets;
+    impl TargetSource for DynamicTargets {
+        fn resolve<'a>(
+            &'a self,
+            id: &'a str,
+        ) -> BoxFuture<'a, Result<SessionTarget, SessionError>> {
+            Box::pin(async move {
+                Ok(SessionTarget {
+                    hops: vec![hop(id, "alice")],
+                })
+            })
+        }
+    }
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let old = f.registry.deps.read().clone();
+    f.registry
+        .configure(Dependencies {
+            targets: Arc::new(DynamicTargets),
+            streams: old.streams.clone(),
+            agents: old.agents.clone(),
+            secrets: old.secrets.clone(),
+            events: old.events.clone(),
+            known_hosts: old.known_hosts.clone(),
+            home: old.home.clone(),
+        })
+        .unwrap();
+    f.registry.open("tm-a", "c-a", false, || true).unwrap();
+    let a = wait_state(&f.registry, "tm-a", false, SessionState::NeedsSecret).await;
+    let entry = f.registry.entry("tm-a", false).unwrap();
+    let b = f.registry.open("tm-a", "c-b", false, || true).unwrap();
+    entry.update(|s| {
+        s.authenticated = true;
+        s.view.state = SessionState::Connected;
+    });
+    let current = f.registry.state("tm-a", false).unwrap();
+    assert_eq!(current.generation, b.generation);
+    assert_eq!(current.connection_id, "c-b");
+    assert_ne!(current.state, SessionState::Connected);
+    assert_eq!(
+        f.registry.submit_secret(
+            "tm-a",
+            false,
+            Some(a.generation),
+            a.prompt_id.as_deref(),
+            "late".into(),
+            true
+        ),
+        Err(SessionError::StaleAttempt)
+    );
+    f.registry.shutdown().await;
+}
+#[tokio::test]
+async fn test_close_cancels_waiter_and_emits_no_late_success() {
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let id = f.registry.probe("c-a").unwrap();
+    let view = wait_state(&f.registry, &id, true, SessionState::NeedsSecret).await;
+    f.registry.close(&id, true, None).unwrap();
+    assert_eq!(
+        f.registry.submit_secret(
+            &id,
+            true,
+            Some(view.generation),
+            view.prompt_id.as_deref(),
+            "late".into(),
+            false
+        ),
+        Err(SessionError::NotFound)
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(f
+        .events
+        .0
+        .lock()
+        .iter()
+        .all(|v| v.state != SessionState::Connected));
+    assert!(f.registry.owner_map().is_empty());
+    f.registry.shutdown().await;
+}
+/// Tauri runs sync commands (ssh_test_connection, ssh_session_open) on the
+/// main thread with no Tokio context. Opening there must not panic.
+#[test]
+fn open_from_a_thread_without_a_tokio_runtime_does_not_panic() {
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let registry = f.registry.clone();
+    let id = std::thread::spawn(move || registry.probe("c-a"))
+        .join()
+        .expect("probe panicked outside a Tokio runtime")
+        .unwrap();
+    let view = tauri::async_runtime::block_on(wait_state(
+        &f.registry,
+        &id,
+        true,
+        SessionState::NeedsSecret,
+    ));
+    assert_eq!(view.state, SessionState::NeedsSecret);
+    f.registry.close(&id, true, None).unwrap();
+    tauri::async_runtime::block_on(f.registry.shutdown());
+}
+
+fn every_session_error() -> Vec<SessionError> {
+    use SessionError::*;
+    let all = vec![
+        NotConnected,
+        NotFound,
+        Cancelled,
+        StaleAttempt,
+        OwnerRetired,
+        AdmissionClosed,
+        InvalidTarget,
+        HostKeyChanged,
+        HostKeyRevoked,
+        HostCertificateUnsupported,
+        KnownHostsMalformed { line: 12 },
+        KnownHostsUnreadable,
+        TrustWriteFailed,
+        TrustAlreadyPinned,
+        AuthRejected,
+        AgentUnavailable,
+        CapabilityUnavailable,
+        TimedOut,
+        TransportClosed,
+        OutputTooLarge,
+        MissingExitStatus,
+        IdentityUnreadable,
+        UnsupportedAuthentication,
+        RememberUnavailable,
+        StoreUnavailable,
+    ];
+    // Exhaustive: a new variant fails to compile here until it is added to `all`.
+    for e in &all {
+        match e {
+            NotConnected
+            | NotFound
+            | Cancelled
+            | StaleAttempt
+            | OwnerRetired
+            | AdmissionClosed
+            | InvalidTarget
+            | HostKeyChanged
+            | HostKeyRevoked
+            | HostCertificateUnsupported
+            | KnownHostsMalformed { .. }
+            | KnownHostsUnreadable
+            | TrustWriteFailed
+            | TrustAlreadyPinned
+            | AuthRejected
+            | AgentUnavailable
+            | CapabilityUnavailable
+            | TimedOut
+            | TransportClosed
+            | OutputTooLarge
+            | MissingExitStatus
+            | IdentityUnreadable
+            | UnsupportedAuthentication
+            | RememberUnavailable
+            | StoreUnavailable => {}
+        }
+    }
+    all
+}
+#[test]
+fn error_code_is_the_serde_code_tag_for_every_variant() {
+    let all = every_session_error();
+    let mut codes = std::collections::HashSet::new();
+    for e in &all {
+        let tag = serde_json::to_value(e).unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!((e, e.code()), (e, tag.as_str()));
+        assert!(codes.insert(e.code()), "duplicate code {}", e.code());
+    }
+    assert!(!codes.contains(SAVED_CREDENTIAL_UNAVAILABLE));
+}
+#[tokio::test]
+async fn every_failure_snapshot_carries_its_error_code() {
+    // Backlog 017: readers take the code from the snapshot, never from `reason` text.
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    f.connected().await;
+    let e = f.registry.entry("tm-a", false).unwrap();
+    for error in every_session_error() {
+        let view = {
+            let mut s = e.inner.lock();
+            s.view.state = SessionState::Connecting;
+            set_reason(&mut s.view, Some("free text".into()), None);
+            apply_failure(&mut s, error.clone());
+            s.view.clone()
+        };
+        assert_eq!(
+            (&error, view.reason.clone(), view.error_code.as_deref()),
+            (&error, Some(error.reason()), Some(error.code()))
+        );
+        let wire = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            (&error, wire["errorCode"].as_str()),
+            (&error, Some(error.code()))
+        );
+    }
+    // A free-text reason clears a stale code, and no reason serializes no code.
+    let mut view = e.inner.lock().view.clone();
+    set_reason(&mut view, Some("Local shell ended".into()), None);
+    assert_eq!(view.error_code, None);
+    set_reason(&mut view, None, Some("auth-rejected"));
+    assert_eq!(
+        (view.reason.as_deref(), view.error_code.as_deref()),
+        (None, None)
+    );
+    assert!(serde_json::to_value(&view)
+        .unwrap()
+        .get("errorCode")
+        .is_none());
+    // A refusal keeps its pair when the entry is later invalidated (the Error branch of invalidate).
+    {
+        let mut s = e.inner.lock();
+        s.view.state = SessionState::Connecting;
+        apply_failure(&mut s, SessionError::HostKeyRevoked);
+    }
+    e.invalidate(Some("Local shell ended".into()));
+    let view = e.inner.lock().view.clone();
+    assert_eq!(
+        (view.state, view.reason, view.error_code.as_deref()),
+        (
+            SessionState::Error,
+            Some(SessionError::HostKeyRevoked.reason()),
+            Some("host-key-revoked")
+        )
+    );
+    f.registry.shutdown().await;
+}
+#[test]
+fn view_reason_has_one_writer() {
+    // The fields are pub, so this walks every non-test source in the crate: any write to a
+    // view's reason or code outside set_reason could split the code from its text.
+    fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if name.ends_with(".rs") && !name.contains("tests") {
+                out.push((name, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(files.len() > 100, "crate walk found {} files", files.len());
+    let mut writes = Vec::new();
+    let mut literals = 0;
+    for (name, text) in &files {
+        for line in text.lines().map(str::trim).filter(|l| !l.starts_with("//")) {
+            let c: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            if writes_reason(&c) {
+                writes.push(format!("{name}: {line}"));
+            }
+            if c.contains("SessionView{")
+                && !c.contains("->SessionView{")
+                && !c.contains("structSessionView{")
+            {
+                literals += 1;
+            }
+        }
+    }
+    assert_eq!(
+        writes,
+        vec![
+            "session.rs: view.error_code = reason.as_ref().and(code).map(str::to_string);",
+            "session.rs: view.reason = reason;"
+        ]
+    );
+    assert_eq!(literals, 1, "only the registry builds a SessionView");
+}
+/// A whitespace-free source line that writes a view's `reason` or `error_code`.
+fn writes_reason(c: &str) -> bool {
+    ["view.reason", "view.error_code"].iter().any(|field| {
+        c.match_indices(field).any(|(at, _)| {
+            let rest = &c[at + field.len()..];
+            (rest.starts_with('=') && !rest.starts_with("=="))
+                || [
+                    ".take(",
+                    ".replace(",
+                    ".insert(",
+                    ".get_or_insert",
+                    ".as_mut(",
+                ]
+                .iter()
+                .any(|m| rest.starts_with(m))
+        }) || (c.contains("mem::") && c.contains(field))
+    })
+}
+#[test]
+fn the_reason_writer_detector_catches_each_spelling() {
+    for bad in [
+        "s.view.reason=Some(x);",
+        "s.view.error_code=None;",
+        "s.view.error_code.take();",
+        "s.view.reason.replace(x);",
+        "s.view.reason.insert(x);",
+        "s.view.error_code.get_or_insert_with(f);",
+        "std::mem::take(&muts.view.reason);",
+        "mem::replace(&mute.view.error_code,None);",
+    ] {
+        assert!(writes_reason(bad), "{bad}");
+    }
+    for ok in [
+        "assert_eq!(v.reason,x);",
+        "ifs.view.reason==x{",
+        "letr=s.view.reason.clone();",
+        "self.view.state=SessionState::Error;",
+    ] {
+        assert!(!writes_reason(ok), "{ok}");
+    }
+}

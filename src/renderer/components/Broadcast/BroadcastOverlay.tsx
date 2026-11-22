@@ -1,0 +1,31 @@
+import React, { useEffect, useReducer } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import type { RootState } from '../../store';
+import { selectBroadcastMembers, stopBroadcast } from '../../store/slices/broadcastSlice';
+import { terminalService } from '../../services/TerminalService';
+import './BroadcastOverlay.css';
+
+export function BroadcastOverlay() {
+  const dispatch = useDispatch();
+  const windowActive = useSelector((state: RootState) => state.broadcast.mode === 'window');
+  const members = useSelector(selectBroadcastMembers);
+  const shortcut = useSelector((state: RootState) => state.settings.customKeybindings?.stopBroadcastInput ?? 'Ctrl+Shift+B');
+  // A process can start or exit with no store change, so re-count on the service's events.
+  const [, recount] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (!windowActive) return;
+    window.addEventListener('pty:spawn', recount);
+    window.addEventListener('pty:exit', recount);
+    return () => { window.removeEventListener('pty:spawn', recount); window.removeEventListener('pty:exit', recount); };
+  }, [windowActive]);
+  // Re-evaluate readiness on every render; processless elevation prompts are not targets.
+  const count = members.filter(id => terminalService.getProcessId(id)).length;
+  if (!windowActive) return null;
+  return <>
+    <div className="broadcast-window-border" aria-hidden="true" />
+    <div className="broadcast-banner" role="status">
+      <span>Typing into all {count} open terminals across tabs · {shortcut} to stop</span>
+      <button type="button" onClick={() => dispatch(stopBroadcast())}>Stop</button>
+    </div>
+  </>;
+}

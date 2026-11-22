@@ -7,9 +7,34 @@ import { TerminalSearchBar } from '../Terminal/TerminalSearchBar';
 import { SessionClosedBanner } from '../Panes/SessionClosedBanner';
 import { useRestartHotkey } from '../Panes/useRestartHotkey';
 import { useSearchHotkey } from '../Panes/useSearchHotkey';
+import type { SshPaneTag } from '../Ssh/ssh066Contract';
+import type { SshCanvasShellProps } from '../Ssh/SshTerminalComposition';
+import { sshSurfaceOwnsGesture } from './canvasGestures';
 
 /** Stable no-op, so the hotkey hook's dependency list does not churn when there is no chrome. */
 const NOOP = (): void => {};
+
+const EDITABLE_TARGET = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+
+/**
+ * Plan 070 T4: keeps SSH presentation gestures away from the NODE's handlers.
+ *
+ * A press, double-click or right-click in the browser, the status row or the prompt overlay must
+ * not select, drag or enlarge the node or open its menu, and neither may one in an SSH menu or
+ * dialog: those are portalled to `<body>`, but React bubbles their events through this surface on
+ * the way to `CanvasNode`. Gestures in the terminal slot pass untouched (`sshSurfaceOwnsGesture`).
+ * Only React propagation is stopped. Native listeners, such as the shared menu's own outside-click
+ * dismissal, still see the event, and nothing here dismisses anything: the overlay backdrop is
+ * still the only dismiss path.
+ */
+function isolateSshGesture(e: React.SyntheticEvent<HTMLElement>): void {
+  if (!sshSurfaceOwnsGesture(e.target, e.currentTarget)) return;
+  e.stopPropagation();
+  // No second menu either: the native one is suppressed on SSH chrome, except over a text field
+  // (paste) and inside a portalled dialog, whose text stays copyable.
+  const inside = e.target instanceof Node && e.currentTarget.contains(e.target);
+  if (e.type === 'contextmenu' && inside && !(e.target as Element).closest?.(EDITABLE_TARGET)) e.preventDefault();
+}
 
 /**
  * Hosts a live terminal inside a canvas node.
@@ -45,7 +70,25 @@ const NodeTerminalImpl: React.FC<{
   exitInfo?: { exitCode: number | null } | null;
   /** Terminal font size, so the banner scales with the text as it does in a pane. */
   fontSize?: number;
-}> = ({ terminalId, focused, overlaid = false, exitInfo = null, fontSize }) => {
+  /**
+   * The canonical leaf's SSH tag, by REFERENCE from the pane tree (plan 070 §4.1 A/D). Absent for
+   * every local node, which then renders exactly the markup above. When present, the shared SSH
+   * shell (`SshShell`) wraps the SAME host-bearing wrapper; the registered host stays the inner
+   * `.terminal-display`, never the envelope.
+   */
+  sshTag?: SshPaneTag;
+  /** The frozen browser allocation for the tag's current collapse state (`canvasSshGeometry`). */
+  sshBrowserWidth?: number;
+  /** False while this node is culled or below the chip tier (D51: the SSH browser controller is
+   *  active only while some surface showing it is visible). Defaults to true. */
+  sshVisible?: boolean;
+  /** The shared SSH presentation. A component TYPE, not an element, so the memo below holds:
+   *  passed in rather than imported so this module stays free of the store. */
+  SshShell?: React.ComponentType<SshCanvasShellProps>;
+  /** SSH snapshot tier only: drawn inside the terminal slot, covering only live terminal pixels.
+   *  Local nodes keep their sibling snapshot in `CanvasMode`. A type for the same memo reason. */
+  Snapshot?: React.ComponentType<{ terminalId: string }>;
+}> = ({ terminalId, focused, overlaid = false, exitInfo = null, fontSize, sshTag, sshBrowserWidth, sshVisible = true, SshShell, Snapshot }) => {
   // The ref identity MUST be stable across renders (012 D5). A fresh arrow every render
   // makes React detach and re-attach on every commit — clear + re-register churn, and
   // each churn is a relocation of a live terminal.
@@ -129,8 +172,11 @@ const NodeTerminalImpl: React.FC<{
       }
     : undefined;
 
-  return (
-    <div className="terminal-display-wrapper canvas-surface" ref={wrapperRef}>
+  const ssh = sshTag && SshShell ? sshTag : undefined;
+  const surface = (
+    // For an SSH node the outer `.canvas-surface` is the envelope below, so this wrapper is the
+    // terminal slot's chrome anchor only. Local nodes: unchanged markup.
+    <div className={ssh ? 'terminal-display-wrapper' : 'terminal-display-wrapper canvas-surface'} ref={wrapperRef}>
       <div
         className="terminal-display"
         data-terminal-id={terminalId}
@@ -174,6 +220,16 @@ const NodeTerminalImpl: React.FC<{
           onDismiss={chrome.dismissSessionClosed}
         />
       )}
+      {ssh && Snapshot && <Snapshot terminalId={terminalId} />}
+    </div>
+  );
+  if (!ssh || !SshShell) return surface;
+  // Plan 070 §4.1 A: the explicit frozen content envelope, raster zoom undone on THIS element so
+  // it covers the browser and status row as well as the terminal (`Canvas.css`).
+  return (
+    <div className="canvas-surface canvas-ssh-surface" onPointerDown={isolateSshGesture}
+      onMouseDown={isolateSshGesture} onDoubleClick={isolateSshGesture} onContextMenu={isolateSshGesture}>
+      <SshShell terminalId={terminalId} sshTag={ssh} visible={sshVisible} browserWidth={sshBrowserWidth} terminal={surface} />
     </div>
   );
 };

@@ -1,5 +1,5 @@
 import { PaneNode } from '../../../store/slices/panesSlice';
-import type { PromptGate } from '@termflow/terminal-core';
+import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
 
 /** Where, within a target pane, a drop will land. */
 export type DropZone = 'top' | 'bottom' | 'left' | 'right' | 'center';
@@ -44,6 +44,15 @@ export interface DetachTerminal {
   // wrongly captured into command history in the new window (no OSC 9;9/7 will
   // ever arrive there while the agent CLI owns the pty).
   promptGate?: PromptGate | null;
+  // Keyboard-protocol state the running app negotiated with the SOURCE window,
+  // carried for the same reason as promptGate: it is announced once per session
+  // and lives only in that renderer's heap. Without it the new window sends
+  // legacy bytes to a session expecting records — on Windows, ConPTY's
+  // Win32-Input-Mode (`?9001h`, asserted for every session) is what makes Escape
+  // reach an agent CLI at all; a TUI's Kitty flags (`CSI >u`) cover Shift+Enter /
+  // Ctrl+C on every platform. Both omitted when the source had nothing active.
+  win32InputMode?: true;
+  keyboardProtocol?: KeyboardProtocolStateData;
   // Last-known working directory (spec 045 §3.3), carried because the snapshot map
   // is module-local to a renderer — the destination window starts with an empty one.
   // Without this, a shell that reports no cwd via OSC (cmd/WSL/bash) and exits in the
@@ -79,4 +88,12 @@ export interface DetachPayload {
   // whole-tab move like the fields above. (Pane-level mute already rides along on
   // the PaneNode tree.) Only set for kind: 'tab'.
   notifyMuted?: boolean;
+  // Plan 045 R8: whether the destination tab should show the Administrator badge.
+  // Set for BOTH kinds like `titleColor` (it names a fact about the terminal, not
+  // an identity choice) — but derived differently per kind: `sourceTab?.elevated`
+  // for a whole-tab move (kind: 'tab'), the detached leaf's own `PaneNode.elevated`
+  // for a single-pane move (kind: 'pane'), since a pane's new tab has no source
+  // Tab record of its own to read. Dropping this on either path leaves a still-
+  // elevated terminal running in a tab whose strip no longer shows the badge.
+  elevated?: boolean;
 }

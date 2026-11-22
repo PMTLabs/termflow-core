@@ -1,12 +1,12 @@
 [package]
 name = "app"
-version = "0.1.0"
+version = "0.3.0"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.88.0"
+rust-version = "1.89"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -68,13 +68,17 @@ portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
-jsonwebtoken = "10"
+# v10 ships NO crypto backend by default (v9 bundled `ring`); without exactly one
+# of `rust_crypto`/`aws_lc_rs`, `encode()` panics at runtime and the API drops
+# the connection on POST /api/auth/token.
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 dashmap = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Integrity hash for the update-stable host binary install (RP-1): the host is
 # copied out of the swapped app payload into a per-user runtime dir keyed by its
 # SHA-256 so a Velopack update never kills the live sidecar (design 003 §10.1).
 sha2 = "0.10"
+plist = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 base64 = "0.22"
@@ -96,11 +100,24 @@ if-addrs = "0.13"
 # Shared wire protocol with the PTY-host sidecar (SpawnSpec + frames). Path dep
 # (not a workspace member) to avoid disturbing the existing single-package build.
 termflow-pty-protocol = { path = "pty-protocol" }
+termflow-macos-tcc = { path = "macos-tcc" }
 # Advisory INTER-PROCESS file locking for the config read-merge-write window. A
 # process-local mutex cannot help here: two profiles are two processes.
 fs4 = "1.1"
 
+aes-gcm = "0.10"
+# Plan 067: one explicit crypto backend; never enable russh's aws-lc defaults.
+russh = { version = "=0.65.1", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "=3.0.1"
+ssh-key = { version = "=0.7.0-rc.11", features = ["encryption"] }
+zeroize = { version = "1.9", features = ["std"] }
+hmac = "0.12"
+sha1 = "0.10"
+tokio-util = { version = "0.7", features = ["rt"] }
+
 [dev-dependencies]
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "visit"] }
 # `test-util` is NOT part of tokio's `full`, and it is what lets a test drive a
 # timeout in virtual time (`#[tokio::test(start_paused = true)]`). Without it the
 # quit-path disarm timeouts would have to elapse for real in every test run.
@@ -123,11 +140,14 @@ tauri-plugin-single-instance = "2"
 # exposes no click callback.
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 notify-rust = "4.11"
+keyring = { version = "3", default-features = false, features = ["async-secret-service", "tokio", "crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 webview2-com = "0.38"
 windows-core = "0.61"
 # Single-instance guard (src/instance_lock.rs): named mutex + hidden event window
@@ -141,6 +161,8 @@ windows-sys = { version = "0.60", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -163,6 +185,8 @@ windows = { version = "0.61", features = [
     "Win32_Security",
     "Win32_System_Threading",
     "Win32_System_RemoteDesktop",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_ToolHelp",
     # EnableWindow/IsWindowEnabled — releasing an app window left disabled by a
     # console dialog that died undismissed. See src/console_window.rs.
     "Win32_UI_Input_KeyboardAndMouse",
@@ -170,3 +194,9 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+
+# TermFlow-patched copy of portable-pty 0.8.1: adds an opt-in
+# PSEUDOCONSOLE_INHERIT_CURSOR so a restored terminal's ConPTY starts its cursor on the
+# row the replayed history left it. See vendor/portable-pty/VENDORED.md.
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }

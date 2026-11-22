@@ -214,10 +214,9 @@ pub(crate) async fn fleet_terminals(State(state): State<AppState>) -> impl IntoR
     let device_name = self_hostname();
     let os = std::env::consts::OS.to_string();
     let terminals: Vec<serde_json::Value> = state
-        .terminals
+        .terminals_with_markers()
         .iter()
-        .map(|entry| {
-            let t = entry.value();
+        .map(|(t, generation)| {
             json!({
                 "id": t.id,
                 "title": t.name,
@@ -229,6 +228,7 @@ pub(crate) async fn fleet_terminals(State(state): State<AppState>) -> impl IntoR
                 // §4). The MCP `list_terminals` tool proxies this body verbatim.
                 "terminalId": t.renderer_terminal_id,
                 "owningTabId": t.owning_tab_id,
+                "generation": generation.as_str(),
             })
         })
         .collect();
@@ -533,14 +533,9 @@ pub(crate) async fn fleet_close(
     );
     match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
         ExecuteRoute::Local => {
-            let Some(pid) = state.terminals.get(&state.resolve_ref(&body.terminal_id)).map(|t| t.pid) else {
+            if !state.close_process(&body.terminal_id, crate::state::CloseStorage::Preserve) {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
-            };
-            // Host-owned → close via the sidecar; else kill the local tree.
-            if !state.host_close(&state.resolve_ref(&body.terminal_id)) {
-                crate::pty_manager::kill_process_tree(pid);
             }
-            state.cleanup_terminal_state(&state.resolve_ref(&body.terminal_id));
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,
@@ -709,6 +704,9 @@ pub(crate) async fn fleet_local_run(
                     shell_args,
                     cwd: shell_cwd,
                     name: Some(terminal_name.clone()),
+                    // Elevation via the fleet/API path is out of scope (plan 045).
+                    elevated: false,
+                    ssh_launch_connection_id: None,
                 },
             )
             .await

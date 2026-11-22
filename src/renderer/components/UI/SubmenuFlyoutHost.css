@@ -1,0 +1,70 @@
+/* The positioned parent of a flyout panel — mirrors ContextMenu.css's
+   `.context-menu-submenu-host`, scoped under its own name because this hosts arbitrary
+   widget content rather than that component's search+row list. */
+.submenu-flyout-host {
+  position: relative;
+}
+
+/* `position: absolute` keeps this out of the menu's flow (so it never widens the menu
+   itself) and inside the menu's own DOM subtree (so a click inside it is not "outside"
+   the menu's own mousedown-dismissal listener). */
+.submenu-flyout-panel {
+  position: absolute;
+  top: 0;
+  left: 100%;
+  margin-left: 2px;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 10px 12px;
+  background-color: #2d2d30;
+  border: 1px solid #464647;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  z-index: 1;
+}
+
+/* Applied when the viewport edge is nearer than the panel is wide. */
+.submenu-flyout-panel.flip-left {
+  left: auto;
+  right: 100%;
+  margin-left: 0;
+  margin-right: 2px;
+}
+
+/* The Color Schema submenu: wide and tall enough to show its swatch-card grid as roughly
+   2 rows of 3 cards (plus a little breathing room / a peek of the next row) before it
+   scrolls, rather than the narrow 1-2 column list the default width forces. Shared by the
+   tab strip's flyout (`SubmenuFlyoutHost`) and the terminal's per-agent picker
+   (`ContextMenu`'s `customFlyout`, built in `TerminalDisplay.tsx`) — the two surfaces this
+   size belongs to. */
+.submenu-flyout-panel--wide {
+  min-width: 380px;
+  max-width: 400px;
+}
+
+.submenu-flyout-panel--wide .color-schema-grid {
+  grid-template-columns: repeat(3, 1fr);
+  max-height: 230px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.submenu-flyout-panel--wide .color-schema-grid::-webkit-scrollbar {
+  width: 10px;
+}
+
+.submenu-flyout-panel--wide .color-schema-grid::-webkit-scrollbar-track {
+  background: #252526;
+}
+
+/* The thumb's border matches the track color, insetting it from both edges so it never
+   touches the swatch content beside it. */
+.submenu-flyout-panel--wide .color-schema-grid::-webkit-scrollbar-thumb {
+  background-color: #555;
+  border-radius: 5px;
+  border: 2px solid #252526;
+}
+
+.submenu-flyout-panel--wide .color-schema-grid::-webkit-scrollbar-thumb:hover {
+  background-color: #777;
+}

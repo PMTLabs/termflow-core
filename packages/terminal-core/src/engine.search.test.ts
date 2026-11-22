@@ -104,88 +104,103 @@ describe('TerminalEngine search', () => {
     sub.dispose();
   });
 
-  it('refreshSearch re-runs the active query incrementally', () => {
+  it('refreshSearch re-runs the active query with the same options, without scrolling', () => {
     const { engine } = mountEngine();
     const addon = (engine as any).searchAddon as MockSearchAddon;
     engine.searchNext('foo', { caseSensitive: true });
     addon.findNextCalls.length = 0; // reset to isolate the refresh call
+    addon.findPreviousCalls.length = 0;
     engine.refreshSearch();
-    expect(addon.findNextCalls).toHaveLength(1);
-    expect(addon.findNextCalls[0].term).toBe('foo');
-    expect(addon.findNextCalls[0].options?.incremental).toBe(true);
-    expect(addon.findNextCalls[0].options?.caseSensitive).toBe(true);
+    // Never findNext: a same-term findNext steps to the NEXT match (see below).
+    expect(addon.findNextCalls).toHaveLength(0);
+    expect(addon.findPreviousCalls).toHaveLength(1);
+    expect(addon.findPreviousCalls[0].term).toBe('foo');
+    expect(addon.findPreviousCalls[0].options?.caseSensitive).toBe(true);
+    expect(addon.findPreviousCalls[0].options?.decorations).toBeDefined();
+    expect(addon.findPreviousInternal[0]).toEqual({ noScroll: true });
   });
 
-  it('refreshSearch keeps the viewport pinned to the bottom when following output', () => {
+  it('refreshSearch re-selects the SAME match every time instead of stepping to the next', () => {
+    const { engine } = mountEngine();
+    const addon = (engine as any).searchAddon as MockSearchAddon;
+    engine.searchNext('foo', {}, true); // as-you-type: first match
+    engine.searchNext('foo', {}); // user presses Next: second match
+    expect(addon.selectedIndex).toBe(1);
+    addon.findPreviousCalls.length = 0;
+    for (let i = 0; i < 5; i++) engine.refreshSearch(); // five streaming ticks
+    expect(addon.selectedIndex).toBe(1);
+    // Presence before absence: the index only stayed put because the refresh RAN.
+    expect(addon.findPreviousCalls).toHaveLength(5);
+  });
+
+  it('refreshSearch forces the addon to recount (drops its cached term first)', () => {
+    const { engine } = mountEngine();
+    const addon = (engine as any).searchAddon as MockSearchAddon;
+    engine.searchNext('foo', {});
+    addon.callOrder.length = 0;
+    engine.refreshSearch();
+    // The real addon recounts only when the cached term differs from the query;
+    // clearDecorations() is what resets it, and it must precede the re-search.
+    expect(addon.callOrder).toEqual(['clear', 'previous']);
+  });
+
+  it('refreshSearch never moves the viewport, whether following output or scrolled up', () => {
     const { engine } = mountEngine();
     const term = (engine as any).term as MockTerminal;
     const addon = (engine as any).searchAddon as MockSearchAddon;
     term.buffer.active.baseY = 100;
-    // findNext will yank the viewport up to the match (line 0) — the bug we fix.
-    addon.matchViewportY = 0;
-    engine.searchNext('foo', {}); // initial search scrolls to the match (expected)
-    // Now the user is following live output at the bottom; a write fires refresh.
-    term.buffer.active.viewportY = 100; // viewportY >= baseY ⇒ at bottom
-    term.scrollToBottomCount = 0; // isolate the refresh
-    engine.refreshSearch();
-    // Re-pinned to the bottom, NOT left at the match line findNext jumped to.
-    expect(term.scrollToBottomCount).toBe(1);
-    expect(term.scrollToLineCalls).toHaveLength(0);
-    expect(term.buffer.active.viewportY).toBe(100);
+    addon.matchViewportY = 0; // a scrolling search would yank the viewport to the top
+    engine.searchNext('foo', {}); // explicit search scrolls to the match (expected)
+    for (const viewportY of [100, 30]) {
+      // 100 = following live output at the bottom, 30 = scrolled up to read
+      term.buffer.active.viewportY = viewportY;
+      term.scrollToBottomCount = 0;
+      term.scrollToLineCalls.length = 0;
+      const ran = addon.findPreviousCalls.length;
+      engine.refreshSearch();
+      expect(addon.findPreviousCalls).toHaveLength(ran + 1); // it ran, and still didn't scroll
+      expect(term.buffer.active.viewportY).toBe(viewportY);
+      expect(term.scrollToBottomCount).toBe(0);
+      expect(term.scrollToLineCalls).toHaveLength(0);
+    }
   });
 
-  it('refreshSearch restores the exact scroll position when scrolled up', () => {
-    const { engine } = mountEngine();
-    const term = (engine as any).term as MockTerminal;
-    const addon = (engine as any).searchAddon as MockSearchAddon;
-    // Scrolled up (viewportY < baseY): hold position, don't jump to the match.
-    term.buffer.active.baseY = 100;
-    addon.matchViewportY = 0; // findNext would yank to the top
-    engine.searchNext('foo', {}); // initial search scrolls to the match (expected)
-    // User then scrolls up to inspect output; a live write fires refresh.
-    term.buffer.active.viewportY = 30;
-    term.scrollToLineCalls.length = 0;
-    engine.refreshSearch();
-    expect(term.scrollToLineCalls).toEqual([30]);
-    expect(term.scrollToBottomCount).toBe(0);
-    expect(term.buffer.active.viewportY).toBe(30);
-  });
-
-  it('onWriteParsed triggers a debounced live refresh when a search is active', () => {
+  it('onWriteParsed triggers a live refresh when a search is active', () => {
     jest.useFakeTimers();
     try {
       const { engine } = mountEngine();
       const addon = (engine as any).searchAddon as MockSearchAddon;
       const term = (engine as any).term as MockTerminal;
       engine.searchNext('foo', {});
-      addon.findNextCalls.length = 0;
+      addon.findPreviousCalls.length = 0;
       term.emitWriteParsed();
-      // Debounced: nothing fires synchronously.
-      expect(addon.findNextCalls).toHaveLength(0);
-      jest.advanceTimersByTime(150);
-      expect(addon.findNextCalls).toHaveLength(1);
-      expect(addon.findNextCalls[0].options?.incremental).toBe(true);
+      // Deferred: nothing fires synchronously.
+      expect(addon.findPreviousCalls).toHaveLength(0);
+      jest.advanceTimersByTime(250);
+      expect(addon.findPreviousCalls).toHaveLength(1);
+      expect(addon.findPreviousInternal[0]).toEqual({ noScroll: true });
     } finally {
       jest.useRealTimers();
     }
   });
 
-  it('coalesces a burst of writes into a single refresh', () => {
+  it('keeps refreshing DURING a stream that never goes idle (throttle, not debounce)', () => {
     jest.useFakeTimers();
     try {
       const { engine } = mountEngine();
       const addon = (engine as any).searchAddon as MockSearchAddon;
       const term = (engine as any).term as MockTerminal;
       engine.searchNext('foo', {});
-      addon.findNextCalls.length = 0;
-      // Rapid streaming output: many parsed writes inside one debounce window.
-      for (let i = 0; i < 20; i++) {
+      addon.findPreviousCalls.length = 0;
+      // 2s of continuous output, a parsed write every 10ms: never a quiet moment.
+      for (let i = 0; i < 200; i++) {
         term.emitWriteParsed();
-        jest.advanceTimersByTime(10); // < 150ms apart, keeps resetting the timer
+        jest.advanceTimersByTime(10);
       }
-      expect(addon.findNextCalls).toHaveLength(0);
-      jest.advanceTimersByTime(150); // stream goes idle
-      expect(addon.findNextCalls).toHaveLength(1);
+      // A trailing debounce would have fired zero times here (counter frozen).
+      // A throttle fires once per interval, and far fewer times than once per write.
+      expect(addon.findPreviousCalls.length).toBeGreaterThanOrEqual(7);
+      expect(addon.findPreviousCalls.length).toBeLessThanOrEqual(8);
     } finally {
       jest.useRealTimers();
     }
@@ -198,11 +213,17 @@ describe('TerminalEngine search', () => {
     engine.searchNext('foo', {}); // selects the first match (term.selection set)
     addon.emitResults(0, 3); // 3 matches exist
     expect(term.hasSelection()).toBe(true);
+    // Positive control: with the selection still there, the same call DOES refresh.
+    addon.findPreviousCalls.length = 0;
+    engine.refreshSearch();
+    expect(addon.findPreviousCalls).toHaveLength(1);
     term.clearSelection(); // user clicks in the terminal, dropping the selection
     addon.findNextCalls.length = 0;
+    addon.findPreviousCalls.length = 0;
     engine.refreshSearch();
     // No re-search: the dismissed match is not yanked back.
     expect(addon.findNextCalls).toHaveLength(0);
+    expect(addon.findPreviousCalls).toHaveLength(0);
   });
 
   it('refreshSearch keeps searching when no match exists yet (so new output can match)', () => {
@@ -212,10 +233,10 @@ describe('TerminalEngine search', () => {
     engine.searchNext('zzz', {}); // nothing on screen matches yet
     addon.emitResults(-1, 0); // 0 matches
     term.clearSelection(); // no active match selection
-    addon.findNextCalls.length = 0;
+    addon.findPreviousCalls.length = 0;
     engine.refreshSearch();
     // Still re-runs: a match that scrolls into view from new output must highlight.
-    expect(addon.findNextCalls).toHaveLength(1);
+    expect(addon.findPreviousCalls).toHaveLength(1);
   });
 
   it('unmount clears stranded decorations (no leftover highlights on remount)', () => {

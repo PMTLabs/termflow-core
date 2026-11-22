@@ -424,6 +424,63 @@
   background-color: rgba(0, 122, 204, 0.2);
 }
 
+.profiles-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.profile-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.remove-profile-btn:hover {
+  border-color: #c14a4a;
+  background-color: rgba(193, 74, 74, 0.2);
+}
+
+.add-profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.add-profile-form .profile-header {
+  margin-bottom: 0;
+}
+
+.add-profile-error {
+  color: #f48771;
+  font-size: 0.85rem;
+}
+
+.add-profile-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.add-profile-submit {
+  background-color: #007acc;
+  border: 1px solid #007acc;
+  color: #fff;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.add-profile-submit:hover:not(:disabled) {
+  background-color: #1188dd;
+}
+
+.add-profile-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .profile-card.active-profile {
   border-color: #007acc;
   box-shadow: 0 0 0 1px #007acc inset;

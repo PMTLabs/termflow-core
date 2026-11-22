@@ -8,13 +8,29 @@ rust-version = "1.88.0"
 name = "termflow-pty-host"
 path = "src/main.rs"
 
+# Separate fixture executable; no test hook is present in the production host.
+[[bin]]
+name = "tcc-test-child"
+path = "tests/fixtures/tcc_test_child.rs"
+required-features = ["tcc-test-fixtures"]
+
+[features]
+tcc-test-fixtures = []
+
 [dependencies]
 termflow-pty-protocol = { path = "../pty-protocol" }
+termflow-macos-tcc = { path = "../macos-tcc" }
 portable-pty = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1"
 log = "0.4"
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+# The pre-054 frame codec, mirrored by the compatibility test (same locked version as the protocol crate).
+bincode = "1.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -24,6 +40,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_Console",
     "Win32_System_Threading",
     "Win32_System_JobObjects",
     "Win32_System_WindowsProgramming",
@@ -33,3 +50,8 @@ windows-sys = { version = "0.59", features = [
 # shows a proper icon in Task Manager. Windows-only; no effect on macOS/Linux.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# TermFlow-patched copy of portable-pty 0.8.1 (opt-in PSEUDOCONSOLE_INHERIT_CURSOR).
+# Same crate the app uses; see ../vendor/portable-pty/VENDORED.md.
+[patch.crates-io]
+portable-pty = { path = "../vendor/portable-pty" }

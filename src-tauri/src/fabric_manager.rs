@@ -190,7 +190,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
         .fabric_process
         .lock()
         .map_err(|_| "fabric process slot lock poisoned".to_string())?
-        .claim_generation();
+        .claim_generation()?;
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[FABRIC] termflow-fabric sidecar spawned");
     let installed = match state.fabric_process.lock() {
@@ -317,7 +317,9 @@ async fn subscribe_fabric_events(
     // A dedicated client with NO total request timeout: SSE is a long-lived stream,
     // so the bounded-timeout localhost client used for one-shot control calls would
     // abort it. reqwest's default builder sets no request timeout.
+    // Loopback: never route through a machine-wide HTTP_PROXY (see localhost_client).
     let client = reqwest::Client::builder()
+        .no_proxy()
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -811,7 +813,7 @@ mod tests {
         // predicate so the gate can't silently invert (installed when absent).
         let mut slot = crate::state::GenerationSlot::new();
         assert!(!slot.is_present());
-        let generation = slot.claim_generation();
+        let generation = slot.claim_generation().unwrap();
         slot.install_if_current(generation, ()).unwrap();
         assert!(slot.is_present());
     }

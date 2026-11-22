@@ -25,6 +25,7 @@ export interface SeedTab {
   id: string;
   title?: string;
   shellType?: string;
+  elevated?: boolean;
 }
 
 /**
@@ -132,6 +133,7 @@ function candidateFor(
     seededForTabId: tab.id,
     name: tab.title || 'Terminal',
     shellType: tab.shellType,
+    elevated: tab.elevated,
   };
 }
 

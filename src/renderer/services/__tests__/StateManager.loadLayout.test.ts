@@ -21,6 +21,11 @@ import { configureStore } from '@reduxjs/toolkit';
 import tabsReducer from '../../store/slices/tabsSlice';
 import panesReducer from '../../store/slices/panesSlice';
 import { StateManager } from '../StateManager';
+import { installRestoreStream } from '../../__testFixtures__/paneRestoreBridge';
+
+beforeEach(() => {
+  installRestoreStream();
+});
 
 function makeStore() {
   return configureStore({ reducer: { tabs: tabsReducer, panes: panesReducer } });

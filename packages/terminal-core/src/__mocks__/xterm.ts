@@ -74,6 +74,7 @@ export class Terminal {
   scrollToBottomCount = 0;
   scrollToLineCalls: number[] = [];
   scrollPagesCalls: number[] = [];
+  scrollLinesCalls: number[] = [];
 
   scrollToBottom(): void {
     this.scrollToBottomCount++;
@@ -85,6 +86,15 @@ export class Terminal {
   scrollToLine(line: number): void {
     this.scrollToLineCalls.push(line);
     this.buffer.active.viewportY = line;
+  }
+
+  scrollLines(amount: number): void {
+    this.scrollLinesCalls.push(amount);
+    // Mirror real xterm: move by whole rows, clamped to the buffer.
+    this.buffer.active.viewportY = Math.max(
+      0,
+      Math.min(this.buffer.active.baseY, this.buffer.active.viewportY + amount),
+    );
   }
 
   scrollPages(pageCount: number): void {
@@ -131,9 +141,24 @@ export class Terminal {
   // Recorded side effects.
   written: string[] = [];
   pasted: string[] = [];
+  private userInputCallbacks: Array<() => void> = [];
+  _core = { coreService: {
+    onUserInput: (cb: () => void) => {
+      this.userInputCallbacks.push(cb);
+      return makeDisposable(() => { this.userInputCallbacks = this.userInputCallbacks.filter(fn => fn !== cb); });
+    },
+    triggerDataEvent: (data: string, user = false) => {
+      if (user) this.userInputCallbacks.forEach(cb => cb());
+      this.dataCallbacks.forEach(cb => cb(data));
+    },
+  } };
+  emitReply(data: string): void { this._core.coreService.triggerDataEvent(data, false); }
+  bracketedPasteMode = false;
+  applicationCursorKeysMode = false;
   loadedAddons: unknown[] = [];
   resetCount = 0;
   clearCount = 0;
+  refreshCalls: Array<[number, number]> = [];
   selectAllCount = 0;
   focusCount = 0;
   selection = '';
@@ -293,7 +318,7 @@ export class Terminal {
   /** Test hook: model the alt-buffer / disposed-marker case. */
   __failDecorations(v: boolean): void { this.__decorationsFail = v; }
 
-  write(data: string): void {
+  write(data: string, callback?: () => void): void {
     this.written.push(data);
     if (data.includes('\x1b[?1003h')) {
       this.mouseTrackingMode = 'any';
@@ -316,6 +341,7 @@ export class Terminal {
     } else if (data.includes('\x1b[?1004l')) {
       this.sendFocusMode = false;
     }
+    callback?.();
   }
 
   // Real xterm routes pasted text OUT through the onData event (after bracketed-paste
@@ -323,7 +349,8 @@ export class Terminal {
   // tests see input reach bridge.write.
   paste(data: string): void {
     this.pasted.push(data);
-    this.dataCallbacks.forEach((cb) => cb(data));
+    const text = data.replace(/\r?\n/g, '\r');
+    this._core.coreService.triggerDataEvent(this.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text, true);
   }
 
   reset(): void {
@@ -333,6 +360,8 @@ export class Terminal {
     // (reset, then the snapshot re-asserts any live input modes).
     this.mouseTrackingMode = 'none';
     this.sendFocusMode = false;
+    this.bracketedPasteMode = false;
+    this.applicationCursorKeysMode = false;
   }
 
   clear(): void {
@@ -347,7 +376,9 @@ export class Terminal {
     this.focusCount += 1;
   }
 
-  refresh(_start: number, _end: number): void {}
+  refresh(start: number, end: number): void {
+    this.refreshCalls.push([start, end]);
+  }
 
   getSelection(): string {
     return this.selection;
@@ -431,8 +462,11 @@ export class Terminal {
   get modes(): {
     mouseTrackingMode: 'none' | 'x10' | 'vt200' | 'drag' | 'any';
     sendFocusMode: boolean;
+    bracketedPasteMode: boolean;
+    applicationCursorKeysMode: boolean;
   } {
-    return { mouseTrackingMode: this.mouseTrackingMode, sendFocusMode: this.sendFocusMode };
+    return { mouseTrackingMode: this.mouseTrackingMode, sendFocusMode: this.sendFocusMode,
+      bracketedPasteMode: this.bracketedPasteMode, applicationCursorKeysMode: this.applicationCursorKeysMode };
   }
 
   attachCustomKeyEventHandler(handler: KeyHandler): void {

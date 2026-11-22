@@ -1,6 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Profiles that get their own recolored icon set (src-tauri/icons/<profile>/icon.ico).
+// Anything else (including unset, i.e. plain `rel`) uses the base icon.ico.
+const ICON_PROFILES = new Set(['rel-al', 'dev', 'nightly']);
 
 // Latest mtime (ms) among a file, or recursively within a directory.
 function latestMtimeMs(path) {
@@ -57,18 +61,30 @@ function main() {
   const ext = bunTarget.startsWith('bun-windows') ? '.exe' : '';
   const outDir = join(rootDir, 'src-tauri', 'binaries');
   const outFile = join(outDir, `${binaryName}-${targetTriple}${ext}`);
+  // Records which icon profile the existing outFile was built with, since the
+  // mtime-only staleness check below can't tell (see comment there).
+  const iconMarkerFile = `${outFile}.icon-profile`;
 
   mkdirSync(outDir, { recursive: true });
 
+  const iconProfileRaw = process.env.TERMFLOW_ICON_PROFILE;
+  const iconProfile = ICON_PROFILES.has(iconProfileRaw) ? iconProfileRaw : 'rel';
+  const iconPath = iconProfile === 'rel'
+    ? join(rootDir, 'src-tauri', 'icons', 'icon.ico')
+    : join(rootDir, 'src-tauri', 'icons', iconProfile, 'icon.ico');
+
   // Skip recompiling when nothing under mcp-server/src (or package.json /
-  // bun.lock / this script) is newer than the existing binary. bun --compile
-  // output isn't byte-deterministic (rebuilding identical sources yields a
-  // different hash each time), so comparing output content can't detect
-  // "unchanged" — an unconditional rebuild-and-overwrite bumps outFile's
-  // mtime every single build, which Tauri's build.rs watches via
-  // `cargo:rerun-if-changed`, forcing the `app` crate to recompile every
-  // build even with zero source changes. Checking staleness up front (like
-  // make) avoids that entirely.
+  // bun.lock / this script) is newer than the existing binary, AND the icon
+  // profile hasn't changed since the last build. bun --compile output isn't
+  // byte-deterministic (rebuilding identical sources yields a different hash
+  // each time), so comparing output content can't detect "unchanged" — an
+  // unconditional rebuild-and-overwrite bumps outFile's mtime every single
+  // build, which Tauri's build.rs watches via `cargo:rerun-if-changed`,
+  // forcing the `app` crate to recompile every build even with zero source
+  // changes. Checking staleness up front (like make) avoids that entirely.
+  // The icon-profile marker is needed on top of that: switching from a
+  // `dev` build to a `nightly` one (say) touches no source file, so the
+  // mtime check alone would keep serving the stale (wrong-colour) binary.
   const watchPaths = [
     join(rootDir, 'mcp-server', 'src'),
     join(rootDir, 'mcp-server', 'package.json'),
@@ -81,7 +97,10 @@ function main() {
   if (existsSync(outFile)) {
     const outMtime = statSync(outFile).mtimeMs;
     const newestSource = Math.max(...watchPaths.map(latestMtimeMs));
-    if (outMtime > newestSource) {
+    const lastIconProfile = existsSync(iconMarkerFile)
+      ? readFileSync(iconMarkerFile, 'utf8').trim()
+      : 'rel';
+    if (outMtime > newestSource && lastIconProfile === iconProfile) {
       console.log(`MCP sidecar up to date: ${outFile}`);
       return;
     }
@@ -96,7 +115,7 @@ function main() {
   // Embed the TermFlow icon into the Windows executable so the MCP sidecar shows
   // a proper icon in Explorer / Task Manager instead of the generic exe glyph.
   if (bunTarget.startsWith('bun-windows')) {
-    bunArgs.push(`--windows-icon=${join(rootDir, 'src-tauri', 'icons', 'icon.ico')}`);
+    bunArgs.push(`--windows-icon=${iconPath}`);
   }
   // Workaround for a bun bug (seen on 1.3.14): bun's own download+extract of
   // its cross-compile base executable for some targets (e.g. bun-windows-arm64)
@@ -119,6 +138,7 @@ function main() {
     process.exit(result.status ?? 1);
   }
 
+  writeFileSync(iconMarkerFile, iconProfile);
   console.log(`Built MCP sidecar: ${outFile}`);
 }
 

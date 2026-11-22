@@ -45,6 +45,7 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'focusNextPane', label: 'Focus Next Pane', defaultCombo: 'Alt+]' },
   { id: 'focusPrevPane', label: 'Focus Previous Pane', defaultCombo: 'Alt+[' },
   { id: 'paste', label: 'Paste', defaultCombo: 'Ctrl+V' },
+  { id: 'stopBroadcastInput', label: 'Stop broadcasting input', defaultCombo: 'Ctrl+Shift+B' },
   { id: 'clearTerminal', label: 'Clear Terminal', defaultCombo: 'Ctrl+Shift+X' },
   { id: 'openSettings', label: 'Open Settings', defaultCombo: 'Ctrl+,' },
   /*
@@ -53,11 +54,10 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
    * is talking to" on both the pane and the canvas overlay, so one registration serves
    * both surfaces.
    *
-   * `Ctrl+Shift+S` is free app-wide — not in RESERVED_COMBOS, not held by any action above,
-   * and, being a Ctrl+SHIFT chord, not a control code any shell reads (Ctrl+S alone is
-   * XOFF and would freeze the terminal, which is exactly why the Shift is not optional).
+   * `Ctrl+Shift+A` is free app-wide — not in RESERVED_COMBOS, not held by any action above,
+   * and, being a Ctrl+SHIFT chord, not a control code any shell reads.
    */
-  { id: 'openSnippets', label: 'Open Snippets Menu', defaultCombo: 'Ctrl+Shift+S' },
+  { id: 'openSnippets', label: 'Open Snippets Menu', defaultCombo: 'Ctrl+Shift+A' },
   { id: 'toggleFullScreen', label: 'Toggle Fullscreen', defaultCombo: 'F11' },
   { id: 'toggleCanvasMode', label: 'Toggle Canvas Mode', defaultCombo: 'Ctrl+Shift+Alt+Space' },
 

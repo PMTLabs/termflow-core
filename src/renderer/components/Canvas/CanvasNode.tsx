@@ -6,8 +6,9 @@ import { titleColorStyle } from '../../store/titleColor';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
 import { EyeIcon } from './EyeIcon';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
-import type { CanvasBusyCue } from './canvasBusyCue';
+import { isBandCue, type CanvasBusyCue } from './canvasBusyCue';
 import type { CanvasCombos } from './canvasGestures';
+import { sshContain } from './canvasSshGeometry';
 
 /**
  * One terminal on the canvas.
@@ -87,11 +88,17 @@ export const CanvasNode: React.FC<{
   /** This terminal's own host box, measured from its pane before the canvas took it
    *  (`plan/017`). Omitted only by tests and by a terminal with nothing to measure. */
   hostBox?: { w: number; h: number };
+  /**
+   * SSH leaves only: the frozen full content envelope — browser + terminal + status row, no title
+   * (plan 070 §4.1 B). It sizes the outer `.canvas-ssh-surface`; `hostBox` keeps meaning the
+   * terminal's own measuring box. Absent for every local node, which renders exactly as before.
+   */
+  sshEnvelope?: { w: number; h: number };
   children?: React.ReactNode;
 }> = ({
   node, tier, zoom, selected, focused, dimmed, linkTarget, hidden, nodeHidden, busyCue,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
-  onClose, onContextMenu, overlaid, hostBox, combos, children, onToggleHide,
+  onClose, onContextMenu, overlaid, hostBox, sshEnvelope, combos, children, onToggleHide,
 }) => {
   const isChip = tier === 'chip' && !overlaid;
   const { x, y, w, h } = node.rect;
@@ -103,6 +110,12 @@ export const CanvasNode: React.FC<{
   // `term.element` is about to move into. See `canvasHostBoxes.measureHostBox`.
   const fallback = useCanvasMetrics();
   const host = hostBox ?? { w: fallback.hostW, h: fallback.hostH };
+  // What the outer surface is sized to: the terminal box for a local node, the envelope for SSH.
+  const surface = sshEnvelope ?? host;
+  // SSH only (plan 070 §4.1 B): CONTAIN the whole envelope and bottom-align it, so the browser
+  // toolbar and status row are never clipped the way width-only portrait shifting would clip
+  // them. Local nodes keep the width-only scale and shift below, byte for byte.
+  const sshFit = sshEnvelope ? sshContain(sshEnvelope, w, h - HEAD_H) : null;
 
   // The title bar stops growing once it has reached its natural size — see `headScale`.
   // Above zoom 1 it counter-scales, so the header holds a constant HEAD_H on screen and every
@@ -140,14 +153,16 @@ export const CanvasNode: React.FC<{
         dimmed ? 'dimmed' : '',
         linkTarget ? 'link-target' : '',
         overlaid ? 'overlaid' : '',
-        // `running` is conditional on MORE than `node.isRunning` — it is the sweep cue's own
-        // existence (`plan/023`), so a busy node in `dot` mode deliberately does not carry it.
+        // `running` is conditional on MORE than `node.isRunning` — it is the header band's own
+        // existence (`plan/023`), drawn by every band cue (`pulse`, `sweep`, `static`;
+        // `data-busy-cue` below picks which), so a busy node in `dot` or `off` mode
+        // deliberately does not carry it.
         // The dot below is the mirror of this: exactly one of the two is ever in the DOM, and
         // neither is rendered-then-hidden, so "which cue is this node showing?" stays a
         // question the DOM can answer. The sidebar is untouched by the setting and keeps its
         // own `.running`, because there the icon renders either way and only an ancestor
         // selector can blink it.
-        busyCue === 'sweep' && node.isRunning ? 'running' : '',
+        isBandCue(busyCue) && node.isRunning ? 'running' : '',
         // This terminal's shell has exited (`plan/024` Req 4). Unconditional on tier: zoomed out
         // is exactly where you scan for what is still alive.
         node.exited ? 'ended' : '',
@@ -156,6 +171,7 @@ export const CanvasNode: React.FC<{
       data-terminal-id={node.terminalId}
       data-tab-id={node.tabId}
       data-lod={tier}
+      data-busy-cue={busyCue}
       // `visibility`, never `display` — see the note above.
       style={{
         left: x,
@@ -172,17 +188,17 @@ export const CanvasNode: React.FC<{
         // These must be real pixel lengths and must never be a percentage of the node: the body
         // collapses at the chip tier, and a percentage host would then resize a live PTY on a
         // zoom-out (`012` §6.5 RC2).
-        ['--node-host-w' as string]: `${host.w}px`,
-        ['--node-host-h' as string]: `${host.h}px`,
+        ['--node-host-w' as string]: `${surface.w}px`,
+        ['--node-host-h' as string]: `${surface.h}px`,
         // Per node rather than global, so a node of any width scales its host correctly.
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
-        ['--node-surface-scale' as string]: `${w / host.w}`,
+        ['--node-surface-scale' as string]: sshFit ? `${sshFit.scale}` : `${w / surface.w}`,
         // The scale above fits by WIDTH, so a portrait pane's replica is taller than the body
         // and the body clips the overflow off the bottom — where the newest rows are. This
         // lifts it back (`plan/020` §1). Zero whenever the surface already fits, and provably
         // zero in the overlay, whose `h` is `hostH * w / hostW + HEAD_H` by construction.
-        ['--node-surface-shift' as string]: `${surfaceShift(host, w, h - HEAD_H)}px`,
+        ['--node-surface-shift' as string]: sshFit ? `${sshFit.shift}px` : `${surfaceShift(surface, w, h - HEAD_H)}px`,
       } as React.CSSProperties}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}
@@ -222,7 +238,7 @@ export const CanvasNode: React.FC<{
 
               Still nothing at the chip tier: there the header IS the node and there is room for
               a title and nothing else. That leaves a collapsed tile with no cue in `dot` mode —
-              a real gap, and the reason `sweep` is the default. It is stated in the Settings
+              a real gap, and the reason a band cue (`pulse`) is the default. It is stated in the Settings
               help text rather than left to be discovered. */}
           {!isChip && busyCue === 'dot' && (
             <span className={node.isRunning ? 'canvas-node-dot running' : 'canvas-node-dot'} />
@@ -334,10 +350,10 @@ export const CanvasNode: React.FC<{
         </div>
       </div>
       <div className="canvas-node-body">{children}</div>
-      <span className="canvas-port n" data-port="n" />
-      <span className="canvas-port e" data-port="e" />
-      <span className="canvas-port s" data-port="s" />
-      <span className="canvas-port w" data-port="w" />
+      <span className="canvas-port n" data-port="n" tabIndex={-1} />
+      <span className="canvas-port e" data-port="e" tabIndex={-1} />
+      <span className="canvas-port s" data-port="s" tabIndex={-1} />
+      <span className="canvas-port w" data-port="w" tabIndex={-1} />
     </div>
   );
 };

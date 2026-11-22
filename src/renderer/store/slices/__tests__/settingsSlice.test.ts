@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode, setCanvasBusyCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, recordSnippetUse, setSnippetsSortMode, isValidSnippet, Snippet } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setExemptLoopbackFromProxy, setCanvasWheelMode, setCanvasBusyCue, setTabRunningCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, recordSnippetUse, setSnippetsSortMode, isValidSnippet, Snippet } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -130,6 +130,36 @@ describe('settingsSlice launchAtLogin', () => {
     expect(state.launchAtLogin).toBe(true);
     // OS/plugin is the source of truth — the reducer must NOT persist to config.json.
     expect(setConfigValue).not.toHaveBeenCalled();
+    delete (global as any).window.electronAPI;
+  });
+});
+
+describe('settingsSlice exemptLoopbackFromProxy (Plan 047)', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  it('defaults to true (loopback bypasses a corporate proxy out of the box)', () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.exemptLoopbackFromProxy).toBe(true);
+  });
+
+  it('persists through the Rust command only, never setConfigValue (single persistence path)', () => {
+    const setConfigValue = jest.fn();
+    const setExemptLoopbackFromProxyBridge = jest.fn();
+    (global as any).window.electronAPI = { setConfigValue, setExemptLoopbackFromProxy: setExemptLoopbackFromProxyBridge };
+    const state = settingsReducer(undefined, setExemptLoopbackFromProxy(false));
+    expect(state.exemptLoopbackFromProxy).toBe(false);
+    // The command writes the config file AND the AppState atomic the spawn paths read;
+    // a second write via setConfigValue would race it.
+    expect(setExemptLoopbackFromProxyBridge).toHaveBeenCalledWith(false);
+    expect(setConfigValue).not.toHaveBeenCalled();
+    delete (global as any).window.electronAPI;
+  });
+
+  it('tolerates a host without the bridge method (browser host)', () => {
+    (global as any).window.electronAPI = {};
+    expect(() => settingsReducer(undefined, setExemptLoopbackFromProxy(false))).not.toThrow();
     delete (global as any).window.electronAPI;
   });
 });
@@ -303,9 +333,9 @@ describe('settingsSlice canvasBusyCue', () => {
     (global as any).window = (global as any).window || {};
   });
 
-  it("defaults to 'sweep' — the cue that is readable across a whole canvas", () => {
+  it("defaults to 'pulse' — the same 1 Hz cue busy tabs default to", () => {
     const state = settingsReducer(undefined, { type: '@@INIT' } as any);
-    expect(state.canvasBusyCue).toBe('sweep');
+    expect(state.canvasBusyCue).toBe('pulse');
   });
 
   it("can be switched to 'dot' and back", () => {
@@ -323,6 +353,39 @@ describe('settingsSlice canvasBusyCue', () => {
     try {
       settingsReducer(undefined, setCanvasBusyCue('dot'));
       expect(setConfigValue).toHaveBeenCalledWith('canvasBusyCue', 'dot');
+    } finally {
+      delete (global as any).window.electronAPI;
+    }
+  });
+});
+
+describe('settingsSlice tabRunningCue', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  it("defaults to 'pulse' — the cheapest cue that still moves", () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.tabRunningCue).toBe('pulse');
+  });
+
+  it("can be switched to every cue and back", () => {
+    let state = settingsReducer(undefined, setTabRunningCue('pulse'));
+    expect(state.tabRunningCue).toBe('pulse');
+    state = settingsReducer(state, setTabRunningCue('static'));
+    expect(state.tabRunningCue).toBe('static');
+    state = settingsReducer(state, setTabRunningCue('off'));
+    expect(state.tabRunningCue).toBe('off');
+    state = settingsReducer(state, setTabRunningCue('animated'));
+    expect(state.tabRunningCue).toBe('animated');
+  });
+
+  it('persists the change, so it survives a restart', () => {
+    const setConfigValue = jest.fn();
+    (global as any).window.electronAPI = { setConfigValue };
+    try {
+      settingsReducer(undefined, setTabRunningCue('off'));
+      expect(setConfigValue).toHaveBeenCalledWith('tabRunningCue', 'off');
     } finally {
       delete (global as any).window.electronAPI;
     }

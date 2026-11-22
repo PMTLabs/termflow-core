@@ -132,45 +132,18 @@
   font-size: 11px;
 }
 
-/* Accordion panel for the Color Schema / Tab Color sections — sits directly
-   below the header row it belongs to, inset to read as "expanded inside the
-   menu" rather than a separate flyout. */
-.context-menu-subpanel {
-  padding: 8px 12px;
-  background-color: #252526;
+/* Keep the parent item lit while its flyout is open, so the trail from the row to the
+   panel beside it is visible when the pointer has moved off the row — mirrors
+   ContextMenu.css's `.context-menu-item.is-submenu-open` for the terminal's own menu. */
+.tab-context-menu .context-menu-item.is-submenu-open:not(:disabled) {
+  background-color: #094771;
+  color: #ffffff;
 }
 
-/* The reused SettingsPage .color-schema-grid can be wide; cap it to the
-   menu's width and let it scroll instead of overflowing. Scoped to this menu
-   only — SettingsPage.css itself is untouched. Right padding (separate from
-   the scrollbar's own inset border below) keeps the swatch cards from
-   touching the scrollbar track. */
-.tab-context-menu .color-schema-grid {
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  max-height: 220px;
-  overflow-y: auto;
-  padding-right: 6px;
-}
-
-.tab-context-menu .color-schema-grid::-webkit-scrollbar {
-  width: 10px;
-}
-
-.tab-context-menu .color-schema-grid::-webkit-scrollbar-track {
-  background: #252526;
-}
-
-/* The thumb's border matches the track color, insetting it from both edges
-   so it never touches the swatch content beside it. */
-.tab-context-menu .color-schema-grid::-webkit-scrollbar-thumb {
-  background-color: #555;
-  border-radius: 5px;
-  border: 2px solid #252526;
-}
-
-.tab-context-menu .color-schema-grid::-webkit-scrollbar-thumb:hover {
-  background-color: #777;
-}
+/* The Color Schema flyout's grid sizing (3 columns, ~2 visible rows, scrollbar) lives in
+   `SubmenuFlyoutHost.css` under `.submenu-flyout-panel--wide` — shared with the terminal's
+   own per-agent picker (`ContextMenu`'s `customFlyout`, built in `TerminalDisplay.tsx`),
+   which needs the identical width and grid. */
 
 .tab-color-swatches {
   display: flex;

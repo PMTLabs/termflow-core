@@ -4,6 +4,10 @@
   height: 100%;
   background-color: #0a0a0a;
   overflow: hidden;
+  /* Keep terminal content off the OS window edges — flush content there reads
+     as bleeding into whatever sits just outside the window (e.g. the taskbar
+     when the bottom edge is near it). */
+  padding: 3px;
 }
 
 .tab-content {

@@ -12,7 +12,8 @@
 //        sibling default). Fabric deps are included when the crate is present (Pro).
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { join, dirname, isAbsolute } from 'node:path';
+import { join, dirname, isAbsolute, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const ROOT = process.cwd();
 const LICENSE_FILE_RE = /^(LICENSE|LICENCE|COPYING|NOTICE|UNLICENSE)(\.|$|-)/i;
@@ -34,21 +35,25 @@ function readLicenseTexts(dir) {
   return out || null;
 }
 
+// A THIRD-PARTY crate vendored into this repo (src-tauri/vendor/<crate>, e.g. the patched
+// portable-pty) is a path dependency with no registry source, but it is not ours: its
+// license/attribution must still be reproduced, exactly as when it came from crates.io.
+const isVendoredCrate = (p) => /[\\/]vendor[\\/]/.test(p.manifest_path);
+
 function rustDeps(manifestPath, label) {
   if (!existsSync(manifestPath)) return [];
   let meta;
   try {
     meta = JSON.parse(run('cargo', ['metadata', '--format-version', '1', '--manifest-path', manifestPath]));
   } catch (e) {
-    console.warn(`[notices] cargo metadata failed for ${label}: ${e.message}`);
-    return [];
+    throw new Error(`[notices] cargo metadata failed for ${label}: ${e.message}`);
   }
   const members = new Set(meta.workspace_members || []);
   const deps = [];
   for (const p of meta.packages || []) {
     // Skip our own crates (workspace members) and local path-only crates (no registry source).
     if (members.has(p.id)) continue;
-    if (!p.source) continue; // path dep (ours / vendored)
+    if (!p.source && !isVendoredCrate(p)) continue; // path dep (ours)
     deps.push({
       name: p.name,
       version: p.version,
@@ -60,7 +65,43 @@ function rustDeps(manifestPath, label) {
   return deps;
 }
 
+// Rust-only dependency updates can retain the already generated JS attributions
+// when bun.lock/package.json are unchanged. This avoids fetching a notice tool.
+// Explicit opt-in only; ordinary release regeneration still scans the JS tree.
+function jsFingerprint() {
+  const rootPackage = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  const files = ['package.json', 'bun.lock'];
+  for (const workspace of rootPackage.workspaces || []) {
+    if (workspace.endsWith('/*')) {
+      const dir = workspace.slice(0, -2);
+      for (const name of readdirSync(join(ROOT, dir))) {
+        const manifest = `${dir}/${name}/package.json`;
+        if (existsSync(join(ROOT, manifest))) files.push(manifest);
+      }
+    } else files.push(`${workspace}/package.json`);
+  }
+  const hash = createHash('sha256');
+  for (const file of files.sort()) hash.update(file + '\0').update(readFileSync(join(ROOT, file))).update('\0');
+  return hash.digest('hex');
+}
+function cachedJsNotices() {
+  const previous = readFileSync(join(ROOT, 'legal', 'THIRD-PARTY-NOTICES.txt'), 'utf8');
+  if (previous.match(/^JavaScript inputs SHA-256: ([a-f0-9]{64})$/m)?.[1] !== jsFingerprint()) {
+    throw new Error('JavaScript notice inputs changed or fingerprint missing; run a full regeneration');
+  }
+  const entries = [];
+  for (const block of previous.split(/\r?\n={80}\r?\n(?=\r?\n?[^\r\n]+ [^ ]+  —  [^\r\n]+  \[(?:javascript|rust \([^\r\n]+\))\]\r?\n-+\r?\n)/)) {
+    const match = block.trim().match(/^(.+) ([^ ]+)  —  (.+)  \[javascript\]\r?\n-+\r?\n([\s\S]*)$/);
+    if (!match) continue;
+    const [, name, version, license, text] = match;
+    entries.push({ name, version, license, text: text.startsWith('(No bundled license') ? null : text.trim(), kind: 'javascript' });
+  }
+  if (!entries.length) throw new Error('No cached JavaScript notices; run a full regeneration');
+  console.log(`[notices] reusing ${entries.length} unchanged JavaScript attributions`);
+  return entries;
+}
 function jsDeps() {
+  if (process.argv.includes('--reuse-js-notices')) return cachedJsNotices();
   let json;
   try {
     json = run('bunx', ['license-checker', '--production', '--json', '--excludePrivatePackages', '--start', ROOT]);
@@ -91,11 +132,20 @@ function jsDeps() {
 
 function resolveFabricDir() {
   const o = process.env.TERMFLOW_FABRIC_DIR;
-  if (o && o.trim()) return isAbsolute(o) ? o : join(ROOT, o);
-  return join(ROOT, '..', 'termflow-fabric');
+  const direct = o?.trim() ? (isAbsolute(o) ? o : join(ROOT, o)) : join(ROOT, '..', 'termflow-fabric');
+  if (existsSync(join(direct, 'Cargo.toml'))) return direct;
+  if (o?.trim()) throw new Error(`Fabric source not found: ${direct}`);
+  try {
+    const common = run('git', ['rev-parse', '--git-common-dir']).trim();
+    const linked = join(dirname(resolve(ROOT, common)), '..', 'termflow-fabric');
+    if (existsSync(join(linked, 'Cargo.toml'))) return linked;
+  } catch { /* Archives and standalone core checkouts need neither git nor fabric. */ }
+  if (process.argv.includes('--require-fabric')) throw new Error('Fabric source not found (--require-fabric)');
+  return direct;
 }
 
 // --- collect ---------------------------------------------------------------
+const js = jsDeps();
 const rust = [
   ...rustDeps(join(ROOT, 'src-tauri', 'Cargo.toml'), 'core'),
 ];
@@ -107,8 +157,6 @@ if (existsSync(join(fabricDir, 'Cargo.toml'))) {
   console.log(`[notices] fabric not found at ${fabricDir}; Rust notices cover the core only`);
 }
 for (const d of rust) d.text = readLicenseTexts(d.dir);
-
-const js = jsDeps();
 
 // dedup by name@version, prefer an entry that has license text
 const byKey = new Map();
@@ -130,6 +178,7 @@ hand-edit — regenerate with: node scripts/gen-third-party-notices.mjs
 
 Components: ${all.length} (${withText} with reproduced license text)
 Rust: ${rust.length}  ·  JavaScript: ${js.length}
+JavaScript inputs SHA-256: ${jsFingerprint()}
 A human-readable summary is also published at https://termflow.app/licenses.
 
 ================================================================================
@@ -143,5 +192,5 @@ const body = all
   })
   .join('\n================================================================================\n\n');
 
-writeFileSync(join(ROOT, 'legal', 'THIRD-PARTY-NOTICES.txt'), header + '\n' + body + '\n');
+writeFileSync(join(ROOT, 'legal', 'THIRD-PARTY-NOTICES.txt'), (header + '\n' + body + '\n').replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, ''));
 console.log(`[notices] wrote legal/THIRD-PARTY-NOTICES.txt — ${all.length} components (${withText} with text)`);

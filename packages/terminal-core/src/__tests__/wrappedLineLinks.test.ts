@@ -246,11 +246,71 @@ describe('collectWrappedLine joins a HARD-wrapped path', () => {
     expect(m.col).toBe(7);
   });
 
-  it('G1 — refuses a row that is not full (it ended for some other reason)', () => {
-    // Same rows, a WIDER grid: row 0 no longer reaches the right edge, so nothing wrapped.
-    const buf = fakeBuffer([{ text: ROW0 }, { text: ROW1 }], COLS + 1);
-    const info = collectWrappedLine(buf, 0, COLS + 1)!;
+  /**
+   * G1 has two tiers since the Claude Code result-block fix: a FULL row joins as before, and a
+   * row that stopped within HARD_WRAP_EDGE_SLACK (8) cells of the edge joins only when its
+   * trailing token already holds a separator. The bound is pinned from both sides (8 short
+   * joins, 9 short does not) so that widening OR narrowing the slack fails a test, and the
+   * separator half is pinned by F12 below — deleting it lets word-wrapped prose join.
+   */
+  it('G1 — joins a row that stopped short of the grid, up to the slack (an app wrapping in a narrower box)', () => {
+    for (const short of [1, 5, 8]) {
+      // Same rows, a WIDER grid: row 0 ends `short` cells before the right edge, the way an Ink
+      // app's block does when it is laid out narrower than the terminal (Claude Code: 5).
+      const buf = fakeBuffer([{ text: ROW0 }, { text: ROW1 }], COLS + short);
+      const info = collectWrappedLine(buf, 0, COLS + short)!;
+      expect(info.text).toBe('wrote ' + FULL);
+      expect(info.rowIndents).toEqual([0, 4]);
+      expect(findPathLinks(info.text).map((m) => m.path)).toEqual([FULL]);
+    }
+  });
+
+  it('G1 — refuses a row that stopped further short than the slack (it ended for some other reason)', () => {
+    const buf = fakeBuffer([{ text: ROW0 }, { text: ROW1 }], COLS + 9);
+    const info = collectWrappedLine(buf, 0, COLS + 9)!;
     expect(info.text).toBe(ROW0);
+  });
+
+  it('G1 — a short row joins only when its trailing token already holds a separator (F12)', () => {
+    /**
+     * Word-wrap leaves a prose row anywhere within the last word-length of cells, and the next
+     * row of an agent's answer is routinely an indented path. Without the separator half of the
+     * second tier this pair stitches to `testssrc/x.ts` — and REPLACES the working `src/x.ts`
+     * link on row 1 with a path that does not exist. `tests` is a word; `docs/plan/027-x` is a
+     * path fragment, and only the latter is trusted short of the edge.
+     */
+    const prose = 'I moved the helpers under the tests';
+    const cols = prose.length + 5;
+    const buf = fakeBuffer([{ text: prose }, { text: '  src/x.ts now exports them' }], cols);
+    const info = collectWrappedLine(buf, 0, cols)!;
+    expect(info.text).toBe(prose);
+    // Same geometry, the trailing token now a path fragment: joins.
+    const frag = 'I moved the helpers under docs/plan/027-x';
+    const buf2 = fakeBuffer([{ text: frag }, { text: '  -y.md now' }], frag.length + 5);
+    expect(collectWrappedLine(buf2, 0, frag.length + 5)!.text)
+      .toBe('I moved the helpers under docs/plan/027-x-y.md now');
+  });
+
+  it('G1 — the reported Claude Code result block, replayed at its real width', () => {
+    /**
+     * Rows 11–12 of a real 120-column capture (`claude-raw-120-1.txt`): Claude Code lays its
+     * `⎿  ` result block out 5 cells narrower than the terminal, so row 0 is 115 cells and the
+     * full-row G1 refused it — the link stopped at `…\sc` and Ctrl+click opened nothing.
+     */
+    const cols = 120;
+    const row0 = '  ⎿  shot C:\\Users\\tamtr\\AppData\\Local\\Temp\\claude\\D--sources-work-termflow\\b0151c4d-3fc5-4bcb-884e-730b57e0f5c3\\sc';
+    const row1 = '     ratchpad\\rb-13j-lang-open-probe-file-name.png 1400x900';
+    expect(row0).toHaveLength(cols - 5);
+    const buf = fakeBuffer([{ text: row0 }, { text: row1 }], cols);
+    const info = collectWrappedLine(buf, 0, cols)!;
+    expect(info.rowIndents).toEqual([0, 5]);
+    // The unwritten cells after row 0's content must NOT survive as spaces inside the join.
+    expect(info.text).toContain('0f5c3\\scratchpad\\rb-13j');
+    expect(findPathLinks(info.text).map((m) => m.path)).toEqual([
+      'C:\\Users\\tamtr\\AppData\\Local\\Temp\\claude\\D--sources-work-termflow\\b0151c4d-3fc5-4bcb-884e-730b57e0f5c3\\scratchpad\\rb-13j-lang-open-probe-file-name.png',
+    ]);
+    // Queried at the continuation row, the same path — the backward walk applies the same tier.
+    expect(collectWrappedLine(buf, 1, cols)!.text).toBe(info.text);
   });
 
   it('G2 — refuses a continuation with no hanging indent', () => {
@@ -388,13 +448,25 @@ describe('collectWrappedLine joins a HARD-wrapped path', () => {
      * EMPTY and both G6 and G7 tested `''` and passed vacuously. This is also what makes the
      * docblock's alt-screen argument true — a TUI that paints its padding fills the edge with a
      * real `' '`.
+     *
+     * With G1's second tier a painted space is no longer "not full" but "content ended earlier",
+     * so the row is judged by where its content ends: nine painted spaces put it past the slack
+     * and G1 refuses; one painted space puts it inside the slack, and then the pin is that
+     * `tail` is sliced from the TRIMMED text — non-empty, so G7 sees `config.js` and refuses the
+     * fuse it exists for, instead of testing `''`.
      */
-    const a = 'modified:   src/main.ts ';
+    const a = 'reading src/main' + ' '.repeat(9);
     const cols = a.length;
     const last = fakeBuffer([{ text: a }], cols).getLine(0)!.getCell(cols - 1)!;
     expect(last.getChars()).toBe(' '); // the premise: painted, not unwritten
     const buf = fakeBuffer([{ text: a }, { text: '  src/other.ts' }], cols);
     expect(collectWrappedLine(buf, 0, cols)!.text).toBe(a.trimEnd());
+
+    const b = 'built with webpack/config.js ';
+    const buf2 = fakeBuffer([{ text: b }, { text: '  v5.91.0 warn' }], b.length);
+    const info = collectWrappedLine(buf2, 0, b.length)!;
+    expect(info.text).toBe(b.trimEnd());
+    expect(findPathLinks(info.text)[0].path).toBe('webpack/config.js');
   });
 
   it('applies the row cap to hard-wrapped rows too', () => {

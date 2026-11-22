@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { SearchQuery, SearchResponse } from '../../../types/search';
+import { getStoredApiToken } from '../../services/profileScope';
 import { SearchFilters } from './SearchFilters';
 import { SearchResults } from './SearchResults';
 import './SearchInterface.css';
@@ -70,7 +71,7 @@ export const SearchInterface: React.FC<SearchInterfaceProps> = ({ onClose }) => 
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('api_token')}`
+          'Authorization': `Bearer ${getStoredApiToken()}`
         },
         body: JSON.stringify({
           query: searchQuery,
@@ -106,7 +107,7 @@ export const SearchInterface: React.FC<SearchInterfaceProps> = ({ onClose }) => 
     try {
       const response = await fetch(`/api/search/suggestions?q=${encodeURIComponent(searchText)}`, {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('api_token')}`
+          'Authorization': `Bearer ${getStoredApiToken()}`
         }
       });
 

@@ -137,7 +137,8 @@ describe('the reconnect drop follows the server', () => {
     // one continuing into `reconnectEdge` would delete a wire the user still wants.
     const pair = DRAG.indexOf('const pair = reconnectPair(edge, end, to);');
     const bail = DRAG.indexOf('if (!pair) return;');
-    const call = DRAG.indexOf('reconnectEdge(edge, pair.from, pair.to)');
+    const call = DRAG.indexOf('reconnectEdge(edge, pair.from, pair.to, current)');
+    expect(DRAG).toContain('if (!done || !current()) return;');
     expect(pair).toBeGreaterThan(-1);
     expect(bail).toBeGreaterThan(pair);
     expect(call).toBeGreaterThan(bail);
@@ -176,7 +177,8 @@ describe('the connection is selectable and deletable', () => {
   it('removes from the mirror only after the server confirms', () => {
     const drop = callback(MODE, 'dropEdge');
     expect(drop).toContain('void deleteEdge(id).then((ok) => {');
-    expect(drop).toContain('if (ok) dispatch(removeEdge(id));');
+    expect(drop).toContain('const workspace = captureWorkspace();');
+    expect(drop).toContain('if (ok && isCurrentWorkspace(workspace)) dispatch(removeEdge(id));');
   });
 
   it('reads both selection flags into the resolver', () => {

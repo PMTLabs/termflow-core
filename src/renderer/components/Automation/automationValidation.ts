@@ -71,6 +71,7 @@ export type ProblemCode =
     | 'timer.scheduleWithMonitor'
     | 'timer.neverRuns'
     | 'action.empty'
+    | 'action.hiddenUnreadable'
     | 'rule.noDestination'
     | 'webhook.urlEmpty'
     | 'webhook.urlMalformed'
@@ -839,6 +840,9 @@ export function problems(rule: AutomationRule): Problem[] {
                 'Add a terminal message or a webhook destination.',
             ),
         );
+    } else if (action?.masked && action.message === '' && action.messageCipher) {
+        out.push(problem('blocks', 'action', 'action.hiddenUnreadable',
+            "The hidden message can't be read on this machine — type it again."));
     } else if (action?.message.trim().length === 0) {
         out.push(
             problem(
@@ -981,7 +985,9 @@ export function problems(rule: AutomationRule): Problem[] {
                         'blocks',
                         destination.field,
                         'action.unknownToken',
-                        `${t.text} has nothing to stand for. The pattern in Read a value has `
+                        destination.field === 'action' && action?.masked
+                            ? 'A hidden message token has nothing to stand for. Check the pattern in Read a value.'
+                            : `${t.text} has nothing to stand for. The pattern in Read a value has `
                             + `${groups.count} bracketed group${groups.count === 1 ? '' : 's'}, so the highest you can use is $${groups.count}.`,
                     ),
                 );
@@ -1036,6 +1042,7 @@ export const BADGES: Record<ProblemCode, string> = {
     'timer.scheduleWithMonitor': 'the watch is ignored',
     'timer.neverRuns': 'this rule can never run',
     'action.empty': 'needs a message',
+    'action.hiddenUnreadable': 'needs the hidden message retyped',
     'rule.noDestination': 'needs a destination',
     'webhook.urlEmpty': 'needs a webhook URL',
     'webhook.urlMalformed': 'needs a valid webhook URL',

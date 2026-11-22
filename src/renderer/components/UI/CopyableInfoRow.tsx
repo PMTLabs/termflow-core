@@ -7,6 +7,14 @@ import React, { useState } from 'react';
  * copied in a row. Relies on `.info-row` / `.info-label` / `.info-value` /
  * `.info-copy-btn` styles defined alongside each menu.
  */
+const MAX_SHOWN = 24;
+const HEAD = 11;
+const TAIL = 8;
+
+/** Middle-ellipsize a long id for display (e.g. 35-char `pc-<32hex>`); the full value is still what gets copied. */
+export const shortenMiddle = (value: string): string =>
+  value.length <= MAX_SHOWN ? value : `${value.slice(0, HEAD)}…${value.slice(-TAIL)}`;
+
 export const CopyableInfoRow: React.FC<{ label: string; value: string }> = ({ label, value }) => {
   const [copied, setCopied] = useState(false);
 
@@ -21,7 +29,7 @@ export const CopyableInfoRow: React.FC<{ label: string; value: string }> = ({ la
   return (
     <div className="info-row">
       <span className="info-label">{label}</span>
-      <span className="info-value" title={value}>{value}</span>
+      <span className="info-value" title={value}>{shortenMiddle(value)}</span>
       <button
         className="info-copy-btn"
         onClick={handleCopy}

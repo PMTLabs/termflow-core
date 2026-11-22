@@ -59,6 +59,14 @@
  * The subpanel's own padding comes from that stylesheet; these rules only lay out a rule ROW,
  * which is a name over its current state. */
 
+/* The Automation section's hover flyout (pane-title menu): the rule rows carry their own
+   padding, so the panel's default inset is dropped and it is given room for a rule name. */
+.submenu-flyout-panel--automation {
+  min-width: 260px;
+  max-width: 380px;
+  padding: 4px 0;
+}
+
 .au-menu-rule {
     /* Overrides `.context-menu-item`'s row layout — a rule needs two lines, not one. */
     flex-direction: column;

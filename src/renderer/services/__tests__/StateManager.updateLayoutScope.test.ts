@@ -30,6 +30,11 @@ import tabsReducer from '../../store/slices/tabsSlice';
 import panesReducer from '../../store/slices/panesSlice';
 import canvasReducer from '../../store/slices/canvasSlice';
 import { StateManager, SavedLayout } from '../StateManager';
+import { installRestoreStream } from '../../__testFixtures__/paneRestoreBridge';
+
+beforeEach(() => {
+  installRestoreStream();
+});
 import { getCwdSnapshot, __resetCwdSnapshots } from '../cwdSnapshot';
 
 function makeStore() {

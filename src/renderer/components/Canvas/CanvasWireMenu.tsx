@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useDispatch } from 'react-redux';
 import { CanvasEdge, removeEdge, updateEdge } from '../../store/slices/canvasSlice';
 import { deleteEdge, patchEdgeLabel } from '../../services/canvasGraph';
+import { captureCanvasEffect } from '../../services/canvasEffect';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
 import { useTerminalTitleColor, titleColorStyle } from '../../store/titleColor';
 
@@ -35,6 +36,8 @@ export const CanvasWireMenu: React.FC<{
   const toColor = useTerminalTitleColor(edge.to);
 
   const commitLabel = () => {
+    const current = captureCanvasEffect([edge.from, edge.to], edge);
+    if (!current()) return;
     const trimmed = draft.trim();
     const label = trimmed.length ? trimmed : null;
     onClose();
@@ -42,14 +45,16 @@ export const CanvasWireMenu: React.FC<{
     // Write the row the SERVER returns, never the draft: a failed PATCH must leave the wire
     // showing its real label rather than one only this window believes in.
     void patchEdgeLabel(edge.id, label).then((updated) => {
-      if (updated) dispatch(updateEdge(updated));
+      if (updated && current()) dispatch(updateEdge(updated));
     });
   };
 
   const remove = () => {
+    const current = captureCanvasEffect([edge.from, edge.to], edge);
+    if (!current()) return;
     onClose();
     void deleteEdge(edge.id).then((ok) => {
-      if (ok) dispatch(removeEdge(edge.id));
+      if (ok && current()) dispatch(removeEdge(edge.id));
     });
   };
 

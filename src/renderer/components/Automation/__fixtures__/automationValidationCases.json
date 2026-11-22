@@ -65,6 +65,23 @@
       "expected": []
     },
     {
+      "name": "unreadable hidden message blocks",
+      "rule": {
+        "id": "hidden", "name": "Hidden", "enabled": false, "runsOnce": false,
+        "targetMode": "pinned", "criterion": "allTerminals", "criterionValue": "",
+        "followNew": true, "targetIds": ["tm-1"], "completedAt": null, "verboseUntil": null,
+        "sortOrder": 0, "schemaVersion": 4, "createdAt": 0, "updatedAt": 0,
+        "graph": {
+          "monitor": { "read": "newOutput", "cadence": "onOutput", "everyMs": 0 },
+          "parse": { "preset": "custom", "literal": null, "find": "ctx:(\\d+)%", "keep": "brackets" },
+          "cond": { "kind": "number", "op": "gt", "threshold": 25 },
+          "action": { "message": "", "masked": true, "messageCipher": "v1:unreadable",
+            "sendTo": "matched", "submit": true, "cliType": "default" }
+        }
+      },
+      "expected": [{ "severity": "blocks", "field": "action", "code": "action.hiddenUnreadable" }]
+    },
+    {
       "name": "a pinned rule with nothing picked blocks",
       "rule": {
         "id": "au-fix",

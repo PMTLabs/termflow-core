@@ -29,10 +29,14 @@ it('bundles white-filled brand SVGs for codex, copilot and opencode', () => {
   }
 });
 
+it('bundles the official 3-color brand SVG for pi', () => {
+  expect(CURATED_AGENT_ICONS.pi).toMatch(/^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+=*$/);
+});
+
 // Every curated CLI launches as a plain script/binary with no embedded icon, so macOS's
 // NSWorkspace returns the generic-executable icon (a blank document) instead of an Err.
 // The curated override must win so that generic icon never leaks into the chip.
-it.each(['agy', 'claude', 'codex', 'copilot', 'opencode'])(
+it.each(['agy', 'claude', 'codex', 'copilot', 'opencode', 'pi'])(
   'uses the curated icon for %s, bypassing native extraction',
   async (label) => {
     const getExecutableIcon = jest.fn(async () => 'data:image/png;base64,GENERICDOC');

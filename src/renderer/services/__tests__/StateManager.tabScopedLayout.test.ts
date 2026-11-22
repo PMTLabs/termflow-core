@@ -22,6 +22,11 @@ import tabsReducer from '../../store/slices/tabsSlice';
 import panesReducer from '../../store/slices/panesSlice';
 import canvasReducer from '../../store/slices/canvasSlice';
 import { StateManager, SavedLayout } from '../StateManager';
+import { installRestoreStream } from '../../__testFixtures__/paneRestoreBridge';
+
+beforeEach(() => {
+  installRestoreStream();
+});
 import { peekUndo, __resetLayoutUndoForTests } from '../layoutUndo';
 
 function makeStore() {

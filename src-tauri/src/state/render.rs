@@ -156,6 +156,32 @@ pub fn render_full_scrollback(screen: &mut vt100::Screen) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Drop the cursor-restore tail the immediately preceding persistence code stored
+/// after the rows.
+///
+/// Before `persisted_scrollback_snapshot`, `persist_terminal_history` stored the
+/// live-repair dump: the rows followed by vt100's `cursor_state_formatted()`
+/// (`ESC[?25h|l`, an absolute `CUP`, and possibly a redrawn cell) plus an attribute
+/// reset. `rows_formatted` never emits a cursor-visibility control, so the LAST
+/// `ESC[?25h|l` in a blob is where a tail starts. The tail can hold bare LF bytes
+/// (vt100 walks the cursor down to a row it cannot address after an end-of-row
+/// overflow) but never CR: the tail formatter emits absolute moves, SGR and cell
+/// text, and a cell cannot hold a CR. Hard-ended rows end `ESC[0m CR LF`. A blob without
+/// the marker, or with a CR after it, is returned untouched.
+pub fn strip_cursor_state_tail(blob: &str) -> &str {
+    const HIDE: &str = "\x1b[?25l";
+    const SHOW: &str = "\x1b[?25h";
+    let at = match (blob.rfind(HIDE), blob.rfind(SHOW)) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => return blob,
+    };
+    if blob[at..].contains('\r') {
+        return blob;
+    }
+    &blob[..at]
+}
+
 /// The paging plan for a tail read: one `(scrollback offset, rows to skip, rows to take)` per window.
 ///
 /// Pure, and separate from the walk, because §10.1's real requirement — *never read more than
@@ -820,5 +846,161 @@ mod scrollback_tests {
         assert!(text.contains("old-line-0099"), "newest restored line must survive reflush:\n{text}");
         assert!(text.contains("session restored"), "divider must be part of the re-dump:\n{text}");
         assert!(text.contains("new-session output"), "new session's output must follow:\n{text}");
+    }
+
+    /// A Claude-Code-shaped final screen: history scrolled off, then an input box
+    /// drawn with absolute addressing and the cursor left on the `❯` row with rows
+    /// (border, status line) still BELOW it — i.e. NOT on the last content row.
+    fn tui_parser() -> vt100::Parser {
+        let mut p = vt100::Parser::new(24, 80, 5000);
+        for i in 0..40 {
+            p.process(format!("history-{i:02}\r\n").as_bytes());
+        }
+        p.process(b"\x1b[2J\x1b[H");
+        p.process(b"\x1b[10;1H------------------------------ top border\r\n");
+        p.process(b"\x1b[11;1H> prompt-row\r\n");
+        p.process(b"\x1b[12;1H------------------------------ bottom border\r\n");
+        p.process(b"\x1b[13;1Hstatus-line\r\n");
+        p.process(b"\x1b[?25l\x1b[11;3H");
+        p
+    }
+
+    /// What `persist_terminal_history` stored before `persisted_scrollback_snapshot`.
+    fn legacy_blob(p: &mut vt100::Parser) -> String {
+        let mut blob = render_full_scrollback(p.screen_mut()).expect("nonblank");
+        blob.extend_from_slice(&p.screen().cursor_state_formatted());
+        blob.extend_from_slice(&p.screen().attributes_formatted());
+        String::from_utf8_lossy(&blob).into_owned()
+    }
+
+    /// Replay `blob` + divider into a same-sized fresh terminal, as xterm does on
+    /// restore, and return it with the visible rows.
+    fn replay(blob: &str) -> (vt100::Parser, Vec<String>) {
+        let mut r = vt100::Parser::new(24, 80, 5000);
+        r.process(blob.as_bytes());
+        r.process(super::REPLAY_SEPARATOR.as_bytes());
+        let rows = r.screen().rows(0, 80).collect();
+        (r, rows)
+    }
+
+    /// The reported bug: the divider (and then the new prompt) landed on the old
+    /// screen's rows, because the stored blob ended with an absolute cursor jump.
+    #[test]
+    fn legacy_cursor_tail_makes_the_divider_overwrite_the_old_screen() {
+        let mut p = tui_parser();
+        let (_r, rows) = replay(&legacy_blob(&mut p));
+        let divider = rows.iter().position(|r| r.contains("session restored")).expect("divider");
+        let status = rows.iter().position(|r| r.contains("status-line")).expect("status row");
+        // Oracle check for the tests below: without stripping, the divider is drawn
+        // ABOVE the last restored row, i.e. on top of the old screen.
+        assert!(divider < status, "premise: legacy blob must reproduce the defect: {rows:?}");
+    }
+
+    #[test]
+    fn stripping_the_legacy_tail_keeps_the_divider_below_every_restored_row() {
+        let mut p = tui_parser();
+        let blob = legacy_blob(&mut p);
+        let (r, rows) = replay(super::strip_cursor_state_tail(&blob));
+
+        let at = |needle: &str| rows.iter().position(|row| row.contains(needle));
+        let status = at("status-line").expect("last restored row survives");
+        assert!(at("> prompt-row").is_some(), "input row survives: {rows:?}");
+        assert!(at("bottom border").is_some(), "border survives, not overwritten: {rows:?}");
+        let divider = at("session restored").expect("divider");
+        assert!(divider > status, "divider must come AFTER the restored screen: {rows:?}");
+        // The cursor must be below the divider so the shell's prompt lands there.
+        assert!(
+            usize::from(r.screen().cursor_position().0) > divider,
+            "cursor must end below the divider, got row {} vs divider {divider}",
+            r.screen().cursor_position().0
+        );
+    }
+
+    /// The exact oracle: stripping a legacy blob must give back precisely the rows
+    /// alone. Every state below is produced by the real parser, not hand-assembled,
+    /// so each fixture is a tail vt100 really emits. They are representative, not
+    /// exhaustive: wide characters in the last column and the save/backspace/erase
+    /// fallback for a pending wrap over a cleared row are not among them.
+    #[test]
+    fn stripping_returns_exactly_the_rows_for_representative_vt100_tail_shapes() {
+        let overflow_filled = || {
+            let mut p = vt100::Parser::new(24, 80, 5000);
+            p.process(b"\x1b[13;1Hstatus-line\x1b[11;1H");
+            p.process("x".repeat(80).as_bytes());
+            p
+        };
+        let states: Vec<(&str, vt100::Parser)> = vec![
+            ("tui, cursor hidden mid-screen", tui_parser()),
+            ("tui, cursor shown mid-screen", {
+                let mut p = tui_parser();
+                p.process(b"\x1b[?25h");
+                p
+            }),
+            ("shell prompt, cursor on last row", {
+                let mut p = vt100::Parser::new(24, 80, 5000);
+                p.process(b"PS D:\\src> echo hi\r\nhi\r\nPS D:\\src> ");
+                p
+            }),
+            ("non-default attributes still active", {
+                let mut p = vt100::Parser::new(24, 80, 5000);
+                p.process(b"plain\r\n\x1b[1;31mred bold\x1b[5;9H");
+                p
+            }),
+            ("cursor past the last column over a filled cell", overflow_filled()),
+            // vt100 cannot address a cursor that sits past the end of an EMPTY row,
+            // so it redraws the last cell of an earlier row and then walks down with
+            // bare LFs: the one tail shape that contains a line break.
+            ("cursor past the last column of an empty row", {
+                let mut p = overflow_filled();
+                p.process(b"\n");
+                p
+            }),
+        ];
+        for (name, mut p) in states {
+            let rows_only =
+                String::from_utf8_lossy(&render_full_scrollback(p.screen_mut()).expect("rows")).into_owned();
+            let legacy = legacy_blob(&mut p);
+            assert!(
+                legacy.len() > rows_only.len() && legacy.starts_with(&rows_only),
+                "{name}: fixture must carry a tail"
+            );
+            assert_eq!(
+                super::strip_cursor_state_tail(&legacy),
+                rows_only,
+                "{name}: stripped blob must equal the rows alone"
+            );
+            assert_eq!(
+                super::strip_cursor_state_tail(&rows_only),
+                rows_only,
+                "{name}: a rows-only blob must be untouched"
+            );
+        }
+    }
+
+    /// The LF-bearing tail must really be in the set above, or the case that broke a
+    /// "no line break after the marker" guard is not being exercised.
+    #[test]
+    fn the_empty_row_overflow_tail_really_contains_a_line_feed() {
+        let mut p = vt100::Parser::new(24, 80, 5000);
+        p.process(b"\x1b[13;1Hstatus-line\x1b[11;1H");
+        p.process("x".repeat(80).as_bytes());
+        p.process(b"\n");
+        let legacy = legacy_blob(&mut p);
+        let tail = &legacy[legacy.rfind("\x1b[?25").expect("marker")..];
+        assert!(tail.contains('\n') && !tail.contains('\r'), "premise for the stripper's guard: {tail:?}");
+    }
+
+    #[test]
+    fn strip_cursor_tail_leaves_non_tails_alone() {
+        let rows = "row one\x1b[0m\r\nrow two\x1b[0m\r\n";
+        // No marker at all.
+        assert_eq!(super::strip_cursor_state_tail(rows), rows);
+        // A carriage return after the marker means rows follow it: not a tail.
+        let mid = "a\x1b[?25l\x1b[1;1Hb\r\nc";
+        assert_eq!(super::strip_cursor_state_tail(mid), mid);
+        assert_eq!(super::strip_cursor_state_tail(""), "");
+        // Only the LAST marker starts the tail.
+        let two = format!("{rows}\x1b[?25l\x1b[1;1H{rows}\x1b[?25h\x1b[2;2H\x1b[m");
+        assert_eq!(super::strip_cursor_state_tail(&two), format!("{rows}\x1b[?25l\x1b[1;1H{rows}"));
     }
 }

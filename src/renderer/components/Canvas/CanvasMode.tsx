@@ -1,5 +1,7 @@
+import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
+import { capturePaneEffect } from '../../services/paneEffect';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch, useSelector, useStore } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
 import { runningActivityTracker } from '../../services/RunningActivityTracker';
 import { terminalService } from '../../services/TerminalService';
@@ -8,7 +10,7 @@ import { RootState } from '../../store';
 import {
   CanvasEdge, addEdge, focusNode, panViewport, removeEdge, selectEdge, selectNode, setEdges,
   setNearestGroup, setNodeGeom, setOverlayNode, setSidebarOpen, setNodeHidden, setRevealHidden,
-  setDynamicSpacing,
+  setDynamicSpacing, setMainOnly,
 } from '../../store/slices/canvasSlice';
 import { addTabTree, focusPaneInTab } from '../../store/slices/panesSlice';
 import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
@@ -25,7 +27,9 @@ import {
   paintedNodeRect, screenToWorld, Viewport, NODE_W, NODE_H, HEAD_H, Z_MIN,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
-import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
+import { measureHostBox, measureSshSurfaceBox, clearHostBoxes } from './canvasHostBoxes';
+import { sshBrowserAllocation, type SshSurfaceBox } from './canvasSshGeometry';
+import { SshCanvasPresentation } from '../Ssh/SshTerminalComposition';
 import { DragTarget, useCanvasDrag } from './useCanvasDrag';
 import { useArrange } from './useArrange';
 import { PortClick, useWireDrag } from './useWireDrag';
@@ -35,7 +39,8 @@ import { CanvasNodeMenu } from './CanvasNodeMenu';
 import { CanvasGroupMenu } from './CanvasGroupMenu';
 import { CanvasProfileMenu } from './CanvasProfileMenu';
 import { closeEventFor, closeEndedRequests, decideCanvasClose } from './canvasClose';
-import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
+import { planCanvasSpawn, spawnRectAt, spawnRectNear, type CanvasSpawn } from './canvasSpawn';
+import { launchSshConnection } from '../../services/sshLaunch';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
@@ -49,13 +54,13 @@ import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
 import { CanvasBeacons } from './CanvasBeacons';
 import { beaconLayout, nearestGroupToCentre, stepNodeId } from './orientation';
-import { CanvasCombos, CanvasKey, canvasKeyAction, terminalKeyAction } from './canvasGestures';
+import { CanvasCombos, CanvasKey, canvasKeyAction, sshOwnsKeyboard, terminalKeyAction } from './canvasGestures';
 import { effectiveCombo } from '../../services/shortcutActions';
 import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
-  CanvasNodeModel,
-  selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
+  CanvasNodeModel, isNodePainted,
+  selectCanvasModel, sshTagsByTerminal, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
 import { createEdge, deleteEdge, fetchGraph, putNodes } from '../../services/canvasGraph';
@@ -157,6 +162,7 @@ export const CanvasMode: React.FC = () => {
   const edges = useSelector((s: RootState) => s.canvas.edges);
   const nearestGroupId = useSelector((s: RootState) => s.canvas.nearestGroupId);
   const revealHidden = useSelector((s: RootState) => s.canvas.revealHidden);
+  const mainOnly = useSelector((s: RootState) => s.canvas.mainOnly);
   // This predicate runs in several per-node loops during every pan frame; keep its membership
   // lookup constant-time instead of repeatedly scanning the model.
   const hiddenNodeIds = useMemo(
@@ -164,14 +170,23 @@ export const CanvasMode: React.FC = () => {
     [model.nodes],
   );
   const paintedNodes = useMemo(
-    () => revealHidden ? model.nodes : model.nodes.filter((n) => !n.hidden),
+    () => model.nodes.filter((n) => isNodePainted(n, revealHidden)),
     [model.nodes, revealHidden],
   );
+  // Every node that does NOT paint — user-hidden without Reveal, or filtered out by Main only
+  // (plan 048). Its own set, not `hiddenNodeIds`: that one feeds the render policy, which keeps
+  // treating a user-hidden node as hidden even while it is revealed.
+  const unpaintedNodeIds = useMemo(() => {
+    const painted = new Set(paintedNodes.map((n) => n.terminalId));
+    return new Set(model.nodes.filter((n) => !painted.has(n.terminalId)).map((n) => n.terminalId));
+  }, [model.nodes, paintedNodes]);
   // Presentation/targeting share this one eligibility list; the model stays complete for
   // membership, panes and hosts, while invisible frames cannot become phantom destinations.
+  // An emptied tab (no nodes) stays a drop target; any other group shows while one of its nodes
+  // paints — which is exactly `revealHidden || !allHidden` when Main only is off.
   const shownGroups = useMemo(
-    () => model.groups.filter((g) => revealHidden || !g.allHidden),
-    [model.groups, revealHidden],
+    () => model.groups.filter((g) => g.nodeIds.length === 0 || g.nodeIds.some((id) => !unpaintedNodeIds.has(id))),
+    [model.groups, unpaintedNodeIds],
   );
   const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
   const flyTo = useFlyTo();
@@ -344,6 +359,9 @@ export const CanvasMode: React.FC = () => {
    * would have a fourth, meaningless combination, and the day both were set the menu would
    * open twice.
    */
+  const canvasRoot = useRef<HTMLDivElement>(null);
+  const portInvoker = useRef<HTMLElement | null>(null);
+  const canvasStore = useStore<RootState>();
   const [spawnMenu, setSpawnMenu] = useState<
     { x: number; y: number; at: { x: number; y: number }; fromId?: undefined }
     | { x: number; y: number; at?: undefined; fromId: string }
@@ -522,12 +540,12 @@ export const CanvasMode: React.FC = () => {
     [collapsed, spacedShownGroups, vp.z],
   );
 
-  /** USER-hidden alone — deliberately not `isHidden`, which is also true for a merely culled
-   *  or tier-demoted node. See `CanvasWiresProps.rects`: a wire to an off-screen node must
-   *  still draw, or connections blink in and out as the canvas pans. */
+  /** USER-hidden or Main-only-filtered — deliberately not `isHidden`, which is also true for a
+   *  merely culled or tier-demoted node. See `CanvasWiresProps.rects`: a wire to an off-screen
+   *  node must still draw, or connections blink in and out as the canvas pans. */
   const userHidden = useCallback(
-    (id: string) => hiddenNodeIds.has(id) && !revealHidden,
-    [hiddenNodeIds, revealHidden],
+    (id: string) => unpaintedNodeIds.has(id),
+    [unpaintedNodeIds],
   );
   // `tiers` is intentionally only the reveal-aware promotion budget. Policy reconciliation,
   // however, owns every mounted terminal, including re-hidden ones that must be explicitly
@@ -598,6 +616,22 @@ export const CanvasMode: React.FC = () => {
     return out;
   }, [model.nodes, metrics]);
 
+  // SSH leaves only (plan 070 §4.1 A/D): each terminal's canonical tag, by terminalId, by
+  // reference — an untouched leaf keeps its tag object, so pan/zoom never churns `NodeTerminal`.
+  const sshTags = useMemo(() => sshTagsByTerminal(treesByTabId), [treesByTabId]);
+
+  // ...and the SSH envelope, captured in the SAME render as `hostBoxes` and for the same reason:
+  // before `NodeTerminal` registers the host `term.element` is about to move into (plan 070
+  // §4.1 B). Cached per terminal, so a later tag change reads the frozen descriptor back.
+  const sshBoxes = useMemo(() => {
+    const out: Record<string, SshSurfaceBox> = {};
+    for (const n of model.nodes) {
+      const tag = sshTags[n.terminalId];
+      if (tag) out[n.terminalId] = measureSshSurfaceBox(n.terminalId, hostBoxes[n.terminalId], tag.browserCollapsed);
+    }
+    return out;
+  }, [model.nodes, sshTags, hostBoxes]);
+
   // Frozen boxes outlive their session otherwise, and the next one may open on a different
   // window size, split layout or font.
   useEffect(() => () => clearHostBoxes(), []);
@@ -611,12 +645,13 @@ export const CanvasMode: React.FC = () => {
   // "not smaller than an ordinary node" floor inside `overlayGeometry` stays meaningful.
   const overlay = useMemo(() => {
     if (!overlayId) return null;
-    const b = hostBoxes[overlayId];
+    // An SSH node's overlay is sized from its whole envelope, so browser and status come too.
+    const b = sshBoxes[overlayId]?.envelope ?? hostBoxes[overlayId];
     if (!b) return null;
     return overlayGeometry(vp, size.w, size.h, {
       hostW: b.w, hostH: b.h, surfaceScale: NODE_W / b.w,
     });
-  }, [overlayId, vp, size, hostBoxes]);
+  }, [overlayId, vp, size, hostBoxes, sshBoxes]);
 
   useCanvasRenderPolicy(policyTiers, focusedId, recent, hiddenNodeIds);
 
@@ -630,6 +665,9 @@ export const CanvasMode: React.FC = () => {
     // A port press that never moved: offer the profile list, and remember which node the new
     // terminal is being wired to. `useWireDrag` has already decided this was a click rather
     // than a drag — see `exceedsDragSlop`.
+    const sourceNode = Array.from(canvasRoot.current?.querySelectorAll<HTMLElement>('[data-terminal-id]') ?? [])
+      .find(node => node.dataset.terminalId === click.fromId);
+    portInvoker.current = sourceNode?.querySelector<HTMLElement>(`[data-port="${click.side}"]`) ?? null;
     setSpawnMenu({ x: click.x, y: click.y, fromId: click.fromId });
   }, []));
 
@@ -638,8 +676,9 @@ export const CanvasMode: React.FC = () => {
   // endpoint that returns the authoritative row, so there is nothing to poll for.
   useEffect(() => {
     let cancelled = false;
+    const workspace = captureWorkspace();
     void fetchGraph().then((graph) => {
-      if (!cancelled && graph) dispatch(setEdges(graph.edges));
+      if (!cancelled && isCurrentWorkspace(workspace) && graph) dispatch(setEdges(graph.edges));
     });
     return () => { cancelled = true; };
   }, [dispatch]);
@@ -651,9 +690,10 @@ export const CanvasMode: React.FC = () => {
   const publishTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (publishTimer.current) clearTimeout(publishTimer.current);
+    const workspace = captureWorkspace();
     publishTimer.current = setTimeout(() => {
       publishTimer.current = null;
-      void putNodes(nodeRegistryPayload(model));
+      if (isCurrentWorkspace(workspace)) void putNodes(nodeRegistryPayload(model));
     }, PUBLISH_DEBOUNCE_MS);
     return () => {
       if (publishTimer.current) clearTimeout(publishTimer.current);
@@ -709,8 +749,9 @@ export const CanvasMode: React.FC = () => {
    * on the next restart, with nothing on screen to explain where it came from.
    */
   const dropEdge = useCallback((id: string) => {
+    const workspace = captureWorkspace();
     void deleteEdge(id).then((ok) => {
-      if (ok) dispatch(removeEdge(id));
+      if (ok && isCurrentWorkspace(workspace)) dispatch(removeEdge(id));
     });
   }, [dispatch]);
 
@@ -946,6 +987,10 @@ export const CanvasMode: React.FC = () => {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (focusedId) return;
+      if ((e.target as HTMLElement | null)?.closest?.('.ssh-picker')) return;
+      // Plan 070 T4: the SSH path box, rows, prompts, menus and dialogs own their keys. One shared
+      // guard (`canvasGestures.sshOwnsKeyboard`) rather than a veto per shortcut.
+      if (sshOwnsKeyboard(e.target)) return;
       const action = canvasKeyAction(
         e as unknown as CanvasKey,
         { node: !!selectedId, edge: !!selectedEdgeId },
@@ -1013,22 +1058,31 @@ export const CanvasMode: React.FC = () => {
   const flyToNode = useCallback((terminalId: string) => {
     const n = model.nodes.find((x) => x.terminalId === terminalId);
     if (!n) return;
-    // The sidebar is the recovery path for a hidden terminal. Build precisely the model the
-    // unhide dispatch creates, rather than targeting against the pre-unhide shown set.
-    const postUnhideNodes = n.hidden && !revealHidden ? [...paintedNodes, n] : paintedNodes;
-    const postUnhideSpacingModel = n.hidden && !revealHidden
-      ? {
-        nodes: postUnhideNodes,
-        groups: model.groups
-          .filter((g) => !g.allHidden || g.tabId === n.tabId)
-          .map((g) => g.tabId !== n.tabId ? g : {
-            ...g,
-            // `drawnFrame` is fitted from the nodes now shown, not the old all-hidden frame.
-            rect: fitGroupFrame(postUnhideNodes.filter((x) => x.tabId === g.tabId).map((x) => x.rect)) ?? g.rect,
-            allHidden: false,
-          }),
-      }
-      : spacingModel;
+    // The sidebar is the recovery path for a hidden terminal — and for one filtered out by Main
+    // only, which it recovers by switching the filter OFF (plan 048 §8), so every API node comes
+    // back with it. Build precisely the model those dispatches create, rather than targeting
+    // against the pre-recovery shown set.
+    const liftsFilter = !!n.filtered;
+    const postPainted = (x: CanvasNodeModel) => x.terminalId === terminalId
+      || (liftsFilter ? (revealHidden || !x.hidden) : isNodePainted(x, revealHidden));
+    const postUnhideSpacingModel = isNodePainted(n, revealHidden)
+      ? spacingModel
+      : (() => {
+        const nodes = model.nodes.filter(postPainted);
+        const ids = new Set(nodes.map((x) => x.terminalId));
+        return {
+          nodes,
+          groups: model.groups
+            .filter((g) => g.nodeIds.length === 0 || g.nodeIds.some((id) => ids.has(id)))
+            .map((g) => g.nodeIds.length === 0 ? g : {
+              ...g,
+              // `drawnFrame` is fitted from the nodes now shown, not the old frame.
+              rect: fitGroupFrame(nodes.filter((x) => x.tabId === g.tabId).map((x) => x.rect)) ?? g.rect,
+              allHidden: g.tabId === n.tabId ? false : g.allHidden,
+            }),
+        };
+      })();
+    if (liftsFilter) dispatch(setMainOnly({ enabled: false }));
     if (n.hidden) dispatch(setNodeHidden({ id: terminalId, hidden: false }));
     dispatch(selectNode(terminalId));
     // The DESTINATION zoom, in both places: the drawn height is a function of the zoom the
@@ -1038,7 +1092,7 @@ export const CanvasMode: React.FC = () => {
       aimedNodeRect(targetRectAt(z, 'node', terminalId, n.rect, postUnhideSpacingModel), z),
       size.w, size.h, z, metrics.zMax,
     ));
-  }, [model.nodes, model.groups, paintedNodes, revealHidden, spacingModel, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
+  }, [model.nodes, model.groups, revealHidden, spacingModel, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
 
   /** The minimap projects DISPLAY geometry, so its picked world point is already a main-canvas
    * display-space destination. */
@@ -1068,7 +1122,7 @@ export const CanvasMode: React.FC = () => {
    * without re-reading live state between dispatches.
    */
   const closeAllEnded = useCallback(() => {
-    const ended = model.nodes.filter((n) => n.exited && (revealHidden || !n.hidden));
+    const ended = model.nodes.filter((n) => n.exited && isNodePainted(n, revealHidden));
     const panesInTab = (tabId: string) => getAllLeafIds(treesByTabId[tabId] ?? null).length;
     closeEndedRequests(ended, panesInTab, isTerminalAlive).forEach((req) => {
       const { type, detail } = closeEventFor(req);
@@ -1094,24 +1148,50 @@ export const CanvasMode: React.FC = () => {
    * has been built, and ships the tree that carries it (installed with `addTabTree` below, so
    * `planSeeds` does not manufacture a second root under a leaf we never saw).
    */
-  const spawn = useCallback((profile: ShellProfileLike) => {
-    const menu = spawnMenu;
+  const spawn = useCallback((profile: ShellProfileLike | null, ssh?: {
+    id: string; menu: NonNullable<typeof spawnMenu>; current: () => boolean;
+  }) => {
+    const menu = ssh?.menu ?? spawnMenu;
     if (!menu) return;
+    if (ssh && (!mounted.current || !ssh.current())) return 'The Canvas spawn location is no longer available.';
+    const spawnModel = ssh ? selectCanvasModel(canvasStore.getState()) : model;
     const source = menu.fromId
-      ? model.nodes.find((n) => n.terminalId === menu.fromId)
+      ? spawnModel.nodes.find((n) => n.terminalId === menu.fromId)
       : undefined;
+    if (ssh && menu.fromId && !source) return 'The source terminal is no longer on Canvas.';
     // A port click on a node that vanished between press and release — its tab closed, its
     // pane was re-homed — has nowhere to fan from and nothing to connect to. Dropping the
     // spawn is right: half of what was asked for is a terminal wired to nothing.
     if (menu.fromId && !source) return;
 
+    // `model` is deliberately the RAW (un-spaced) model: a spawn must avoid the terminals' true
+    // stored positions. For an SSH launch the render-time closure may be stale, so it is re-read.
+    const placeNear = (m: typeof model, fanned: number) => spawnRectNear(
+      source!.rect, m.nodes.map((n) => n.rect), fanned);
     const rect = source
-      ? spawnRectNear(source.rect, model.nodes.map((n) => n.rect),
-          edges.filter((e) => e.from === source.terminalId).length)
+      ? (ssh
+        ? placeNear(spawnModel, canvasStore.getState().canvas.edges.filter(e => e.from === source.terminalId).length)
+        : spawnRectNear(source.rect, model.nodes.map((n) => n.rect),
+          edges.filter((e) => e.from === source.terminalId).length))
       : spawnRectAt(menu.at!);
 
-    const plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
-    // The selector has not re-rendered the three insert dispatches below yet. Camera targeting
+    let plan: CanvasSpawn;
+    if (ssh) {
+      const result = launchSshConnection(ssh.id, { kind: 'canvas', rect, sourceTerminalId: source?.terminalId });
+      if (!result.ok) return result.error.message;
+      const state = canvasStore.getState();
+      const tab = state.tabs.tabs.find(t => t.id === result.tabId);
+      const tree = state.panes.treesByTabId[result.tabId];
+      if (!tab || !tree) return 'The new SSH terminal could not be placed on Canvas.';
+      plan = { tab: { ...tab, isActive: false }, leafId: result.terminalId, rect, tree };
+    } else {
+      if (!profile) return;
+      plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
+      dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
+      dispatch(addTab(plan.tab));
+      dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));
+    }
+    // The selector has not re-rendered after the insert dispatches yet. Camera targeting
     // therefore builds that post-insert shown model explicitly; placement above remains RAW.
     const spawnedNode: CanvasNodeModel = {
       terminalId: plan.leafId, tabId: plan.tab.id, paneId: plan.tree.id,
@@ -1129,10 +1209,6 @@ export const CanvasMode: React.FC = () => {
         },
       ],
     };
-    dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
-    dispatch(addTab(plan.tab));
-    dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));
-
     // Select it, and bring it into view if it is not already framed — Tam's requested flow is
     // click port → create → connect → LOOK AT IT → type. A port spawn fans a full node-width
     // away from its parent, so at any working zoom it lands off screen about as often as not.
@@ -1164,6 +1240,9 @@ export const CanvasMode: React.FC = () => {
     // NOT a bare `createEdge`: the endpoint 404s on a terminal it has not registered, and this
     // one is several async hops from existing. See `canvasConnect`.
     if (source) {
+      const sourceCurrent = capturePaneEffect(source.terminalId);
+      const destinationCurrent = capturePaneEffect(plan.leafId);
+      const current = () => mounted.current && sourceCurrent() && destinationCurrent();
       void connectWhenReady(
         {
           isReady: isTerminalAlive,
@@ -1173,15 +1252,29 @@ export const CanvasMode: React.FC = () => {
           // Stop polling if the canvas is unmounted while we wait. Without this the loop
           // ran its full ten seconds against a screen nobody is looking at and then wired
           // the pair anyway.
-          abandoned: () => !mounted.current,
+          abandoned: () => !current(),
         },
         source.terminalId,
         plan.leafId,
       ).then((edge) => {
-        if (edge) dispatch(addEdge(edge));
+        if (edge && current()) dispatch(addEdge(edge));
       });
     }
-  }, [spawnMenu, model.nodes, edges, tabs, paintedNodes, shownGroups, dispatch, vp, size, flyTo, metrics, targetRectAt]);
+    return undefined;
+  }, [spawnMenu, model, edges, tabs, paintedNodes, shownGroups, dispatch, vp, size, flyTo, metrics, targetRectAt, canvasStore]);
+
+  // The popup retains the gesture, not the camera/model snapshot. Use the latest spawn handler.
+  const spawnCurrent = useRef(spawn);
+  spawnCurrent.current = spawn;
+  const captureSsh = () => {
+    const menu = spawnMenu!;
+    const workspace = captureWorkspace();
+    const current = menu.fromId ? capturePaneEffect(menu.fromId) : () => isCurrentWorkspace(workspace);
+    return {
+      invoker: (menu.fromId && portInvoker.current) || canvasRoot.current,
+      launch: (id: string) => spawnCurrent.current(null, { id, menu, current }) ?? null,
+    };
+  };
 
   /**
    * Keys that get you OUT of a terminal — the mirror of the listener above, and gated on the
@@ -1205,6 +1298,9 @@ export const CanvasMode: React.FC = () => {
   useEffect(() => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement | null)?.closest?.('.ssh-picker')) return;
+      // Same guard as the canvas keys: Esc in an SSH dialog closes the dialog, not the focus.
+      if (sshOwnsKeyboard(e.target)) return;
       const action = terminalKeyAction(e as unknown as CanvasKey, !!overlayIdRef.current, combos);
       // Completely untouched — no preventDefault, no stopPropagation — so it reaches the PTY.
       // This is the arm a bare `T` lands on, which is Tam's requirement from the inside: while a
@@ -1241,14 +1337,21 @@ export const CanvasMode: React.FC = () => {
 
   // For the toolbar's Close Ended button — how many nodes it would close, and whether there is
   // anything for it to do.
-  const endedCount = model.nodes.filter((n) => n.exited && (revealHidden || !n.hidden)).length;
+  const endedCount = model.nodes.filter((n) => n.exited && isNodePainted(n, revealHidden)).length;
   const hiddenCount = model.nodes.filter((n) => n.hidden).length;
+  // Every API/MCP-created node, whether or not the filter is on — the count the Main only
+  // button offers to hide (plan 048).
+  const apiNodeIds = model.nodes.filter((n) => n.apiCreated).map((n) => n.terminalId);
+  const apiCount = apiNodeIds.length;
 
   return (
     <CanvasMetricsContext.Provider value={metrics}>
     <div
       className={`canvas-mode${wire.linking ? ' linking' : ''}`}
       data-testid="canvas-mode"
+      ref={canvasRoot}
+      aria-label="Canvas workspace"
+      tabIndex={-1}
       style={geometryVars(metrics, vp.z)}
       // Capture, so a press on a port becomes a link drag before the node's own pointerdown
       // selects it or the viewport starts a pan.
@@ -1387,6 +1490,7 @@ export const CanvasMode: React.FC = () => {
               nodeHidden={n.hidden}
               overlaid={isOverlaid}
               hostBox={hostBoxes[n.terminalId]}
+              sshEnvelope={sshBoxes[n.terminalId]?.envelope}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               // The ORIGINAL rect, never the overlay's or display rect: a drag writes RAW
               // geometry and `useCanvasDrag` starts its raw render phase only after slop.
@@ -1416,10 +1520,20 @@ export const CanvasMode: React.FC = () => {
               <NodeTerminal terminalId={n.terminalId} focused={focusedId === n.terminalId}
                 overlaid={isOverlaid}
                 exitInfo={sessionExitByTerminalId[n.terminalId] ?? null}
-                fontSize={terminalFontSize} />
+                fontSize={terminalFontSize}
+                // SSH leaves only: the shared shell around the same single host, the frozen
+                // browser allocation for the tag's collapse state, and a terminal-slot snapshot.
+                sshTag={sshTags[n.terminalId]}
+                sshBrowserWidth={sshTags[n.terminalId] && sshBoxes[n.terminalId]
+                  ? sshBrowserAllocation(sshBoxes[n.terminalId], sshTags[n.terminalId].browserCollapsed) : undefined}
+                // Same culling rule as `hidden` above: a culled SSH node is not a visible surface.
+                sshVisible={isOverlaid || !isHidden(n.terminalId)}
+                SshShell={sshTags[n.terminalId] ? SshCanvasPresentation : undefined}
+                Snapshot={sshTags[n.terminalId] && snapshotIds.has(n.terminalId) ? NodeSnapshot : undefined} />
               {/* The exact opposite rule, and for the exact opposite reason: this one is
-                  culled hard, because what it owns is a timer rather than a terminal. */}
-              {snapshotIds.has(n.terminalId) && <NodeSnapshot terminalId={n.terminalId} />}
+                  culled hard, because what it owns is a timer rather than a terminal. An SSH
+                  node draws it inside its terminal slot instead (above), never over the browser. */}
+              {!sshTags[n.terminalId] && snapshotIds.has(n.terminalId) && <NodeSnapshot terminalId={n.terminalId} />}
             </CanvasNode>
           );
         })}
@@ -1432,7 +1546,7 @@ export const CanvasMode: React.FC = () => {
           Hidden while a node is overlaid. The overlay's backdrop lives in world space, so a
           button here paints over it — and it would then be the one spot on screen where a click
           does not dismiss the overlay, acting on a layout the user cannot see. */}
-      {!overlayId && (model.groups.length > 0 || hiddenCount > 0) && (
+      {!overlayId && (model.groups.length > 0 || hiddenCount > 0 || apiCount > 0) && (
         <div className="canvas-toolbar">
           {/* `sidebarOpen` is in `canvasSlice` and persisted by Task 22; without a control it
               would be a stored field permanently stuck at its initial value. */}
@@ -1468,6 +1582,20 @@ export const CanvasMode: React.FC = () => {
             disabled={hiddenCount === 0} onClick={() => dispatch(setRevealHidden(!revealHidden))}
             title={hiddenCount > 0 ? `${revealHidden ? 'Re-hide' : 'Reveal'} ${hiddenCount} hidden terminal${hiddenCount === 1 ? '' : 's'}` : 'No hidden terminals'}>
             Hidden{hiddenCount > 0 ? ` (${hiddenCount})` : ''}
+          </button>
+          {/* plan 048. Disabled rather than hidden at zero, like Hidden and Close Ended. Stays
+              enabled while ON even if the last API terminal closes, so it can always be undone. */}
+          <button
+            type="button"
+            className="canvas-tbtn"
+            aria-pressed={mainOnly}
+            disabled={apiCount === 0 && !mainOnly}
+            onClick={() => dispatch(setMainOnly({ enabled: !mainOnly, apiTerminalIds: apiNodeIds }))}
+            title={apiCount > 0
+              ? `${mainOnly ? 'Show' : 'Hide'} ${apiCount} terminal${apiCount === 1 ? '' : 's'} opened by the API or MCP`
+              : 'No terminals opened by the API or MCP'}
+          >
+            Main only{apiCount > 0 ? ` (${apiCount})` : ''}
           </button>
           {/* Tam, 2026-08-24: a way to clear the "ended" tint in one press rather than closing
               each dead node by hand. Disabled rather than hidden at zero, matching the zoom
@@ -1584,6 +1712,7 @@ export const CanvasMode: React.FC = () => {
           // it to the node whose port you clicked.
           header={spawnMenu.fromId ? 'Connect a new terminal' : 'New terminal here'}
           onPick={spawn}
+          captureSsh={captureSsh}
           onClose={() => setSpawnMenu(null)}
         />
       )}

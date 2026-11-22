@@ -1202,6 +1202,10 @@
     border-color: #6e2b28;
 }
 
+.au-editor .au-finput-masked {
+    -webkit-text-security: disc;
+}
+
 .au-editor .au-finput-message {
     resize: vertical;
     min-height: 62px;
@@ -2191,4 +2195,19 @@
  */
 .pane-context-menu.au-nodemenu {
     z-index: 9996;
+}
+
+/* Message textarea with the hidden-message Reveal button beside it. */
+.au-editor .au-frow-message {
+    align-items: flex-start;
+}
+
+.au-editor .au-frow-message .au-finput-message {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.au-editor .au-checkrow.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }

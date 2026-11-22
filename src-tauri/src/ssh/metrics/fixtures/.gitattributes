@@ -1,0 +1,2 @@
+# Captures are byte-exact protocol data: never convert line endings.
+*.txt -text

@@ -7,6 +7,7 @@
  * isolation (see __tests__/apiCreatedTab.test.ts).
  */
 
+import { paneIncarnations } from './paneIncarnations';
 import { markProvisionalRecovery } from './provisionalRecovery';
 
 export interface ApiCreatedTabOptions {
@@ -33,6 +34,7 @@ export interface ApiCreatedTabFields {
   icon: string;
   titleIsCustom?: true;
   titleColor?: string;
+  elevated?: true;
 }
 
 /**
@@ -171,6 +173,14 @@ export interface ApiCreateMode0Deps {
   titleColorForTerminal: (terminalId?: string) => string | undefined;
 }
 
+/** The renderer-only Mode 3 fallback: a fresh local leaf, not the caller's pane. */
+export function buildApiFallbackPane(paneId: string, tabId: string, name: string | undefined, shellType: string) {
+  return {
+    id: paneId, type: 'terminal' as const, terminalId: tabId,
+    name: name || 'API Terminal', shellType, apiCreated: true as const,
+  };
+}
+
 export interface ApiCreateMode0Result {
   targetTabId: string;
   /** The leaf the pane tree's root node ends up carrying — always a `tm-*`,
@@ -183,6 +193,8 @@ export interface ApiCreateMode0Result {
     name?: string;
     shellType?: string;
     sessionKey?: string;
+    elevated?: true;
+    apiCreated?: true;
   };
 }
 
@@ -210,6 +222,7 @@ export function runApiCreateMode0(
     tabId?: string;
     /** A pending pty-host session to adopt rather than a process already registered here. */
     sessionKey?: string;
+    elevated?: boolean;
     /**
      * The terminal whose agent asked for this spawn (`getCallerId()` in the MCP
      * sidecar, resolved to a renderer leaf by the backend). Absent when the tool
@@ -242,7 +255,9 @@ export function runApiCreateMode0(
   // elsewhere should not change which group a terminal reads as.
   const titleColor = deps.titleColorForTerminal(detail.parentTerminalId) || detail.parentTitleColor || undefined;
 
+  const elevatedRecovery = !!detail.sessionKey && detail.elevated === true;
   const newTab = buildApiCreatedTab({ targetTabId, name, profile, defaultProfile: deps.defaultProfile, titleColor });
+  if (elevatedRecovery) newTab.elevated = true;
 
   const paneTree: ApiCreateMode0Result['paneTree'] = {
     id: deps.generateId('pn'),
@@ -252,6 +267,13 @@ export function runApiCreateMode0(
     shellType: profile || deps.defaultProfile || 'default',
     sessionKey: detail.sessionKey,
   };
+  if (elevatedRecovery) paneTree.elevated = true;
+  // Prepare before the tab is renderable, including exact-key recovery panes.
+  if (leafId) paneIncarnations.prepare([{ paneId: paneTree.id, leaf: leafId, restore: !!detail.sessionKey, override: detail.sessionKey }]);
+
+  // plan 048 — an API/MCP spawn, unless this is `surface_host_orphans` adopting a session whose
+  // tab was lost: that is RECOVERY of a terminal of unknown origin, which reads as main.
+  if (!detail.sessionKey) paneTree.apiCreated = true;
 
   // Only surface_host_orphans produces this event shape. Persisted/migrated
   // panes may also carry sessionKey, so record the event provenance separately.
@@ -265,7 +287,7 @@ export function runApiCreateMode0(
   // in the same synchronous turn, so no render sees the tab without a tree.
   deps.tabPanes[targetTabId] = paneTree;
 
-  const shouldActivate = deps.activateOnApiCreate || deps.tabCount === 0;
+  const shouldActivate = (!elevatedRecovery && deps.activateOnApiCreate) || deps.tabCount === 0;
   deps.dispatch(deps.addTab({ ...newTab, isActive: shouldActivate }));
   deps.dispatch(deps.addTabTree({ tabId: targetTabId, tree: paneTree }));
   if (shouldActivate) {

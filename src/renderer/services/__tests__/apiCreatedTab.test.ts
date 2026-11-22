@@ -1,9 +1,45 @@
+jest.mock('../TerminalService', () => ({ terminalService: { beginUserElevatedAttempt: jest.fn() } }));
+import { terminalService } from '../TerminalService';
 import { configureStore } from '@reduxjs/toolkit';
 import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
-import panesReducer, { addTabTree, setActiveTabId } from '../../store/slices/panesSlice';
+import panesReducer, { addTabTree, setActiveTabId, splitPaneInTab } from '../../store/slices/panesSlice';
 import { terminalTitleColor } from '../../store/titleColor';
+import { findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
 import type { RootState } from '../../store';
-import { buildApiCreatedTab, resolveApiCreateIds, runApiCreateMode0 } from '../apiCreatedTab';
+import { buildApiCreatedTab, buildApiFallbackPane, resolveApiCreateIds, runApiCreateMode0 } from '../apiCreatedTab';
+import { expectPaneTags, taggedTree, tags } from '../../__testFixtures__/sshPaneCensus';
+
+test.each(['backend/fleet', 'host orphan', 'specific split', 'auto-split', 'empty tab', 'fallback'] as const)(
+  'all_api_create_modes_and_mcp_commands_leave_new_leaf_local (%s)', mode => {
+    const store = configureStore({ reducer: { tabs: tabsReducer, panes: panesReducer } });
+    store.dispatch(addTabTree({ tabId: 'tb-parent', tree: taggedTree() }));
+    // Ordinary API commands, process metadata and titles cannot classify a saved SSH pane.
+    const name = 'ssh user@example.invalid';
+    let newId = 'tm-api';
+    if (mode === 'backend/fleet' || mode === 'host orphan') {
+      const detail = { rendererTerminalId: newId, processId: 'pc-api', parentTerminalId: 'tm-ssh', name, ssh: tags['tm-ssh'] };
+      runApiCreateMode0(mode === 'host orphan' ? { ...detail, sessionKey: 'tm-host-session' } : detail, {
+        dispatch: store.dispatch, generateId: () => 'tb-api', defaultProfile: 'default',
+        registerExistingTerminal: jest.fn(), tabPanes: {}, tabExists: () => false,
+        activateOnApiCreate: false, tabCount: 1, addTab, addTabTree, setActiveTab, setActiveTabId,
+        titleColorForTerminal: () => undefined,
+      });
+    } else if (mode === 'fallback') {
+      newId = 'tb-api'; // Mode 3 retains its original local ID convention.
+      store.dispatch(addTabTree({ tabId: 'tb-api', tree: buildApiFallbackPane('pn-api', newId, name, 'default') }));
+    } else {
+      const empty = mode === 'empty tab';
+      if (empty) store.dispatch(addTabTree({ tabId: 'tb-api', tree: null }));
+      store.dispatch(splitPaneInTab({
+        tabId: empty ? 'tb-api' : 'tb-parent',
+        paneId: mode === 'specific split' ? 'pn-ssh' : mode === 'auto-split' ? 'pn-other' : undefined,
+        direction: mode === 'auto-split' ? 'horizontal' : 'vertical', terminalId: newId,
+        name, shellType: 'default', apiCreated: true,
+      }));
+    }
+    expectPaneTags(Object.values(store.getState().panes.treesByTabId), tags, ['tm-local', newId]);
+  },
+);
 
 describe('buildApiCreatedTab', () => {
   it('pins the title (titleIsCustom: true) when the caller supplies a name', () => {
@@ -136,6 +172,59 @@ describe('runApiCreateMode0 — an agent-spawned tab inherits its caller tab col
       },
     );
   }
+
+  it('preserves the original opaque session override on a recovered leaf through persistence', () => {
+    const store = makeStore();
+    const processId = 'pc-0123456789ab4cde8fab0123456789ab';
+    const sessionKey = 'tm-original~0123456789ab4cde8fab0123456789ac';
+    const detail = { processId, rendererTerminalId: 'tm-recovered', sessionKey };
+    expect(resolveApiCreateIds(detail)).toMatchObject({ processId, leafId: 'tm-recovered' });
+    const result = run(store, detail, () => undefined);
+    const restoredTrees = JSON.parse(JSON.stringify(store.getState().panes.treesByTabId));
+    expect(result.paneTree.terminalId).toBe('tm-recovered');
+    expect(result.paneTree.sessionKey).toBe(sessionKey);
+    expect(findSessionKeyByTerminalId(restoredTrees, 'tm-recovered')).toBe(sessionKey);
+  });
+
+  it.each([
+    ['admin recovery', { sessionKey: 'tm-old', elevated: true }, true, false],
+    ['untrusted API create', { elevated: true }, undefined, true],
+    ['primary recovery', { sessionKey: 'tm-old', elevated: false }, undefined, true],
+  ] as const)('%s preserves privilege and focus policy', (_label, detail, elevated, active) => {
+    const store = makeStore();
+    const registerExistingTerminal = jest.fn();
+    const beginUserElevatedAttempt = jest.spyOn(terminalService, 'beginUserElevatedAttempt');
+    const result = runApiCreateMode0({ processId: 'pc-new', rendererTerminalId: 'tm-new', ...detail }, {
+      dispatch: store.dispatch, generateId: (prefix: string) => `${prefix}-generated`,
+      defaultProfile: 'default', registerExistingTerminal, tabPanes: {}, tabExists: () => false,
+      activateOnApiCreate: true, tabCount: 2, addTab, addTabTree, setActiveTab, setActiveTabId,
+      titleColorForTerminal: () => undefined,
+    });
+    const tab = store.getState().tabs.tabs.find(t => t.id === result.targetTabId)!;
+    expect(tab.elevated).toBe(elevated);
+    expect(result.paneTree.elevated).toBe(elevated);
+    expect(tab.isActive).toBe(active);
+    expect(store.getState().panes.activeTabId === result.targetTabId).toBe(active);
+    expect(registerExistingTerminal).toHaveBeenCalledTimes('sessionKey' in detail ? 0 : 1);
+    expect(beginUserElevatedAttempt).not.toHaveBeenCalled();
+    beginUserElevatedAttempt.mockRestore();
+  });
+
+  it('activates an admin recovery tab when it is the first tab (nothing to steal focus from)', () => {
+    const store = makeStore();
+    const dispatch = jest.fn(store.dispatch);
+    const result = runApiCreateMode0({ processId: 'pc-new', rendererTerminalId: 'tm-new', sessionKey: 'tm-old', elevated: true }, {
+      dispatch, generateId: (prefix: string) => `${prefix}-generated`,
+      defaultProfile: 'default', registerExistingTerminal: jest.fn(), tabPanes: {}, tabExists: () => false,
+      activateOnApiCreate: false, tabCount: 0, addTab, addTabTree, setActiveTab, setActiveTabId,
+      titleColorForTerminal: () => undefined,
+    });
+    const id = result.targetTabId;
+    expect(store.getState().tabs.tabs.find(t => t.id === id)!.isActive).toBe(true);
+    expect(store.getState().panes.activeTabId).toBe(id);
+    expect(dispatch).toHaveBeenCalledWith(setActiveTab(id));
+    expect(dispatch).toHaveBeenCalledWith(setActiveTabId(id));
+  });
 
   const spawnedTab = (store: ReturnType<typeof makeStore>, id: string) =>
     store.getState().tabs.tabs.find((t) => t.id === id);

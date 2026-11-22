@@ -14,6 +14,7 @@ import type { Snippet } from '../../../store/slices/settingsSlice';
 import { addTab, setActiveTab } from '../../../store/slices/tabsSlice';
 import { addTabTree, resetPanes, setActiveTabId } from '../../../store/slices/panesSlice';
 import { TerminalDisplay } from '../TerminalDisplay';
+import { stopBroadcast } from '../../../store/slices/broadcastSlice';
 import { splitPaneById } from '../../../services/paneActions';
 import { setSurfaceChrome } from '../../../services/surfaceChrome';
 import { writeClipboardText } from '../../../utils/clipboard';
@@ -46,7 +47,7 @@ jest.mock('@termflow/terminal-core', () => {
     getLinkAt = jest.fn(() => null);
     getCursorPixelPosition = jest.fn(() => null);
   }
-  return { TerminalEngine: FakeTerminalEngine, pasteToTerminal: jest.fn(() => true) };
+  return { TerminalEngine: FakeTerminalEngine, pasteToTerminal: jest.fn(() => true), isBroadcastAvailable: () => true };
 });
 jest.mock('../ContextMenu.css', () => ({}));
 jest.mock('../TerminalDisplay.css', () => ({}));
@@ -81,7 +82,8 @@ jest.mock('../../../services/paneActions', () => ({
 jest.mock('../../../services/TerminalService', () => ({
   terminalService: {
     takePromptGateHandoff: jest.fn(), takeWin32InputModeHandoff: jest.fn(),
-    stashPromptGate: jest.fn(), markReattachedSession: jest.fn(),
+    takeKeyboardProtocolHandoff: jest.fn(),
+    stashPromptGate: jest.fn(), markReattachedSession: jest.fn(), stashKeyboardProtocol: jest.fn(),
     writeToTerminal: jest.fn(() => Promise.resolve()),
   },
 }));
@@ -91,7 +93,7 @@ jest.mock('../../../services/commandHistoryService', () => ({
 jest.mock('../../../services/cwdSnapshot', () => ({ getCwdSnapshot: jest.fn(() => undefined) }));
 jest.mock('../../../services/AgentSchemeTracker', () => ({
   agentSchemeTracker: {
-    getAgentForTerminal: jest.fn(() => undefined), getDetectedAgentForTerminal: jest.fn(() => undefined),
+    getAgentForTerminal: jest.fn(() => undefined), getDetectedAgentForTerminal: jest.fn(() => undefined), isSshForeground: jest.fn(() => false),
     subscribe: jest.fn(() => jest.fn()), refreshNow: jest.fn(() => Promise.resolve()),
   },
 }));
@@ -221,6 +223,27 @@ function setField(field: HTMLInputElement | HTMLTextAreaElement, value: string) 
 }
 
 describe('mounted TerminalDisplay plan 041 hosts', () => {
+  it('body broadcast menu shares the tab label, live enablement and stop hint', async () => {
+    await rightClickTerminal('term-b');
+    const row = () => [...document.querySelectorAll<HTMLButtonElement>('.context-menu-item')]
+      .find(button => /Focus all panes in this tab|Stop focusing all panes/.test(button.textContent ?? ''))!;
+    expect(row().textContent).toContain('Focus all panes in this tab');
+    expect(row().disabled).toBe(true);
+    await act(async () => {
+      store.dispatch(addTabTree({ tabId: 'shortcut-tab', tree: { id: 'split-b', type: 'split', direction: 'horizontal', children: [
+        { id: 'pane-b', type: 'terminal', terminalId: 'term-b' },
+        { id: 'pane-c', type: 'terminal', terminalId: 'term-c' },
+      ] } }));
+    });
+    await rightClickTerminal('term-b');
+    expect(row().disabled).toBe(false);
+    await act(async () => row().click());
+    expect(store.getState().broadcast).toEqual({ mode: 'tab', tabId: 'shortcut-tab' });
+    await rightClickTerminal('term-b');
+    expect(row().textContent).toContain('Stop focusing all panes');
+    expect(row().textContent).toContain('Ctrl+Shift+B');
+    await act(async () => store.dispatch(stopBroadcast()));
+  });
   it('renders one New Pane row for terminal B and maps all six activation surfaces', async () => {
     const expected = [
       ['vertical', 'after'], ['vertical', 'after'], ['vertical', 'after'],
@@ -322,12 +345,15 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
     await openSnippetActions('term-b');
     await act(async () => action('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(document.querySelector('.confirm-dialog')).not.toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('.confirm-dialog [data-dialog-cancel]')!.click());
     expect(store.getState().settings.snippets).toEqual(seedSnippets);
+    expect(document.querySelector('.confirm-dialog')).toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
 
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 's', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+        key: 'a', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
       }));
     });
     const standaloneRow = flyoutRows().find((candidate) => candidate.dataset.rowId === `snippet-${secondSnippet.id}`)!;
@@ -339,11 +365,15 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
 
     await openSnippetActions('term-b');
     await act(async () => action('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(document.querySelector('.confirm-dialog')).not.toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
     const confirmBefore = dispatchSpy.mock.calls.length;
     await act(async () => document.querySelector<HTMLButtonElement>('.confirm-dialog [data-dialog-confirm]')!.click());
     expect(dispatchSpy.mock.calls.length).toBeGreaterThan(confirmBefore);
     expect(dispatchSpy.mock.calls.some(([value]) => value.type === 'settings/removeSnippet' && value.payload === secondSnippet.id)).toBe(true);
     expect(store.getState().settings.snippets.map((snippet) => snippet.id)).toEqual([firstSnippet.id]);
     expect(store.getState().settings.snippets[0]).toEqual(firstSnippet);
+    expect(document.querySelector('.confirm-dialog')).toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
   });
 });

@@ -1,15 +1,8 @@
 import "dotenv/config";
 import express, { Request, Response } from "express";
 import cors from "cors";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-
-/** Constant-time string equality (guards the terminal-I/O auth surface). */
-function safeEqual(a: string, b: string): boolean {
-    const ab = Buffer.from(a);
-    const bb = Buffer.from(b);
-    return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "node:http";
@@ -17,14 +10,16 @@ import { createApiClient } from "./apiClient.js";
 import { createMcpServer } from "./server.js";
 import { readTerminalIdHeader } from "./identity.js";
 import { startSseHeartbeat } from "./heartbeat.js";
+import { startListening } from "./listen.js";
 import { closeHttpServer, isShutdownCommand, quiesce } from "./shutdown.js";
+import { createAuthGate, createDrainMiddleware, DrainState } from "./drain.js";
 
 // Configuration
 const MCP_PORT = parseInt(process.env.MCP_PORT || "42032", 10);
 const MCP_HOST = process.env.MCP_HOST || "127.0.0.1";
 const API_BASE = (process.env.AUTO_TERMINAL_API_URL || "http://localhost:42031").replace(/\/+$/, "") + "/api";
 // Single access token. Used both to authenticate incoming MCP requests (when set,
-// i.e. networked) and to authorize this server's calls to the backend API.
+// e.g. networked or elevated loopback) and to authorize this server's calls to the backend API.
 // AUTO_TERMINAL_TOKEN is preferred; AUTO_TERMINAL_API_TOKEN kept for back-compat.
 const ACCESS_TOKEN = process.env.AUTO_TERMINAL_TOKEN || process.env.AUTO_TERMINAL_API_TOKEN || "";
 const API_TOKEN = ACCESS_TOKEN || undefined;
@@ -51,25 +46,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Once shutdown starts, no new MCP session may be initialized. Existing
-// streams are closed by gracefulExit below; this is intentionally before the
-// auth gate so every incoming request gets a deterministic draining response.
-let acceptingSessions = true;
-app.use((_req: Request, res: Response, next) => {
-    if (acceptingSessions) return next();
-    res.status(503).json({ error: "MCP server is shutting down" });
-});
+// Once shutdown starts, `drain` answers every request: a `tools/call` gets a timed wait, the
+// rest a 503. It sits before the auth gate so every incoming request gets a deterministic
+// draining response; the drain branch checks the bearer itself.
+const drain = new DrainState();
+app.use(createDrainMiddleware({ drain, token: ACCESS_TOKEN, now: Date.now }));
 
-// Incoming-request auth gate. Enforced ONLY when ACCESS_TOKEN is set (networked
-// mode); in localhost mode it is empty and every request passes (back-compat).
-// Health stays open so the app's Settings page can always poll status.
-app.use((req: Request, res: Response, next) => {
-    if (!ACCESS_TOKEN) return next();
-    if (req.path === "/health") return next();
-    const auth = req.header("authorization") || "";
-    if (safeEqual(auth, `Bearer ${ACCESS_TOKEN}`)) return next();
-    res.status(401).json({ error: "unauthorized" });
-});
+// Incoming-request auth gate (enforced only when ACCESS_TOKEN is set; /health stays open).
+app.use(createAuthGate(ACCESS_TOKEN));
 
 // Session management - stores active transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -97,7 +81,7 @@ app.get("/health", (_req: Request, res: Response) => {
     const activeSessions = Object.keys(transports).length;
     res.json({
         status: "healthy",
-        server: "auto-terminal-mcp",
+        server: "termflow-mcp",
         version: "0.2.0",
         activeSessions,
         apiBackend: API_BASE,
@@ -247,7 +231,11 @@ app.delete("/mcp", async (req: Request, res: Response) => {
     }
 });
 
-// Captured at app.listen() so graceful shutdown can stop accepting connections.
+// Bind the port, retrying while a previous holder releases it. Every route into gracefulExit
+// cancels this first, so an attempt still in flight can never bind after shutdown began.
+const listening = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });
+
+// Assigned from `listening.ready` so graceful shutdown can stop accepting connections.
 let server: Server | undefined;
 
 /**
@@ -262,8 +250,9 @@ async function gracefulExit(code: number): Promise<void> {
     if (exiting) return;
     exiting = true;
     try {
+        listening.cancel();
         await quiesce(
-            () => { acceptingSessions = false; },
+            () => { drain.begin(Date.now()); },
             () => Promise.all(Object.values(transports).map((t) => t.close().catch(() => {}))).then(() => {}),
             () => closeHttpServer(server),
         );
@@ -331,12 +320,20 @@ process.stdin.on("data", (chunk: string) => {
 });
 process.stdin.resume();
 
-// Start the HTTP server
-server = app.listen(MCP_PORT, MCP_HOST, () => {
-    console.log(`[MCP] Auto-Terminal MCP Server started`);
-    console.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);
-    console.log(`[MCP] Health check: http://${MCP_HOST}:${MCP_PORT}/health`);
-    console.log(`[MCP] MCP endpoint: http://${MCP_HOST}:${MCP_PORT}/mcp`);
-    console.log(`[MCP] Auth: ${ACCESS_TOKEN ? "required (token)" : "open (localhost)"}`);
-    console.log(`[MCP] Backend API: ${API_BASE}`);
-});
+// Report the bind. A port that stays occupied past the retry limit is fatal: exit so the desktop
+// app respawns us, rather than idling as a sidecar that serves nothing.
+listening.ready.then(
+    (listener) => {
+        server = listener;
+        console.log(`[MCP] Auto-Terminal MCP Server started`);
+        console.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);
+        console.log(`[MCP] Health check: http://${MCP_HOST}:${MCP_PORT}/health`);
+        console.log(`[MCP] MCP endpoint: http://${MCP_HOST}:${MCP_PORT}/mcp`);
+        console.log(`[MCP] Auth: ${ACCESS_TOKEN ? "required (token)" : "open (localhost)"}`);
+        console.log(`[MCP] Backend API: ${API_BASE}`);
+    },
+    (err) => {
+        console.error(`[MCP] Could not listen on ${MCP_HOST}:${MCP_PORT}:`, err);
+        void gracefulExit(1);
+    },
+);

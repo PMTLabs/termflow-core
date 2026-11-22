@@ -7,6 +7,14 @@
  */
 import { spawnRectAt, spawnRectNear, planCanvasSpawn } from '../canvasSpawn';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
+import { expectPaneTags, taggedTree, tags } from '../../../__testFixtures__/sshPaneCensus';
+
+test('ordinary_canvas_profile_spawn_does_not_copy_a_tagged_source', () => {
+  const oldTree = taggedTree();
+  const plan = planCanvasSpawn({ id: 'default', name: 'Default' }, [], { x: 1, y: 2, w: NODE_W, h: NODE_H });
+  expect(plan.tree.terminalId).toMatch(/^tm-/);
+  expectPaneTags([oldTree, plan.tree], tags, ['tm-local', plan.tree.terminalId!]);
+});
 
 describe('spawnRectAt — "put a terminal here"', () => {
   /**

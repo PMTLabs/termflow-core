@@ -1,0 +1,30 @@
+.ssh-file-browser { padding:6px; font-size:12px; min-width:0; overflow-wrap:anywhere; }
+.ssh-file-toolbar, .ssh-path-bar { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:6px; }
+.ssh-file-toolbar .au-btn, .ssh-path-bar .au-btn { padding:2px 5px; }
+.ssh-path-bar input:not([type=checkbox]), .ssh-remote-name {
+  min-width:0; color:var(--text-primary); background:var(--bg-primary);
+  border:1px solid var(--border-color); border-radius:4px; padding:4px;
+}
+.ssh-path-bar input:not([type=checkbox]) { flex:1 1 70px; }
+.ssh-remote-name { display:block; width:100%; box-sizing:border-box; margin-top:4px; }
+.ssh-browser-detail, .ssh-file-size { color:var(--text-secondary); }
+.ssh-file-rows.stale { opacity:.55; }
+.ssh-file-list { list-style:none; margin:0; padding:0; }
+.ssh-file-list .ssh-file-list { padding-inline-start:12px; }
+.ssh-file-row { display:flex; align-items:center; gap:4px; }
+.ssh-file-row button:disabled { pointer-events:none; } /* stale rows still own context/middle mouse */
+.ssh-file-row[data-selected=true] { background:var(--bg-hover); }
+.ssh-file-expander { flex:0 0 19px; }
+.ssh-file-expander.au-btn { padding:0; }
+.ssh-file-name {
+  flex:1; min-width:0; text-align:start; color:inherit; background:transparent;
+  border:0; padding:3px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.ssh-file-size { flex:none; }
+.ssh-file-dialog code, .ssh-remote-path { overflow-wrap:anywhere; white-space:pre-wrap; }
+.ssh-file-dialog dl { display:grid; grid-template-columns:max-content minmax(0, 1fr); gap:6px 12px; }
+.ssh-file-dialog dd { margin:0; overflow-wrap:anywhere; }
+.ssh-permission-grid { width:100%; text-align:center; }
+.ssh-permission-grid th:first-child { text-align:start; }
+.ssh-permission-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.ssh-permission-fields input { display:block; width:12ch; }

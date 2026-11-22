@@ -291,8 +291,7 @@ impl AutomationRuntime {
     /// Restarting a terminal (Ctrl+R) reuses the same `tm-` id for a brand-new PTY and a fresh vt100
     /// parser. `Unseen` protection engages only when the key is ABSENT; a stale `Fired` left behind
     /// means a restarted shell inherits the dead one's state and is silently never nagged again. That
-    /// is the re-minted-id class, and the codebase's own fix pattern sits two lines away in
-    /// `cleanup_terminal_state` (`history_persist_locks.remove`).
+    /// is why owner teardown purges this leaf before admitting a replacement shell.
     ///
     /// It deliberately does NOT touch `watched`: the targeting tick re-resolves the whole set every
     /// 2 s, and a stale leaf there costs at most one tick in which the evaluator finds it not live and

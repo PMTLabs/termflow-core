@@ -1,0 +1,993 @@
+__TFM_1b29f714ffa84471a5ef491176b5545c_V1_BEGIN__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_platform_BEGIN__
+Linux
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_platform_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_hostname_BEGIN__
+tf-metrics-ubuntu
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_hostname_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_architecture_BEGIN__
+x86_64
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_architecture_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_stat_BEGIN__
+cpu  72525712 139 12419141 1658499522 8448405 0 7167439 0 1085468 0
+cpu0 2258613 0 658458 69270205 631143 0 4553854 0 29617 0
+cpu1 2767162 3 559044 68909606 747369 0 1000500 0 38852 0
+cpu2 2930079 6 546490 68626723 866811 0 420863 0 40870 0
+cpu3 3112114 0 545740 68395885 905090 0 247385 0 45383 0
+cpu4 2963658 11 541041 68542376 914899 0 182591 0 42582 0
+cpu5 2896440 5 534618 68620527 912682 0 147932 0 38129 0
+cpu6 2997205 11 524928 68959216 505590 0 67584 0 47956 0
+cpu7 2968103 22 511449 69184922 323293 0 55199 0 42535 0
+cpu8 3103060 2 507422 69124187 282274 0 48796 0 47947 0
+cpu9 3146934 0 502731 69141256 228282 0 42032 0 53966 0
+cpu10 3109967 11 499392 69208977 200872 0 38389 0 46096 0
+cpu11 3092216 0 504300 69241173 182005 0 35419 0 45742 0
+cpu12 3016195 0 505577 69321951 170927 0 33948 0 48048 0
+cpu13 3079477 1 503744 69267043 165575 0 32373 0 48236 0
+cpu14 3024153 0 499668 69332663 158635 0 30900 0 45851 0
+cpu15 3030915 0 500168 69329405 154716 0 30468 0 43888 0
+cpu16 2978265 1 494146 69387005 152625 0 28752 0 42056 0
+cpu17 3023202 6 498836 69351279 139348 0 27694 0 47882 0
+cpu18 3057544 0 502635 69311035 141990 0 27716 0 45633 0
+cpu19 2939074 6 493958 69442585 137564 0 27392 0 46184 0
+cpu20 3131186 7 496156 69254559 135720 0 25157 0 43336 0
+cpu21 3183743 0 492986 69209179 131492 0 24364 0 44378 0
+cpu22 3272455 9 495424 69120787 131125 0 19193 0 52108 0
+cpu23 3443942 32 500224 68946969 128369 0 18929 0 58183 0
+intr 7906719255 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 12034607 1 6 49 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+ctxt 12473476158
+btime 1794576529
+processes 27608315
+procs_running 4
+procs_blocked 1
+softirq 2084675139 0 139938522 14554 622689386 0 0 354382729 257205199 28411 710416338
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_stat_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_meminfo_BEGIN__
+MemTotal:       49327760 kB
+MemFree:        11991732 kB
+MemAvailable:   31540132 kB
+Buffers:         2058864 kB
+Cached:         17627972 kB
+SwapCached:       374468 kB
+Active:         17441132 kB
+Inactive:       17657572 kB
+Active(anon):    7569512 kB
+Inactive(anon):  8538808 kB
+Active(file):    9871620 kB
+Inactive(file):  9118764 kB
+Unevictable:          12 kB
+Mlocked:              12 kB
+SwapTotal:      16777216 kB
+SwapFree:        7243544 kB
+Dirty:             16548 kB
+Writeback:             0 kB
+AnonPages:      15083820 kB
+Mapped:          1184748 kB
+Shmem:            759524 kB
+KReclaimable:    1121000 kB
+Slab:            1487368 kB
+SReclaimable:    1121000 kB
+SUnreclaim:       366368 kB
+KernelStack:       51952 kB
+PageTables:       130724 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:    41441096 kB
+Committed_AS:   41831536 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:       93920 kB
+VmallocChunk:          0 kB
+Percpu:            20832 kB
+HardwareCorrupted:     0 kB
+AnonHugePages:    516096 kB
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+FileHugePages:    319488 kB
+FilePmdMapped:         0 kB
+Unaccepted:            0 kB
+Balloon:               0 kB
+HugePages_Total:       0
+HugePages_Free:        0
+HugePages_Rsvd:        0
+HugePages_Surp:        0
+Hugepagesize:       2048 kB
+Hugetlb:               0 kB
+DirectMap4k:       97280 kB
+DirectMap2M:    18776064 kB
+DirectMap1G:    40894464 kB
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_meminfo_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_netdev_BEGIN__
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 126751791050 305373181    0    0    0     0          0         0 126751791050 305373181    0    0    0     0       0          0
+  eth0: 13974770289 11644556    0    0    0     0          0     15900 9425976545 2126215    0    0    0     0       0          0
+br-3c3155846021:   31542     121    0    0    0     0          0         0    44985     323    0    7    0     0       0          0
+br-4f2cff925fbe:     168       6    0    0    0     0          0         0    27078     174    0    7    0     0       0          0
+br-c2c6e82c028a:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-c3283c0dcf50:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-ccc395c4bf09:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-d0a552a61899:   62443     147    0    0    0     0          0         0   114122     293    0    7    0     0       0          0
+br-42bbfd798829:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-587c2790c681:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-780a27fc8c70:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-ade0d498a5f9: 8841511950 30122790    0    0    0     0          0         0 11539610905 27196585    0    7    0     0       0          0
+br-ca635a13688e:      84       3    0    0    0     0          0         0    27080     174    0    7    0     0       0          0
+br-125ecf6aae35:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-1bbc3c3b087b: 536261064 2942224    0    0    0     0          0         0 3478352121 2757880    0    7    0     0       0          0
+docker0: 73057946837 121789120    0    0    0     0          0         0 110862021212 119617559    0    7    0     0       0          0
+br-45711035451e:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-4e7e2e767d63:       0       0    0    0    0     0          0         0        0       0    0    8    0     0       0          0
+br-fca82e92a01c:      84       3    0    0    0     0          0         0    27078     174    0    7    0     0       0          0
+veth4120078: 575840559 2939407    0    0    0     0          0         0 3477680101 2754689    0    0    0     0       0          0
+veth8c6efad:  435153     243    0    0    0     0          0         0    79600     743    0    0    0     0       0          0
+vethb1c0bdb: 28690416  329136    0    0    0     0          0         0 45884023  345562    0    0    0     0       0          0
+vethf76bb13:  873156     884    0    0    0     0          0         0   195926    1527    0    0    0     0       0          0
+veth0495dc4:     126       3    0    0    0     0          0         0    43632     396    0    0    0     0       0          0
+vethcfeff65:     126       3    0    0    0     0          0         0    43688     398    0    0    0     0       0          0
+vethe40375e:  303206    1687    0    0    0     0          0         0   549030    2424    0    0    0     0       0          0
+veth589df29:     126       3    0    0    0     0          0         0  1174015   21504    0    0    0     0       0          0
+veth1077e61:     126       3    0    0    0     0          0         0    43704     397    0    0    0     0       0          0
+vethfbfb263:   64501     147    0    0    0     0          0         0   130676     515    0    0    0     0       0          0
+veth54262c2:    4555      19    0    0    0     0          0         0    49914     413    0    0    0     0       0          0
+veth9920e25:     126       3    0    0    0     0          0         0    51403     505    0    0    0     0       0          0
+veth2bdfce8: 18099456   58560    0    0    0     0          0         0 12145906  102818    0    0    0     0       0          0
+vethb9c1b26:     126       3    0    0    0     0          0         0    43606     397    0    0    0     0       0          0
+veth21bd258:     126       3    0    0    0     0          0         0    45132     422    0    0    0     0       0          0
+vethbe37bdf:   28681     102    0    0    0     0          0         0    55577     536    0    0    0     0       0          0
+vethc310d8b:     126       3    0    0    0     0          0         0  1173665   21499    0    0    0     0       0          0
+veth4367d34: 9255390364 30093619    0    0    0     0          0         0 11515941610 27164293    0    0    0     0       0          0
+vethd6df6b1: 363148409 1884302    0    0    0     0          0         0 2267473125 1756068    0    0    0     0       0          0
+veth1b739b7: 15935177   49342    0    0    0     0          0         0  8261946   70494    0    0    0     0       0          0
+veth652841d: 6975554   22772    0    0    0     0          0         0  8180232   25622    0    0    0     0       0          0
+veth3a89cf1: 224207230 1186913    0    0    0     0          0         0 1364199903 1096766    0    0    0     0       0          0
+veth2ad38d5: 7416371   23721    0    0    0     0          0         0  4207813   34166    0    0    0     0       0          0
+veth9e4add5: 5939556   19869    0    0    0     0          0         0  7054119   22002    0    0    0     0       0          0
+veth0ee66aa:    2388      38    0    0    0     0          0         0     6428      89    0    0    0     0       0          0
+veth7cd2be8:  347654    3424    0    0    0     0          0         0  9712268    3328    0    0    0     0       0          0
+veth5b80b34:     126       3    0    0    0     0          0         0     2134      16    0    0    0     0       0          0
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_netdev_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_uptime_BEGIN__
+732604.51 16584995.26
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_uptime_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_bootId_BEGIN__
+b75b67b8-29e5-49d1-b98b-e797bbddfb8d
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_bootId_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_cpuinfo_BEGIN__
+processor	: 0
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 0
+cpu cores	: 24
+apicid		: 0
+initial apicid	: 0
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 1
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 1
+cpu cores	: 24
+apicid		: 1
+initial apicid	: 1
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 2
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 2
+cpu cores	: 24
+apicid		: 2
+initial apicid	: 2
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 3
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 3
+cpu cores	: 24
+apicid		: 3
+initial apicid	: 3
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 4
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 4
+cpu cores	: 24
+apicid		: 4
+initial apicid	: 4
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 5
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 5
+cpu cores	: 24
+apicid		: 5
+initial apicid	: 5
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 6
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 6
+cpu cores	: 24
+apicid		: 6
+initial apicid	: 6
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 7
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 7
+cpu cores	: 24
+apicid		: 7
+initial apicid	: 7
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 8
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 8
+cpu cores	: 24
+apicid		: 8
+initial apicid	: 8
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 9
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 9
+cpu cores	: 24
+apicid		: 9
+initial apicid	: 9
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 10
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 10
+cpu cores	: 24
+apicid		: 10
+initial apicid	: 10
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 11
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 11
+cpu cores	: 24
+apicid		: 11
+initial apicid	: 11
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 12
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 12
+cpu cores	: 24
+apicid		: 12
+initial apicid	: 12
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 13
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 13
+cpu cores	: 24
+apicid		: 13
+initial apicid	: 13
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 14
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 14
+cpu cores	: 24
+apicid		: 14
+initial apicid	: 14
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 15
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 15
+cpu cores	: 24
+apicid		: 15
+initial apicid	: 15
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 16
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 16
+cpu cores	: 24
+apicid		: 16
+initial apicid	: 16
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 17
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 17
+cpu cores	: 24
+apicid		: 17
+initial apicid	: 17
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 18
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 18
+cpu cores	: 24
+apicid		: 18
+initial apicid	: 18
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 19
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 19
+cpu cores	: 24
+apicid		: 19
+initial apicid	: 19
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 20
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 20
+cpu cores	: 24
+apicid		: 20
+initial apicid	: 20
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 21
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 21
+cpu cores	: 24
+apicid		: 21
+initial apicid	: 21
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 22
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 22
+cpu cores	: 24
+apicid		: 22
+initial apicid	: 22
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+processor	: 23
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 198
+model name	: Intel(R) Core(TM) Ultra 9 285K
+stepping	: 2
+microcode	: 0xffffffff
+cpu MHz		: 3686.401
+cache size	: 36864 KB
+physical id	: 0
+siblings	: 24
+core id		: 23
+cpu cores	: 24
+apicid		: 23
+initial apicid	: 23
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 28
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize ibt flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec tsc_scaling usr_wait_pause
+bugs		: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed eibrs_pbrsb bhi spectre_v2_user
+bogomips	: 7372.80
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 46 bits physical, 48 bits virtual
+power management:
+
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_cpuinfo_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_nproc_BEGIN__
+24
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_nproc_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_loadavg_BEGIN__
+3.98 3.72 3.35 1/3221 2139206
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_loadavg_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_who_BEGIN__
+ubuntu   pts/1        Nov 11 09:49
+root     pts/3        Nov 11 10:01
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_who_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_osRelease_BEGIN__
+PRETTY_NAME="Ubuntu 24.04.3 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.3 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_osRelease_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_mounts_BEGIN__
+/dev/sdd / ext4 rw,relatime,discard,errors=remount-ro,data=ordered 0 0
+rootfs /init rootfs ro,size=24658120k,nr_inodes=6164530 0 0
+none /dev devtmpfs rw,nosuid,relatime,size=24658120k,nr_inodes=6164530,mode=755 0 0
+devpts /dev/pts devpts rw,nosuid,noexec,noatime,gid=5,mode=620,ptmxmode=000 0 0
+none /dev/shm tmpfs rw,nosuid,nodev,noatime 0 0
+mqueue /dev/mqueue mqueue rw,nosuid,nodev,noexec,relatime 0 0
+hugetlbfs /dev/hugepages hugetlbfs rw,nosuid,nodev,relatime,pagesize=2M 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,noatime 0 0
+cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime,nsdelegate 0 0
+debugfs /sys/kernel/debug debugfs rw,nosuid,nodev,noexec,relatime 0 0
+tracefs /sys/kernel/tracing tracefs rw,nosuid,nodev,noexec,relatime 0 0
+fusectl /sys/fs/fuse/connections fusectl rw,nosuid,nodev,noexec,relatime 0 0
+configfs /sys/kernel/config configfs rw,nosuid,nodev,noexec,relatime 0 0
+proc /proc proc rw,nosuid,nodev,noexec,noatime 0 0
+binfmt_misc /proc/sys/fs/binfmt_misc binfmt_misc rw,relatime 0 0
+none /run tmpfs rw,nosuid,nodev,mode=755 0 0
+none /run/lock tmpfs rw,nosuid,nodev,noexec,noatime 0 0
+none /run/shm tmpfs rw,nosuid,nodev,noatime 0 0
+none /run/user tmpfs rw,nosuid,nodev,noexec,noatime,mode=755 0 0
+none /run/user tmpfs rw,relatime 0 0
+tmpfs /run/user/1000 tmpfs rw,nosuid,nodev,relatime,size=4932776k,nr_inodes=1233194,mode=700,uid=1000,gid=1000 0 0
+tmpfs /run/user/0 tmpfs rw,nosuid,nodev,relatime,size=4932776k,nr_inodes=1233194,mode=700 0 0
+nsfs /run/docker/netns/6da22a389977 nsfs rw 0 0
+nsfs /run/docker/netns/d8b1c92cfd53 nsfs rw 0 0
+nsfs /run/docker/netns/2662fcf68bb3 nsfs rw 0 0
+nsfs /run/docker/netns/14f7d1e6f291 nsfs rw 0 0
+nsfs /run/docker/netns/4014ef2dd8d8 nsfs rw 0 0
+nsfs /run/docker/netns/f6b0b8db9868 nsfs rw 0 0
+nsfs /run/docker/netns/fca15baa4b98 nsfs rw 0 0
+nsfs /run/docker/netns/c8e66209e53f nsfs rw 0 0
+nsfs /run/docker/netns/893c837f2904 nsfs rw 0 0
+nsfs /run/docker/netns/e06acb721f22 nsfs rw 0 0
+nsfs /run/docker/netns/16c8948ce6cc nsfs rw 0 0
+nsfs /run/docker/netns/f45c2a0c3390 nsfs rw 0 0
+nsfs /run/docker/netns/0f9c365f943e nsfs rw 0 0
+nsfs /run/docker/netns/c036d08a457d nsfs rw 0 0
+nsfs /run/docker/netns/bb19c9a51149 nsfs rw 0 0
+nsfs /run/docker/netns/5b2c14095d53 nsfs rw 0 0
+nsfs /run/docker/netns/33178dbb9a7d nsfs rw 0 0
+drivers /usr/lib/wsl/drivers 9p ro,nosuid,nodev,noatime,aname=drivers;fmask=222;dmask=222,cache=0x5,access=client,msize=65536,trans=fd,rfd=8,wfd=8 0 0
+none /usr/lib/wsl/lib overlay rw,nosuid,nodev,noatime,lowerdir=/gpu_lib_packaged:/gpu_lib_inbox,upperdir=/gpu_lib/rw/upper,workdir=/gpu_lib/rw/work,uuid=on 0 0
+none /mnt/wsl tmpfs rw,relatime 0 0
+none /mnt/wslg tmpfs rw,relatime 0 0
+/dev/sdd /mnt/wslg/distro ext4 ro,relatime,discard,errors=remount-ro,data=ordered 0 0
+none /mnt/wslg/versions.txt overlay rw,relatime,lowerdir=/systemvhd,upperdir=/system/rw/upper,workdir=/system/rw/work,uuid=on 0 0
+none /mnt/wslg/doc overlay rw,relatime,lowerdir=/systemvhd,upperdir=/system/rw/upper,workdir=/system/rw/work,uuid=on 0 0
+tmpfs /mnt/wslg/run/user/1000 tmpfs rw,nosuid,nodev,relatime,size=4932776k,nr_inodes=1233194,mode=700,uid=1000,gid=1000 0 0
+tmpfs /mnt/wslg/run/user/0 tmpfs rw,nosuid,nodev,relatime,size=4932776k,nr_inodes=1233194,mode=700 0 0
+none /tmp/.X11-unix tmpfs ro,relatime 0 0
+none /usr/lib/modules/6.18.33.2-microsoft-standard-WSL2 overlay rw,nosuid,nodev,noatime,lowerdir=/modules,upperdir=/lib/modules/6.18.33.2-microsoft-standard-WSL2/rw/upper,workdir=/lib/modules/6.18.33.2-microsoft-standard-WSL2/rw/work,uuid=on 0 0
+/dev/sdd /snap ext4 rw,relatime,discard,errors=remount-ro,data=ordered 0 0
+snapfuse /snap/snapd/28332 fuse.snapfuse ro,nodev,relatime,user_id=0,group_id=0,allow_other 0 0
+snapfuse /snap/core26/750 fuse.snapfuse ro,nodev,relatime,user_id=0,group_id=0,allow_other 0 0
+/dev/sdd /var/lib/docker ext4 rw,relatime,discard,errors=remount-ro,data=ordered 0 0
+overlay /var/lib/docker/overlay2/d0d51205db29972f9f91e0a1bb5ad1ff1b441aa18dad1f41bf65ec0a5bf60f32/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/WFFXEPJRZANFYNYTGCIAWFWOSO:/var/lib/docker/overlay2/l/R5EEBKYPSZYV4ZZ2WJRSGI6MQN:/var/lib/docker/overlay2/l/N2OCJW3T7UR5FM6CIH3FIP6SAI:/var/lib/docker/overlay2/l/AR7YQL5X44UZFDFNEN6JO62OIU:/var/lib/docker/overlay2/l/O5KDNIYTLQARGKJN7RVKHKJDP7:/var/lib/docker/overlay2/l/RTICENGZ3KE5JCNFPTHPPBHXLW:/var/lib/docker/overlay2/l/I7W5TQCKGARZ7GJV3PQ5U4L6RY:/var/lib/docker/overlay2/l/P7DK3DSJ6XMRH7ZOEWFDE4563I:/var/lib/docker/overlay2/l/2EWVYD3OZGSPZ7NUL2OVOHVUXR,upperdir=/var/lib/docker/overlay2/d0d51205db29972f9f91e0a1bb5ad1ff1b441aa18dad1f41bf65ec0a5bf60f32/diff,workdir=/var/lib/docker/overlay2/d0d51205db29972f9f91e0a1bb5ad1ff1b441aa18dad1f41bf65ec0a5bf60f32/work 0 0
+overlay /var/lib/docker/overlay2/3bb63e313f591fd845b6ea20f06db1a648822ea8f836ab156f62395ade5adb92/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/2GB7GEXLDULA5M7ISTD6SLIPHA:/var/lib/docker/overlay2/l/JD4YAX4IRJPCKH6YOOZW7EJZ5L:/var/lib/docker/overlay2/l/26RVCSI3AA556DPN6IZCGMPRZV:/var/lib/docker/overlay2/l/KFNBJHO66724ZXYDY4GKFH4DLG:/var/lib/docker/overlay2/l/ZIQUEAP3JOR7FSDLE4UEFBQEXV:/var/lib/docker/overlay2/l/FFGAX3CM62ACKY7JQWJPMURBML:/var/lib/docker/overlay2/l/3TKMWWCHDBY6OQHG37ISBGBOWK,upperdir=/var/lib/docker/overlay2/3bb63e313f591fd845b6ea20f06db1a648822ea8f836ab156f62395ade5adb92/diff,workdir=/var/lib/docker/overlay2/3bb63e313f591fd845b6ea20f06db1a648822ea8f836ab156f62395ade5adb92/work 0 0
+overlay /var/lib/docker/overlay2/9c7c6f599aaf799df33b9e9c97cbc06dad7a1ebd3007c2bbea347aa8c880fb06/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/CGI5KZF32EBSCXXMZSOSQ3VMZB:/var/lib/docker/overlay2/l/EFWSFLAOSNCY3TVSH3GEC6XEK7:/var/lib/docker/overlay2/l/PAWYNCKGZGBAFOLKTK3PJKKCUG:/var/lib/docker/overlay2/l/PMLVSFIRMWYL46IMIBYHTPO5F4,upperdir=/var/lib/docker/overlay2/9c7c6f599aaf799df33b9e9c97cbc06dad7a1ebd3007c2bbea347aa8c880fb06/diff,workdir=/var/lib/docker/overlay2/9c7c6f599aaf799df33b9e9c97cbc06dad7a1ebd3007c2bbea347aa8c880fb06/work 0 0
+overlay /var/lib/docker/overlay2/9b1f12d03f984e22030d5f710ed92e39c6767f5868d4a6683d7343de3abc9f43/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/EUP6YGORGTRY4V35EFIYINYK4K:/var/lib/docker/overlay2/l/T3NIZP2KETSKA6LX5U43KIH6SH:/var/lib/docker/overlay2/l/HX5OBXMWAH3LQC7BNXA2GHDNJK:/var/lib/docker/overlay2/l/YA7IQG4GXBXTYJYM66PXBPNSPE:/var/lib/docker/overlay2/l/U5EDKRFKERO2DEORYX6FBUITAC:/var/lib/docker/overlay2/l/U5AC4JMWY4WMIVRLESYPBMTJLC:/var/lib/docker/overlay2/l/VFDAJEJB7EB6DWBB47CUSTLMSD:/var/lib/docker/overlay2/l/4VQNFX3BWZTRPIFZE5DWM5FMZ6:/var/lib/docker/overlay2/l/XX5M7XNVEAQATCDYETQUVE2YUM:/var/lib/docker/overlay2/l/JTWB2LBSHIYN2LOUNY6UBG6UQO:/var/lib/docker/overlay2/l/4VWJQIYOW6NPGUEPOQAFJT56W2,upperdir=/var/lib/docker/overlay2/9b1f12d03f984e22030d5f710ed92e39c6767f5868d4a6683d7343de3abc9f43/diff,workdir=/var/lib/docker/overlay2/9b1f12d03f984e22030d5f710ed92e39c6767f5868d4a6683d7343de3abc9f43/work 0 0
+overlay /var/lib/docker/overlay2/cb2887d8e2c42ab47e8b525e50058debbde4912f0918b450d4a07a0c34f023a4/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/K3SWP2C55RUFYTL3PLNGSNVDFJ:/var/lib/docker/overlay2/l/R7MCTLMCZP33WMWB3XDFYEH63C:/var/lib/docker/overlay2/l/WSHJZLCKTNLRPFTRMU3CG2ZIOM:/var/lib/docker/overlay2/l/JQSMKDFNI6FRSVFR654OH6TXU4:/var/lib/docker/overlay2/l/K7NHRGZLZ3VVTAKUBQHJHI53X5:/var/lib/docker/overlay2/l/HU4E37QB3W2Z2UP6PDYKXEHM4N:/var/lib/docker/overlay2/l/3XGXHGX7TSLN3JBVVPCAKRDQTE:/var/lib/docker/overlay2/l/Q7KZWHPXVRB4RVTMDDB2HME6DB:/var/lib/docker/overlay2/l/3NEUP3WVE3GFVDRSDUWXYKJ2LC:/var/lib/docker/overlay2/l/OAXQLA5RYS3RGW5RLFIXSBWKDJ:/var/lib/docker/overlay2/l/GACJM5ZWD5FGTLNCV3UPOZYLIJ,upperdir=/var/lib/docker/overlay2/cb2887d8e2c42ab47e8b525e50058debbde4912f0918b450d4a07a0c34f023a4/diff,workdir=/var/lib/docker/overlay2/cb2887d8e2c42ab47e8b525e50058debbde4912f0918b450d4a07a0c34f023a4/work 0 0
+overlay /var/lib/docker/overlay2/f9d1007bf43b9efb30a56841fca5c7a2f4daadc265697836d1025ffe2741c247/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/6OCBG7O4NCZMEWMTESQO2G37DW:/var/lib/docker/overlay2/l/FNO4SOMLSJQIAP3FW4ZF2L4QRQ:/var/lib/docker/overlay2/l/KLMX7DI6H2GJD54EP5T3GFP2QV:/var/lib/docker/overlay2/l/CBUQAGRGP3KJ5MLNEJBJMVSNVP:/var/lib/docker/overlay2/l/EF5ZWJ65JCMH5V7X6EKESUITCV:/var/lib/docker/overlay2/l/RPTQDXUYB6I6YASEGYPHEW5RTL:/var/lib/docker/overlay2/l/ZITQ52EHOMUPCHCIZDHDK53S53:/var/lib/docker/overlay2/l/FK6HWRGDOXGY7WEPYRVN2KHSFJ,upperdir=/var/lib/docker/overlay2/f9d1007bf43b9efb30a56841fca5c7a2f4daadc265697836d1025ffe2741c247/diff,workdir=/var/lib/docker/overlay2/f9d1007bf43b9efb30a56841fca5c7a2f4daadc265697836d1025ffe2741c247/work 0 0
+overlay /var/lib/docker/overlay2/cf57e2067f872cade455b32ac332b73f07e40a3ef64ce1884a62902ab9e4f3d0/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/RY567MLJZIYDML7EPFGQVPJLOP:/var/lib/docker/overlay2/l/SEVRLFOZ67HDK64J25T47R6KYB:/var/lib/docker/overlay2/l/CCNOLBKSIUTTYLI3VIAEHFKEIW:/var/lib/docker/overlay2/l/J3VMNWFT5A4YTKMNGJ5II4G3T7:/var/lib/docker/overlay2/l/E7EXX6XC2DWPHMHJKDPIWBG23J:/var/lib/docker/overlay2/l/UVNI5QEUHHQFSDQMDSZKPJROO7:/var/lib/docker/overlay2/l/EG6RCP2HQRGS3C57ONLDWRRVTJ:/var/lib/docker/overlay2/l/6Q2MHCEEW67E3BE7UWYWTHAZI4:/var/lib/docker/overlay2/l/PNKWRRTOZDC7N2UECXRGL5KBT3:/var/lib/docker/overlay2/l/25VFZRD2O2634THVRH2QBPTZLM:/var/lib/docker/overlay2/l/XIWZ7ODU3CEOQOBYVOUHY4MKN4,upperdir=/var/lib/docker/overlay2/cf57e2067f872cade455b32ac332b73f07e40a3ef64ce1884a62902ab9e4f3d0/diff,workdir=/var/lib/docker/overlay2/cf57e2067f872cade455b32ac332b73f07e40a3ef64ce1884a62902ab9e4f3d0/work 0 0
+overlay /var/lib/docker/overlay2/0ce17e578e0d9023e83d48a950b64f9f9e0d432b5569e458e36081199e278eb2/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/CVXVB3WJG2HN7ZWNYA4RLHK6V4:/var/lib/docker/overlay2/l/QCJQRDT7QZBMZS5D7UXC6IWNZW:/var/lib/docker/overlay2/l/3NPJNAZ74CEDVHFW6TWQCXOACP:/var/lib/docker/overlay2/l/422ZYRBAG77R7RVGWMHDVD3LPE:/var/lib/docker/overlay2/l/K4M5S4X332N3DQJ7ECWB3UUGVZ:/var/lib/docker/overlay2/l/GN35DDEULOFVJ3FXGU5OC45QLU:/var/lib/docker/overlay2/l/IXXYI3PF6RYSJKRD7QKP5PI7G2:/var/lib/docker/overlay2/l/2FWU3URAS2TN4QR7UJHHHZ4ID6:/var/lib/docker/overlay2/l/HG46OQEMDWLBQNXJETF2ZZ4A23:/var/lib/docker/overlay2/l/GL72K535YWC3U33JRUJCMITWFT,upperdir=/var/lib/docker/overlay2/0ce17e578e0d9023e83d48a950b64f9f9e0d432b5569e458e36081199e278eb2/diff,workdir=/var/lib/docker/overlay2/0ce17e578e0d9023e83d48a950b64f9f9e0d432b5569e458e36081199e278eb2/work 0 0
+overlay /var/lib/docker/overlay2/2e04604b19b18a343b205ddb8847e1b86512c55c2c301be08630f0422e57792e/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/TTYLONWJ6TACEKM6T7Y5AU4ZGO:/var/lib/docker/overlay2/l/MLGDNNEFURV332UPNYHU3FF2MD:/var/lib/docker/overlay2/l/H2VB3P7CINTE64ZBU5NYE4DRFJ:/var/lib/docker/overlay2/l/TROQRXWMGMJ3FYKJWJIF6OYVFX:/var/lib/docker/overlay2/l/2ZGDNBLL4SZUTDVTKPGHJIG3QD:/var/lib/docker/overlay2/l/FHDVM5UHZOZNVWDIJ4EM6UUCZ4:/var/lib/docker/overlay2/l/STZEHG2XXSIGBI2AG64THTLA7K:/var/lib/docker/overlay2/l/WJW6VTYFMRW3VFNC2RV4XS4EDW,upperdir=/var/lib/docker/overlay2/2e04604b19b18a343b205ddb8847e1b86512c55c2c301be08630f0422e57792e/diff,workdir=/var/lib/docker/overlay2/2e04604b19b18a343b205ddb8847e1b86512c55c2c301be08630f0422e57792e/work 0 0
+overlay /var/lib/docker/overlay2/5b1315c3ef4bd7520bde0621744e8d81d21a9725a8d2d57794d87667398f4860/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/AOXCARXGZMQQVXP6UBVJJGCTOP:/var/lib/docker/overlay2/l/EB3YDBXQ2V7IT2JBVKTFR5SKGN:/var/lib/docker/overlay2/l/3Z7RSCDIXHTPYX44OWNST4HPCZ:/var/lib/docker/overlay2/l/ISDL7XBWDPC2YKZVO4EGSH5FYD:/var/lib/docker/overlay2/l/QENEHOX65KA37PY7DMONOI24Z2:/var/lib/docker/overlay2/l/BCJJGAMHHPUUZH5EGLCUD45VXD:/var/lib/docker/overlay2/l/NST4XWUBC4GKYJ62ZAF4PATMO7:/var/lib/docker/overlay2/l/6W6NPARNZCPPJFUJE3AVKXHUYV:/var/lib/docker/overlay2/l/TMQQG2F3JAEA3GRSBR2OAX4WY2,upperdir=/var/lib/docker/overlay2/5b1315c3ef4bd7520bde0621744e8d81d21a9725a8d2d57794d87667398f4860/diff,workdir=/var/lib/docker/overlay2/5b1315c3ef4bd7520bde0621744e8d81d21a9725a8d2d57794d87667398f4860/work 0 0
+overlay /var/lib/docker/overlay2/d91ada2dfc752af258be2400f3b4cd33ccd6ffcf193b7440890e3f933590be1e/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/GU2RQ2GNM75ZKA2KLFK47D7XL3:/var/lib/docker/overlay2/l/MLGDNNEFURV332UPNYHU3FF2MD:/var/lib/docker/overlay2/l/H2VB3P7CINTE64ZBU5NYE4DRFJ:/var/lib/docker/overlay2/l/TROQRXWMGMJ3FYKJWJIF6OYVFX:/var/lib/docker/overlay2/l/2ZGDNBLL4SZUTDVTKPGHJIG3QD:/var/lib/docker/overlay2/l/FHDVM5UHZOZNVWDIJ4EM6UUCZ4:/var/lib/docker/overlay2/l/STZEHG2XXSIGBI2AG64THTLA7K:/var/lib/docker/overlay2/l/WJW6VTYFMRW3VFNC2RV4XS4EDW,upperdir=/var/lib/docker/overlay2/d91ada2dfc752af258be2400f3b4cd33ccd6ffcf193b7440890e3f933590be1e/diff,workdir=/var/lib/docker/overlay2/d91ada2dfc752af258be2400f3b4cd33ccd6ffcf193b7440890e3f933590be1e/work 0 0
+overlay /var/lib/docker/overlay2/5e8ea1f1c0d53968b829da79d555099062420a5e89f75e3020404ca3148db3dc/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/LCMZNFMB7RKV5VYH7FAZUSTAXT:/var/lib/docker/overlay2/l/EKT4D64J7C4JWLEMCMBSGLWQHW:/var/lib/docker/overlay2/l/CQDFQCNDANWMY7NOKRWUK7RTNO:/var/lib/docker/overlay2/l/7CM2GYTMLQSLX2ECSLFNY37LCN:/var/lib/docker/overlay2/l/WPHO5S64G7RILVTKCGWR3XUASM:/var/lib/docker/overlay2/l/JUO66EBB7M7BIPMM6PQIA4RVSV:/var/lib/docker/overlay2/l/UHYZSWFTVFZ636TNGXFLOC2RLX:/var/lib/docker/overlay2/l/MJHYMH7REEJY5IEO62T4YMP5ND:/var/lib/docker/overlay2/l/LXYXBWG2NUZG3HFPN35OYLKDCW:/var/lib/docker/overlay2/l/42C3LRQZJKLTBUJ5IMYX7LHWRX:/var/lib/docker/overlay2/l/EAYZ5J7MTLS734W7EDSW7R2BJG:/var/lib/docker/overlay2/l/3L353KSK5ESOJRWVXKU4VJM5GW:/var/lib/docker/overlay2/l/IT6PDPWPOLU4NELB5HBK3GHIEV:/var/lib/docker/overlay2/l/WAKYAYFQ3CS6AAGVD7H66QDQUD:/var/lib/docker/overlay2/l/CFL4BPG3D5W3TJE5R4XI4AQWEA:/var/lib/docker/overlay2/l/RPISXEQ2SZC2HBFPFRQ7T4ONEB,upperdir=/var/lib/docker/overlay2/5e8ea1f1c0d53968b829da79d555099062420a5e89f75e3020404ca3148db3dc/diff,workdir=/var/lib/docker/overlay2/5e8ea1f1c0d53968b829da79d555099062420a5e89f75e3020404ca3148db3dc/work 0 0
+overlay /var/lib/docker/overlay2/c0b8233602b1fc3e17bc81d97231569e69ffeba8eafb91c99b74319f2dd71142/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/MVIH3I6TUBQGYB23KG6OAQMHH2:/var/lib/docker/overlay2/l/IMQCGX7RRPNEUVNTB6FXF7F7T3:/var/lib/docker/overlay2/l/MFMTMM7LVHMWWQ2HK7OQ2363EH:/var/lib/docker/overlay2/l/EYVSFZOZNWWXIVBSCYYVLPPCM6,upperdir=/var/lib/docker/overlay2/c0b8233602b1fc3e17bc81d97231569e69ffeba8eafb91c99b74319f2dd71142/diff,workdir=/var/lib/docker/overlay2/c0b8233602b1fc3e17bc81d97231569e69ffeba8eafb91c99b74319f2dd71142/work 0 0
+overlay /var/lib/docker/overlay2/784b238e622acd0305ae28ee7dc7856db7fbf22f752d5bc0615eb6a075dbfb6f/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/FXHMUP3OKFR4HEEQNPVIQ6PG76:/var/lib/docker/overlay2/l/HBJYYEYSQH3DJ2SKXPF435TBN3:/var/lib/docker/overlay2/l/CHQRTP6S6FNRM36ACD6JEIUBZX:/var/lib/docker/overlay2/l/KEC23PNY3ADAFAIK4OCT4YX3MI:/var/lib/docker/overlay2/l/J72JPXPHXEFF4Z42MZHVFIN5CZ:/var/lib/docker/overlay2/l/V6QHN6WJOEKID4H56VVC6QVRLR:/var/lib/docker/overlay2/l/5RE7RARRDJFRLZRVKCMGHQT2KW:/var/lib/docker/overlay2/l/B4VWIZSEHDIMA7FJR4LEG3ON2E:/var/lib/docker/overlay2/l/VEUE3H7P26YGNFVGRJTJS375UW,upperdir=/var/lib/docker/overlay2/784b238e622acd0305ae28ee7dc7856db7fbf22f752d5bc0615eb6a075dbfb6f/diff,workdir=/var/lib/docker/overlay2/784b238e622acd0305ae28ee7dc7856db7fbf22f752d5bc0615eb6a075dbfb6f/work 0 0
+overlay /var/lib/docker/overlay2/68f0461e5dd583addd03b1f19e598f7d203663b482131c071aeb4bdd67a08d02/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/I34SKDBO4HTN2JEAPSPYGVKLSW:/var/lib/docker/overlay2/l/7U7AHPZWU5EUQV4GQ2IBOXV4H7:/var/lib/docker/overlay2/l/2N3OPTIOJI67NUQYRD6KYAK5RQ:/var/lib/docker/overlay2/l/IVNYNXDKEXPEIAQU4CIG3D4SWE:/var/lib/docker/overlay2/l/C5HRAH6PV3ENODIGW6SJKJXZ3T:/var/lib/docker/overlay2/l/WH3FFAEDZ34QYAF5PJQ4OVDLZX:/var/lib/docker/overlay2/l/FL5Q4BDHRB5SO7PEMHKBHCXK2Z:/var/lib/docker/overlay2/l/NEMW6Z3YJQE53GJ7WKFSGWEYQ6:/var/lib/docker/overlay2/l/4QC6WZ3HZVO43NL3FXTGBCIX4P:/var/lib/docker/overlay2/l/HC3ESBZVR7HFPHL4RHZJAY5Y3N,upperdir=/var/lib/docker/overlay2/68f0461e5dd583addd03b1f19e598f7d203663b482131c071aeb4bdd67a08d02/diff,workdir=/var/lib/docker/overlay2/68f0461e5dd583addd03b1f19e598f7d203663b482131c071aeb4bdd67a08d02/work 0 0
+overlay /var/lib/docker/overlay2/18a8be6b262c606599011b064f43fa4afed57c4759e4346de7ad2acc3ecf893b/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/SRC2V56QOX5JLNJBW5CEGIAO5I:/var/lib/docker/overlay2/l/M3PWSCCBSLZXMJLSAFO3AMKG6X:/var/lib/docker/overlay2/l/HKLY5VAVK2PGAIDMUOA4REDQYD:/var/lib/docker/overlay2/l/TSH2L2WNJM4CICXGTEWNQFVSQS:/var/lib/docker/overlay2/l/CPNWLZVDLNRXJTZ33OE42S2GXC:/var/lib/docker/overlay2/l/PZAG5ST5TMRNUVCZ2KJEZCZ5DC:/var/lib/docker/overlay2/l/ZXELKWCY22HSFP3MJFRUZSP5SM:/var/lib/docker/overlay2/l/2I5RA5DYWUP36PYSYDDVG6OFEP:/var/lib/docker/overlay2/l/MD6OT5UDGER27JWFLGGWUNMNXM:/var/lib/docker/overlay2/l/O2YQQHQS7EX2G6JIJVX4XWA3D3,upperdir=/var/lib/docker/overlay2/18a8be6b262c606599011b064f43fa4afed57c4759e4346de7ad2acc3ecf893b/diff,workdir=/var/lib/docker/overlay2/18a8be6b262c606599011b064f43fa4afed57c4759e4346de7ad2acc3ecf893b/work 0 0
+overlay /var/lib/docker/overlay2/b50b535795d53acb0dbdd81ac7c8f468d9ff682c54092d3e61c10c949c2f36bf/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/GX5PGTV3WCVKFWJZRGN5U4RG5Q:/var/lib/docker/overlay2/l/DJQQJHG76YPRSEZ3BRLRCCD2ZB:/var/lib/docker/overlay2/l/AAKEDHO6YNDNK2TD6X54ESAHRL:/var/lib/docker/overlay2/l/57RCROJBPDZN5UKUVTTB37LK3R:/var/lib/docker/overlay2/l/JQFKAGYAMRIDRFTQ5UY5HI4GJA:/var/lib/docker/overlay2/l/4R4Z5XH3Z7WF43FZJZMPGI6XAN:/var/lib/docker/overlay2/l/YZ3NKHLXL23X6CLEBSIGTIMR37:/var/lib/docker/overlay2/l/2S5H6MG24GBELBQTDFJEEPNRXZ:/var/lib/docker/overlay2/l/CFJPRBAURVUSCZRGQ6S7BKWXE2,upperdir=/var/lib/docker/overlay2/b50b535795d53acb0dbdd81ac7c8f468d9ff682c54092d3e61c10c949c2f36bf/diff,workdir=/var/lib/docker/overlay2/b50b535795d53acb0dbdd81ac7c8f468d9ff682c54092d3e61c10c949c2f36bf/work 0 0
+/dev/sde /srv/runner-data ext4 rw,relatime 0 0
+C:\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\;uid=1000;gid=1000;symlinkroot=/mnt/,cache=0x5,access=client,msize=65536,trans=fd,rfd=14,wfd=14 0 0
+D:\134 /mnt/d 9p rw,noatime,aname=drvfs;path=D:\;uid=1000;gid=1000;symlinkroot=/mnt/,cache=0x5,access=client,msize=65536,trans=fd,rfd=14,wfd=14 0 0
+E:\134 /mnt/e 9p rw,noatime,aname=drvfs;path=E:\;uid=1000;gid=1000;symlinkroot=/mnt/,cache=0x5,access=client,msize=65536,trans=fd,rfd=14,wfd=14 0 0
+F:\134 /mnt/f 9p rw,noatime,aname=drvfs;path=F:\;uid=1000;gid=1000;symlinkroot=/mnt/,cache=0x5,access=client,msize=65536,trans=fd,rfd=14,wfd=14 0 0
+overlay /var/lib/docker/overlay2/3c01e1f6199237fb5c3ca131f50739b7dba137d18a994e13814d5a33da99da3f/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/SS3HSGHZ5XBRTDJSV2SUGJNPFZ:/var/lib/docker/overlay2/l/5Z2VIVY6RIWKMGVCEDF37MLTBP:/var/lib/docker/overlay2/l/OQ732OCV2FNU7XDY7VT2FE3ISG,upperdir=/var/lib/docker/overlay2/3c01e1f6199237fb5c3ca131f50739b7dba137d18a994e13814d5a33da99da3f/diff,workdir=/var/lib/docker/overlay2/3c01e1f6199237fb5c3ca131f50739b7dba137d18a994e13814d5a33da99da3f/work 0 0
+/dev/sdd /var/lib/docker/volumes/postgresql_pgdata/_data ext4 rw,relatime,discard,errors=remount-ro,data=ordered 0 0
+nsfs /run/docker/netns/c5bfec5aabdf nsfs rw 0 0
+overlay /var/lib/docker/overlay2/8cc279098ca838f3d59a58ff8e66fa05509ad1704f55bd1237d7f665aef78d54/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/PE4C2LDNE7KSLN7YZSOJ3P4PUM:/var/lib/docker/overlay2/l/EFWSFLAOSNCY3TVSH3GEC6XEK7:/var/lib/docker/overlay2/l/PAWYNCKGZGBAFOLKTK3PJKKCUG:/var/lib/docker/overlay2/l/PMLVSFIRMWYL46IMIBYHTPO5F4,upperdir=/var/lib/docker/overlay2/8cc279098ca838f3d59a58ff8e66fa05509ad1704f55bd1237d7f665aef78d54/diff,workdir=/var/lib/docker/overlay2/8cc279098ca838f3d59a58ff8e66fa05509ad1704f55bd1237d7f665aef78d54/work 0 0
+nsfs /run/docker/netns/e0f69cd33aa5 nsfs rw 0 0
+overlay /var/lib/docker/overlay2/e2e2c9571ec72cd9c817a8dd0cfdd9cdde91eb01eb8a297581dc4669cb7fbcf0/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/7RKPRFT7J454W2DMR2RYVR3YQ5:/var/lib/docker/overlay2/l/EB3YDBXQ2V7IT2JBVKTFR5SKGN:/var/lib/docker/overlay2/l/3Z7RSCDIXHTPYX44OWNST4HPCZ:/var/lib/docker/overlay2/l/ISDL7XBWDPC2YKZVO4EGSH5FYD:/var/lib/docker/overlay2/l/QENEHOX65KA37PY7DMONOI24Z2:/var/lib/docker/overlay2/l/BCJJGAMHHPUUZH5EGLCUD45VXD:/var/lib/docker/overlay2/l/NST4XWUBC4GKYJ62ZAF4PATMO7:/var/lib/docker/overlay2/l/6W6NPARNZCPPJFUJE3AVKXHUYV:/var/lib/docker/overlay2/l/TMQQG2F3JAEA3GRSBR2OAX4WY2,upperdir=/var/lib/docker/overlay2/e2e2c9571ec72cd9c817a8dd0cfdd9cdde91eb01eb8a297581dc4669cb7fbcf0/diff,workdir=/var/lib/docker/overlay2/e2e2c9571ec72cd9c817a8dd0cfdd9cdde91eb01eb8a297581dc4669cb7fbcf0/work 0 0
+nsfs /run/docker/netns/4080844450fd nsfs rw 0 0
+overlay /var/lib/docker/overlay2/26e54a2f4bcefbe665759af2ee1fbbd3c5f05f8934f376385a8703fe18851b8c/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/S635WXWATVEEO7TQJPSOFME42R:/var/lib/docker/overlay2/l/T3NIZP2KETSKA6LX5U43KIH6SH:/var/lib/docker/overlay2/l/HX5OBXMWAH3LQC7BNXA2GHDNJK:/var/lib/docker/overlay2/l/YA7IQG4GXBXTYJYM66PXBPNSPE:/var/lib/docker/overlay2/l/U5EDKRFKERO2DEORYX6FBUITAC:/var/lib/docker/overlay2/l/U5AC4JMWY4WMIVRLESYPBMTJLC:/var/lib/docker/overlay2/l/VFDAJEJB7EB6DWBB47CUSTLMSD:/var/lib/docker/overlay2/l/4VQNFX3BWZTRPIFZE5DWM5FMZ6:/var/lib/docker/overlay2/l/XX5M7XNVEAQATCDYETQUVE2YUM:/var/lib/docker/overlay2/l/JTWB2LBSHIYN2LOUNY6UBG6UQO:/var/lib/docker/overlay2/l/4VWJQIYOW6NPGUEPOQAFJT56W2,upperdir=/var/lib/docker/overlay2/26e54a2f4bcefbe665759af2ee1fbbd3c5f05f8934f376385a8703fe18851b8c/diff,workdir=/var/lib/docker/overlay2/26e54a2f4bcefbe665759af2ee1fbbd3c5f05f8934f376385a8703fe18851b8c/work 0 0
+nsfs /run/docker/netns/4de80dcfd9b4 nsfs rw 0 0
+overlay /var/lib/docker/overlay2/9022a2d2fba970f01a71f7f015de1ff6f24ffeffcf68a760043444f4ae7b048a/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/2KFLELHWLPLG5ERNUUKK4HXXXL:/var/lib/docker/overlay2/l/EFWSFLAOSNCY3TVSH3GEC6XEK7:/var/lib/docker/overlay2/l/PAWYNCKGZGBAFOLKTK3PJKKCUG:/var/lib/docker/overlay2/l/PMLVSFIRMWYL46IMIBYHTPO5F4,upperdir=/var/lib/docker/overlay2/9022a2d2fba970f01a71f7f015de1ff6f24ffeffcf68a760043444f4ae7b048a/diff,workdir=/var/lib/docker/overlay2/9022a2d2fba970f01a71f7f015de1ff6f24ffeffcf68a760043444f4ae7b048a/work 0 0
+nsfs /run/docker/netns/ceb9cc11af7e nsfs rw 0 0
+overlay /var/lib/docker/overlay2/cdf60c64f4a61305bf39f92027bc0bf6d6b517db28a45a260e8c5d85e756481e/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/CWS72ZDYEJSTPOMQEDICWITLRH:/var/lib/docker/overlay2/l/EB3YDBXQ2V7IT2JBVKTFR5SKGN:/var/lib/docker/overlay2/l/3Z7RSCDIXHTPYX44OWNST4HPCZ:/var/lib/docker/overlay2/l/ISDL7XBWDPC2YKZVO4EGSH5FYD:/var/lib/docker/overlay2/l/QENEHOX65KA37PY7DMONOI24Z2:/var/lib/docker/overlay2/l/BCJJGAMHHPUUZH5EGLCUD45VXD:/var/lib/docker/overlay2/l/NST4XWUBC4GKYJ62ZAF4PATMO7:/var/lib/docker/overlay2/l/6W6NPARNZCPPJFUJE3AVKXHUYV:/var/lib/docker/overlay2/l/TMQQG2F3JAEA3GRSBR2OAX4WY2,upperdir=/var/lib/docker/overlay2/cdf60c64f4a61305bf39f92027bc0bf6d6b517db28a45a260e8c5d85e756481e/diff,workdir=/var/lib/docker/overlay2/cdf60c64f4a61305bf39f92027bc0bf6d6b517db28a45a260e8c5d85e756481e/work 0 0
+nsfs /run/docker/netns/c8701df86827 nsfs rw 0 0
+overlay /var/lib/docker/overlay2/ee7d0aaf1f348af9e2ca4e7f9299a8c74e97666233db6f5bda5ece509e0b09b0/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/OYXSI3M7D5UO2T4VXUPH3UWVO4:/var/lib/docker/overlay2/l/T3NIZP2KETSKA6LX5U43KIH6SH:/var/lib/docker/overlay2/l/HX5OBXMWAH3LQC7BNXA2GHDNJK:/var/lib/docker/overlay2/l/YA7IQG4GXBXTYJYM66PXBPNSPE:/var/lib/docker/overlay2/l/U5EDKRFKERO2DEORYX6FBUITAC:/var/lib/docker/overlay2/l/U5AC4JMWY4WMIVRLESYPBMTJLC:/var/lib/docker/overlay2/l/VFDAJEJB7EB6DWBB47CUSTLMSD:/var/lib/docker/overlay2/l/4VQNFX3BWZTRPIFZE5DWM5FMZ6:/var/lib/docker/overlay2/l/XX5M7XNVEAQATCDYETQUVE2YUM:/var/lib/docker/overlay2/l/JTWB2LBSHIYN2LOUNY6UBG6UQO:/var/lib/docker/overlay2/l/4VWJQIYOW6NPGUEPOQAFJT56W2,upperdir=/var/lib/docker/overlay2/ee7d0aaf1f348af9e2ca4e7f9299a8c74e97666233db6f5bda5ece509e0b09b0/diff,workdir=/var/lib/docker/overlay2/ee7d0aaf1f348af9e2ca4e7f9299a8c74e97666233db6f5bda5ece509e0b09b0/work 0 0
+nsfs /run/docker/netns/a1129bbfd9c3 nsfs rw 0 0
+nsfs /run/docker/netns/default nsfs rw 0 0
+portal /run/user/1000/doc fuse.portal rw,nosuid,nodev,relatime,user_id=1000,group_id=1000 0 0
+portal /mnt/wslg/run/user/1000/doc fuse.portal rw,nosuid,nodev,relatime,user_id=1000,group_id=1000 0 0
+overlay /var/lib/docker/overlay2/246c63bceebd0d6ac822f511033b4c84f01d62f01354f1fac9f21f15a11cfa42/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/LPZMN5U7B4OZ6WSFPXQ56VZZHD:/var/lib/docker/overlay2/l/Q4HPWMRHE2FDENLW7QCGPPDPLO:/var/lib/docker/overlay2/l/FW7K42NRBXWSM2IOIUJMHUDU6T,upperdir=/var/lib/docker/overlay2/246c63bceebd0d6ac822f511033b4c84f01d62f01354f1fac9f21f15a11cfa42/diff,workdir=/var/lib/docker/overlay2/246c63bceebd0d6ac822f511033b4c84f01d62f01354f1fac9f21f15a11cfa42/work 0 0
+nsfs /run/docker/netns/68d320fb126e nsfs rw 0 0
+overlay /var/lib/docker/overlay2/9960cfb381344f72e9309e5f7afda4dac9ae71201c7d44bd7b17d85ace9d6483/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/HEHPE62JN6IWL7ZM3EBNJ4QBEA:/var/lib/docker/overlay2/l/TUVIO3BFDZRMGMZ424ODZIZU2A:/var/lib/docker/overlay2/l/PDCZKJAUN56KJT5HCKP6B472W3:/var/lib/docker/overlay2/l/YIX6KUQP5WVUQWQLE6IG7NVXFA:/var/lib/docker/overlay2/l/PK4DFRBUNZ4OMKXRBVI5BRQNQD:/var/lib/docker/overlay2/l/TZPJ4YQLOQR5CSJBLSDWD3NANH:/var/lib/docker/overlay2/l/A4CDTX6WMZNX3V6ERVYUUF65WC:/var/lib/docker/overlay2/l/CPECBXRLCZUXAWGEBGSKEQVUUV:/var/lib/docker/overlay2/l/D3MZUXGI46E2YBPDLQ3OYE76UC:/var/lib/docker/overlay2/l/3REZZGDAJJMYZNQ4U3TI5VIZMB:/var/lib/docker/overlay2/l/D242EJZTSQTOK34BFXYYPQV7X2:/var/lib/docker/overlay2/l/JX2KW6RSBY5EXRGJQATSETHJSE:/var/lib/docker/overlay2/l/QM32ETSTKLS4P5XXSZKEUROG7P:/var/lib/docker/overlay2/l/6NIS4QKZNFXIW23OQ4UGKTPFLI:/var/lib/docker/overlay2/l/HNENIR2IHJ3OWHL3TT34MEHSG7,upperdir=/var/lib/docker/overlay2/9960cfb381344f72e9309e5f7afda4dac9ae71201c7d44bd7b17d85ace9d6483/diff,workdir=/var/lib/docker/overlay2/9960cfb381344f72e9309e5f7afda4dac9ae71201c7d44bd7b17d85ace9d6483/work 0 0
+nsfs /run/docker/netns/ccc91fe1a851 nsfs rw 0 0
+overlay /var/lib/docker/overlay2/38caab826ecea3d6f9d65ac19538fb7ac8bedd5a470f1202bf23e25e0740fdfe/merged overlay rw,relatime,lowerdir=/var/lib/docker/overlay2/l/Q326QGI5AQSJTTIID6JT6LUACD:/var/lib/docker/overlay2/l/4JRE6H3EAK6P6GYBGJFZMU3CMB:/var/lib/docker/overlay2/l/WQTTAOM4CDQNVRQV3BN3ZXP2DI:/var/lib/docker/overlay2/l/KN5EJLIXV5EAUWIDATMQKRPYYO:/var/lib/docker/overlay2/l/7SR2DMICKSOFOYYRMINLTK3OGM:/var/lib/docker/overlay2/l/YZ2YD3TRKODDHDZTG5S5BT7I57:/var/lib/docker/overlay2/l/5OLBGXY6S23K4KNLYZWWVMK2PY:/var/lib/docker/overlay2/l/HZIXIR5SINSC45NEU74S3AC2XR,upperdir=/var/lib/docker/overlay2/38caab826ecea3d6f9d65ac19538fb7ac8bedd5a470f1202bf23e25e0740fdfe/diff,workdir=/var/lib/docker/overlay2/38caab826ecea3d6f9d65ac19538fb7ac8bedd5a470f1202bf23e25e0740fdfe/work 0 0
+nsfs /run/docker/netns/581f7b78a9e8 nsfs rw 0 0
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_mounts_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfLocal_BEGIN__
+Filesystem     Type          1024-blocks      Used Available Capacity Mounted on
+/dev/sdd       ext4           1055762868 222310044 779749352      23% /
+rootfs         rootfs           24658120      2772  24655348       1% /init
+none           tmpfs            24663880         8  24663872       1% /dev/shm
+none           tmpfs            24663880      3376  24660504       1% /run
+none           tmpfs            24663880         0  24663880       0% /run/lock
+none           tmpfs            24663880       244  24663636       1% /run/user
+tmpfs          tmpfs             4932776        56   4932720       1% /run/user/1000
+tmpfs          tmpfs             4932776        52   4932724       1% /run/user/0
+drivers        9p              838860796 802505012  36355784      96% /usr/lib/wsl/drivers
+none           overlay          24663880         0  24663880       0% /usr/lib/wsl/lib
+none           tmpfs            24663880         4  24663876       1% /mnt/wsl
+none           overlay          24663880        80  24663800       1% /mnt/wslg/versions.txt
+none           overlay          24663880        80  24663800       1% /mnt/wslg/doc
+none           overlay          24663880         0  24663880       0% /usr/lib/modules/6.18.33.2-microsoft-standard-WSL2
+snapfuse       fuse.snapfuse       33408     33408         0     100% /snap/snapd/28332
+snapfuse       fuse.snapfuse       62208     62208         0     100% /snap/core26/750
+/dev/sde       ext4            256920004 223891948  19904472      92% /srv/runner-data
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfLocal_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfNfs_BEGIN__
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfNfs_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_V1_END__

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { SearchQuery, SearchFilter } from '../../../types/search';
+import { getStoredApiToken } from '../../services/profileScope';
 import './SearchFilters.css';
 
 interface SearchFiltersProps {
@@ -30,7 +31,7 @@ export const SearchFilters: React.FC<SearchFiltersProps> = ({ query, onQueryUpda
     try {
       const response = await fetch('/api/terminals', {
         headers: {
-          'Authorization': `Bearer ${localStorage.getItem('api_token')}`
+          'Authorization': `Bearer ${getStoredApiToken()}`
         }
       });
 

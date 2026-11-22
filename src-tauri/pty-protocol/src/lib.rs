@@ -5,13 +5,20 @@
 //! dependency-light — it is compiled into two binaries.
 
 pub mod bootstrap;
+#[cfg(windows)]
+pub mod conpty;
+pub mod da1;
 pub mod discovery;
 pub mod frame;
+pub mod pump;
+pub mod rendezvous;
 pub mod spec;
+pub mod ssh_prompt;
 
 pub use bootstrap::{
     negotiate, read_hello, write_hello, Hello, HelloKind, CAP_ATTACH_ACK, CAP_DRAIN,
-    CAP_LIFECYCLE_CONTRACT, PROTOCOL_MAX, PROTOCOL_MIN,
+    CAP_INHERIT_CURSOR, CAP_LIFECYCLE_CONTRACT, CAP_MCP_HOLD, CAP_PERMISSIONS, CAP_SHUTDOWN_CONTROL, PROTOCOL_MAX,
+    PROTOCOL_MIN,
 };
 pub use discovery::{
     read_record, remove_record_if_owned, write_record, HostRecord, LifecycleContract,
@@ -19,7 +26,15 @@ pub use discovery::{
 };
 pub use frame::{
     decode, encode, read_frame, write_frame, ArmDetachPurpose, Control, Data, DecodeError, Frame,
-    Response, SessionMeta, MAX_FRAME_LEN, PROTOCOL_VERSION,
+    McpHeld, McpHoldReason, McpHoldSpec, PermissionKind, PermissionState, Response, SessionMeta, MAX_FRAME_LEN, PROTOCOL_VERSION,
+};
+pub use rendezvous::{
+    elevated_stand_down_path_for_survivor, is_valid_rendezvous_pipe_name, publish_elevated_survivor,
+    read_elevated_stand_down, rendezvous_pipe_name, read_elevated_survivor, read_rendezvous_request,
+    read_rendezvous_response, remove_elevated_stand_down_if_owned, remove_elevated_survivor_if_owned,
+    request_elevated_stand_down, write_rendezvous_request,
+    write_rendezvous_response, ElevatedRendezvousRequest, ElevatedRendezvousResponse,
+    ElevatedRendezvousStatus, ElevatedSurvivorRecord, ELEVATED_RENDEZVOUS_VERSION,
 };
 pub use spec::SpawnSpec;
 

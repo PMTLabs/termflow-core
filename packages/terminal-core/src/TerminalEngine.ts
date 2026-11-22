@@ -1,4 +1,5 @@
 import { Terminal } from '@xterm/xterm';
+import { describe, emitBroadcast, hasBroadcastSink, isDeliveringBroadcast, subscribeUserInput, withBroadcastPaste, queueBroadcastTargetWrite, type KeyDescriptor } from './broadcast';
 import type { FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -7,6 +8,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import type { ISearchOptions } from '@xterm/addon-search';
 import { KeyboardProtocolState, encodeKey } from './keyboardProtocol';
 import { Win32InputModeState, encodeWin32Key, scanWin32ModeSequences } from './win32InputMode';
+import { wrapRestoreReplay } from './restoreReplay';
 import { HeuristicCapture, decideSuggestKey } from './commandCapture';
 import type { SuggestPopupState } from './commandCapture';
 import {
@@ -22,8 +24,11 @@ import type {
   TerminalSearchResult,
   ContextMenuActions,
   TerminalLinkHit,
+  PromptMarkKind,
+  PromptMarkState,
 } from './types';
 import { terminalCache, HYDRATION_BUFFER_CAP_BYTES } from './cache';
+import { wireScrollbarArrows } from './scrollbarArrows';
 import type { TerminalCacheEntry } from './cache';
 import { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
 import {
@@ -138,12 +143,13 @@ const HEAL_MAX_CONSECUTIVE_MISMATCH = 5; // give up re-pushing if the backend ne
 // Task 7 sets TerminalEngine.suppressHealUntil = Date.now() + REPAINT_SETTLE_MS.
 const REPAINT_SETTLE_MS = 600;
 
-// Debounce the live in-place search refresh (the onWriteParsed → refreshSearch
-// path). refreshSearch runs findNext over the whole scrollback to keep the
+// Minimum gap between live in-place search refreshes (the onWriteParsed →
+// refreshSearch path). refreshSearch re-searches the whole scrollback to keep the
 // N-of-M counter + highlights fresh; firing it on every parsed write would burn
-// CPU during heavy streaming (build logs, cat of a big file). Coalescing to a
-// trailing refresh keeps the counter responsive without per-chunk re-searches.
-const SEARCH_REFRESH_DEBOUNCE_MS = 150;
+// CPU during heavy streaming (build logs, cat of a big file). Throttling to one
+// refresh per interval keeps the counter moving DURING a stream without
+// per-chunk re-searches.
+const SEARCH_REFRESH_INTERVAL_MS = 250;
 
 // Debounce-coalesce live PTY output into one xterm write per burst. A TUI redraw can
 // arrive as several chunks AND span more than one "frame": codex draws (leaving the
@@ -759,6 +765,40 @@ const FINISHED_SEGMENT_RE = /\.[A-Za-z0-9_]{1,8}[^A-Za-z0-9]*$/;
 const LINE_REFERENCE_TAIL_RE = /:\d+$/;
 
 /**
+ * How many cells short of the right edge a row may still end and be read as "ran out of
+ * columns" by guard G1. Used only there.
+ *
+ * An app that lays its text out in a box NARROWER than the terminal hard-wraps at the box edge,
+ * not the grid edge, so the row it left behind is never full. Measured on Claude Code 2.1 by
+ * replaying real ConPTY captures through xterm at 80, 100 and 120 columns: its tool-result
+ * block (`⎿  …`) is 5 cells narrower than the terminal at every width, its prompt echo 1 cell
+ * narrower, while its prose and `Tool(…)` rows fill the grid. That block is where every
+ * reported miss lived — a
+ * screenshot path in a Bash result, a `Reading 1 file…` path — and under a full-row-only G1
+ * none of them could ever join. 8 covers the measured 5 with room for a margin that moves,
+ * without reaching the rows word-wrap leaves behind (see G1 for what bounds the other side).
+ */
+const HARD_WRAP_EDGE_SLACK = 8;
+
+/**
+ * The cell column of the last cell in row `line` that holds content, looking no further left
+ * than `cols - 1 - HARD_WRAP_EDGE_SLACK`; `-1` when every cell in that window is blank.
+ *
+ * "Content" is any cell whose characters are not whitespace, PLUS a width-0 cell: that is the
+ * right half of a double-width glyph, which reports `''` for the same reason a blank does and
+ * means the opposite. An absent cell is a row shorter than the grid, i.e. blank. A PAINTED space
+ * (`' '`) is blank too: a path contains no whitespace, so a wrap never breaks across one.
+ */
+function lastContentCell(line: LinkableBufferLine, cols: number): number {
+  for (let x = cols - 1; x >= Math.max(0, cols - 1 - HARD_WRAP_EDGE_SLACK); x--) {
+    const cell = line.getCell(x);
+    if (!cell) continue;
+    if (cell.getWidth() === 0 || cell.getChars().trim() !== '') return x;
+  }
+  return -1;
+}
+
+/**
  * Does buffer row `prev` HARD-wrap into row `next`, and if so how many leading blanks of `next`
  * are the app's hanging indent? Returns the indent length, or `null` for "these are two
  * independent lines".
@@ -786,20 +826,32 @@ const LINE_REFERENCE_TAIL_RE = /:\d+$/;
  * | R2 bare-relative `docs/plan/027-canvas-sea` + `rch.md` | T  | T  | T  | T  | T  | T  |  ✔   |
  * | R3 posix-abs `/srv/app/util` + `s.ts`                  | T  | T  | T  | T  | T  | T  |  ✔   |
  * | R4 hard-wrapped URL `…/a/very/lo` + `ng/path/f.html`   | T  | T  | T  | T  | T  | T  |  ✔   |
+ * | R5 Claude Code result `⎿  shot C:\…\sc` + `ratchpad\…`| T* | T  | T  | T  | T  | T  |  ✔   |
  * | F3 `git status` two `modified:` rows                   | T  | T  | F  | —  | —  | —  |  ✘   |
  * | F4 cargo `--> src/main.rs:12:5`                        | T  | T  | F  | —  | —  | —  |  ✘   |
  * | F9 pytest `assert 1 == 2`                              | T  | T  | F  | —  | —  | —  |  ✘   |
  * | F10 indented listing `/etc/app` + `/etc/app/main.conf` | T  | T  | T  | F  | —  | —  |  ✘   |
  * | F2 `ls -R` heading ending in `/`                       | T  | T  | T  | T  | F  | —  |  ✘   |
  * | F11 `built with webpack/config.js` + `v5.91.0 warn`    | T  | T  | T  | T  | T  | F  |  ✘   |
+ * | F12 prose `…under the tests` (5 short) + `src/x.ts`     | F* | —  | —  | —  | —  | —  |  ✘   |
+ *
+ * R5 is the reported case (a Bash-result screenshot path, replayed from a real capture at 120
+ * columns): row `prev` is 115 cells because Claude Code's result block is 5 narrower than the
+ * grid, so the first G1 — "row is FULL" — refused it at every width. `T*` is G1's second tier:
+ * within HARD_WRAP_EDGE_SLACK of the edge AND the trailing token holds a separator. F12 is the
+ * shape that tier must keep out — word-wrapped prose ends near the edge as a matter of course,
+ * and the next row of an agent's answer is often an indented path — and it fails on the
+ * separator half of the test. The same prose row exactly FULL still joins (F12 with `F*`→`T`):
+ * that is the residue class below, unchanged.
  *
  * R4 moved from ✘ to ✔ when G5 narrowed to "rooted", and that is a fix rather than residue: a
  * URL really was hard-wrapped, so reconstructing it is what the user asked for. It is offered by
  * right-click but not underlined on hover, because `WebLinksAddon` does its own soft-wrap-only
  * walk (plan 027 §3.6).
  *
- * **Known residue, accepted rather than hidden.** A full row whose trailing token is path-shaped
- * but carries NO extension, followed by an indented path, still joins: `/var/log/app` +
+ * **Known residue, accepted rather than hidden.** A full row — or, since G1's second tier, a
+ * row within HARD_WRAP_EDGE_SLACK of the edge — whose trailing token is path-shaped but carries
+ * NO extension, followed by an indented path, still joins: `/var/log/app` +
  * `    src/index.ts` becomes `/var/log/appsrc/index.ts`. When that token was already a working
  * link, the join REPLACES it — the underline covers a path that does not exist, and Copy Path
  * yields the wrong string. G7 rejects the members whose trailing token reads as FINISHED — it
@@ -834,29 +886,33 @@ function hardWrapIndent(
   next: LinkableBufferLine,
   cols: number,
 ): number | null {
-  // G1 — row `prev` is FULL. A hard wrap happens because the text ran out of columns, so a row
-  // with room left in it ended for some other reason and continues nothing. This is also what
-  // keeps a painted TUI screen out: an alt-screen row is padded with blanks to the right edge,
-  // so almost every one of them fails here — which is why no `buffer.type === 'alternate'`
-  // bail-out is needed, and why adding one would delete the fix for ratatui/codex output.
-  const lastCell = prev.getCell(cols - 1);
-  // An absent cell is a row SHORTER than the grid, i.e. not full. `?.getChars() !== ''` would
-  // read `undefined !== ''` as "full" and join off the end of a stub row.
+  // G1 — row `prev` RAN OUT OF COLUMNS. A hard wrap happens because the text hit the edge of
+  // whatever box the app laid it out in, so a row with room left in it ended for some other
+  // reason and continues nothing. This is also what keeps a painted TUI screen out: an
+  // alt-screen row is padded with blanks to the right edge, so almost every one of them fails
+  // here — which is why no `buffer.type === 'alternate'` bail-out is needed, and why adding one
+  // would delete the fix for ratatui/codex output.
   //
-  // A width-0 cell IS full: it is the RIGHT HALF of a double-width glyph (CJK, emoji) whose
-  // characters are stored on the left half, so it reports `''` for the same reason a blank cell
-  // does and means the opposite. Reading it as blank made a row that ends in a wide glyph exactly
-  // at the right edge — every CJK path, at the widths where it wraps there — judged "not full",
-  // so it never joined.
-  // A WRITTEN SPACE at the right edge is not full either, and it has to be tested separately
-  // because it is a different value: an unwritten cell reports `''`, a painted one reports `' '`.
-  // A path contains no whitespace, so a wrap can never break across a space — a row ending in one
-  // finished on its own and the next row continues nothing. Two things followed from missing this.
-  // The pair `G6`/`G7` below both read `tail`, which is computed by slicing after the last space:
-  // on such a row that slice is EMPTY, so both guards tested `''` and passed vacuously. And the
-  // alt-screen argument above only holds now — a TUI that paints its padding (ratatui does) fills
-  // the edge with a real `' '`, which the `=== ''` test read as full.
-  if (!lastCell || (lastCell.getWidth() !== 0 && lastCell.getChars().trim() === '')) return null;
+  // "The edge" is NOT always the grid edge, and reading it that way is the defect this guard
+  // shipped with: an Ink app lays its blocks out narrower than the terminal (Claude Code's
+  // tool-result block by 5 cells — see HARD_WRAP_EDGE_SLACK for the measurement), so the row it
+  // hard-wrapped was never full and a full-row test refused every one of them. Two tiers, then:
+  //  - the row is FULL (content in the last cell): accepted as before, no further question;
+  //  - the row ends within HARD_WRAP_EDGE_SLACK of the edge: accepted only if its trailing
+  //    token already holds a path separator (checked below, once `tail` exists). Word-wrap
+  //    leaves prose rows anywhere in the last word-length of cells, and a prose row followed
+  //    by an indented path is common in agent output; requiring the tail to be a demonstrable
+  //    path fragment — not merely a word — keeps that shape out. A break inside a path's FIRST
+  //    segment (`doc` + `s/plan/x.md`) is therefore a miss on a narrow-box row; it never was
+  //    reachable on such rows, and it still joins on a full one.
+  // What `lastContentCell` counts as content, and why a painted `' '` is not, is documented on
+  // it. Both `G6` and `G7` below read `tail`, which is sliced from the right-TRIMMED row text:
+  // on a narrow-box row the unwritten cells beyond the content would otherwise put a run of
+  // blanks at the end, leaving the slice EMPTY and both guards testing `''` vacuously — the
+  // same failure a painted space at the edge used to cause.
+  const contentEnd = lastContentCell(prev, cols);
+  if (contentEnd < 0) return null;
+  const nearEdgeOnly = contentEnd < cols - 1;
 
   const nextText = next.translateToString(false);
 
@@ -885,8 +941,11 @@ function hardWrapIndent(
   // G6 — row `prev` does not end at a separator. A path that ends in `/` or `\` is complete as
   // written (an `ls -R` directory heading); joining the next row's filename onto it invents a
   // path nobody printed.
-  const prevText = prev.translateToString(false);
+  const prevText = prev.translateToString(true);
   const tail = prevText.slice(prevText.lastIndexOf(' ') + 1);
+  // G1, second tier (see above): a row that stopped short of the grid edge is trusted only when
+  // what it stopped in is visibly a path — a token that already crossed a separator.
+  if (nearEdgeOnly && !/[\\/]/.test(tail)) return null;
   if (tail.endsWith('/') || tail.endsWith('\\')) return null;
 
   // G7 — row `prev` does not already end in a FINISHED reference. A token that carries an
@@ -965,7 +1024,12 @@ export function collectWrappedLine(
     }
     const hard = next ? hardWrapIndent(line, next, cols) : null;
     if (hard !== null) {
-      text += line.translateToString(false).slice(indent);
+      // Right-TRIMMED, unlike the soft-wrap branch above: a hard-wrapped row that stopped short
+      // of the grid (G1's second tier) has unwritten cells after its content, which
+      // `translateToString(false)` renders as spaces — and a run of spaces inside the join hands
+      // the matcher a path that ends at the row edge, exactly the truncation the join exists to
+      // undo. A path contains no whitespace, so nothing real is lost.
+      text += line.translateToString(true).slice(indent);
       indent = hard;
       continue;
     }
@@ -1136,6 +1200,25 @@ export class TerminalEngine {
     const entry = terminalCache.get(this.cacheKey);
     if (entry) entry.promptGate = { seen, armed };
   }
+  // Who rendered the latest prompt mark. 'local' until a host (ssh) mark arrives;
+  // mirrored into the cache entry so a remount keeps knowing the host signalled.
+  private lastPromptMarkKind: PromptMarkKind = 'local';
+  private promptMarkListeners = new Set<(state: PromptMarkState) => void>();
+  private notifyPromptMark(): void {
+    const state: PromptMarkState = { seen: this.promptOscSeen, kind: this.lastPromptMarkKind };
+    for (const listener of [...this.promptMarkListeners]) listener(state);
+  }
+  /**
+   * Subscribe to prompt-gate knowledge a host UI needs (the remote-hook chip).
+   * Fires once immediately with the current state so a subscriber created after
+   * the last mark is not left blind, then on every prompt mark and whenever the
+   * gate is restored or reset. Returns a disposer.
+   */
+  onPromptMark(listener: (state: PromptMarkState) => void): () => void {
+    this.promptMarkListeners.add(listener);
+    listener({ seen: this.promptOscSeen, kind: this.lastPromptMarkKind });
+    return () => { this.promptMarkListeners.delete(listener); };
+  }
   // Keys typed while disarmed may be shell type-ahead that PSReadLine echoes at
   // the NEXT prompt render; a mark planted after that echo would sit mid-line
   // and Enter would capture a tail fragment. Arming skips one command instead
@@ -1211,7 +1294,7 @@ export class TerminalEngine {
   // terminal's PTY). Static so one event quiets all engines.
   static suppressHealUntil = 0;
 
-  // Debounce for the live search refresh (see SEARCH_REFRESH_DEBOUNCE_MS).
+  // Throttle timer for the live search refresh (see SEARCH_REFRESH_INTERVAL_MS).
   // Cleared on unmount so a refresh can't fire against a torn-down mount.
   private searchRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   // Last match count from the addon. Lets refreshSearch tell "user dismissed an
@@ -1294,6 +1377,19 @@ export class TerminalEngine {
   // NOT include the cache-lifetime bridge subs (those are Task 4 / R1, disposed
   // only by dispose()/cleanupTerminalCache).
   private disposables: Array<() => void> = [];
+  private pendingKey: KeyDescriptor | null = null;
+  private lastKeydown: KeyDescriptor | null = null;
+  private pendingUserInput = false;
+  private inPointerEvent = false;
+  private inNativePaste = false;
+
+  private emitKeyBroadcast(data: string): void {
+    const key = this.pendingKey;
+    this.pendingKey = null;
+    // The keystroke is broadcast; a trailing keypress must not restore it again.
+    this.lastKeydown = null;
+    if (key) emitBroadcast(this.cacheKey, { kind: 'key', key, srcBytes: data });
+  }
 
   // CONTAINER-LOCAL disposables — the four DOM listeners bound to the container
   // argument (click-to-focus, zoom keydown, Ctrl/Cmd+F, modifier+wheel). Split
@@ -1797,8 +1893,12 @@ export class TerminalEngine {
       // no listeners, no observer, no watchdog, and a caller that went on to
       // attach() and read `engine.terminal`.
       try {
-        fit.fit();
-        didReattachFit = true;
+        // A hidden reparent (for example, adding/removing the SSH pane shell)
+        // must preserve the cached grid until the activation fit measures it.
+        if (this.geometryEligible()) {
+          fit.fit();
+          didReattachFit = true;
+        }
       } catch (fitError) {
         // Carry on and finish the mount, and reconcile the backend with whatever
         // grid xterm is ACTUALLY on at the end of mount().
@@ -2197,6 +2297,12 @@ export class TerminalEngine {
     // path's CSI handlers read `this.kbState`/`this.win32State` at CALL time — no
     // byte can be parsed between their registration and this line.
     if (cached?.kbState) this.kbState = cached.kbState;
+    // …or, with no prior mount in THIS window because the pane arrived by
+    // cross-window detach, seed from the state the source window carried over
+    // (see initialKeyboardProtocol). Restored IN PLACE, honouring the
+    // mutate-never-replace rule the create path's handlers rely on. First-ever-
+    // mount fallback only — adopted state is first-hand and wins.
+    else if (this.opts.initialKeyboardProtocol) this.kbState.restore(this.opts.initialKeyboardProtocol);
     if (cached?.win32State) this.win32State = cached.win32State;
     // …and when there is NO prior mount to adopt from because the whole renderer
     // restarted (hot-swap update / webview reload) while the PTY session lived
@@ -2241,8 +2347,55 @@ export class TerminalEngine {
       // would otherwise re-persist a stale/null promptGate for the next hop.
       this.setPromptGate(prevGate.seen, prevGate.armed);
     }
+    // The mark kind rides the cache entry beside the gate. A cross-window detach
+    // carries only the gate, so the kind falls back to 'local' there and
+    // corrects itself at the next prompt mark.
+    this.lastPromptMarkKind = terminalCache.get(this.cacheKey)?.lastPromptMarkKind ?? 'local';
+    // A listener subscribed before this mount only holds the pre-restore defaults.
+    this.notifyPromptMark();
+
+    const inputSubscription = subscribeUserInput(boundTerm, () => { this.pendingUserInput = true; });
+    if (inputSubscription) this.disposables.push(() => inputSubscription.dispose());
+    else this.opts.onDiag?.(() => '[TERM-DIAG] broadcast unavailable: xterm user-input hook missing');
+    let pointerHeld = false;
+    const pointerGuard = (event: Event) => {
+      const inside = boundTerm.element?.contains(event.target as Node) ?? false;
+      if (event.type === 'mousemove' && (event as MouseEvent).buttons === 0) pointerHeld = false;
+      if (!inside && !pointerHeld) return;
+      if (event.type === 'mousedown') pointerHeld = true;
+      this.inPointerEvent = true;
+      if (event.type === 'mouseup') pointerHeld = false;
+      queueMicrotask(() => { this.inPointerEvent = false; });
+    };
+    for (const name of ['mousedown', 'mousemove', 'mouseup', 'wheel']) {
+      window.addEventListener(name, pointerGuard, true);
+      this.disposables.push(() => window.removeEventListener(name, pointerGuard, true));
+    }
+    // Bubble phase and window-only: a capture listener would also see the element
+    // blur that xterm's own mousedown focus() fires, clearing the guard just before
+    // xterm sends that press's mouse report.
+    const resetPointer = (event: Event) => {
+      if (event.target !== window) return;
+      pointerHeld = false;
+      this.inPointerEvent = false;
+    };
+    window.addEventListener('blur', resetPointer);
+    this.disposables.push(() => window.removeEventListener('blur', resetPointer));
+    const nativePaste = (event: ClipboardEvent) => {
+      // xterm still owns the event (including empty/file paste). Suppress its
+      // onData copy even if it brackets empty text; never cancel the DOM event.
+      this.inNativePaste = true;
+      queueMicrotask(() => { this.inNativePaste = false; });
+      const text = event.clipboardData?.getData('text/plain');
+      if (!text || !this.attachedProcessId || !terminalCache.get(this.cacheKey)?.processId) return;
+      emitBroadcast(this.cacheKey, { kind: 'paste', text });
+    };
+    boundTerm.element?.addEventListener('paste', nativePaste, true);
+    this.disposables.push(() => boundTerm.element?.removeEventListener('paste', nativePaste, true));
 
     const dataDisposable = boundTerm.onData((data) => {
+      const user = this.pendingUserInput;
+      this.pendingUserInput = false;
       // Stamp the most-recent user-input time so the alt-screen heal never reset()s
       // the buffer mid-keystroke (Task 6: RESYNC_SETTLE_MS input-quiet gate).
       const _e = terminalCache.get(this.cacheKey);
@@ -2258,9 +2411,15 @@ export class TerminalEngine {
       if (this.attachedProcessId) {
         // Fire-and-forget: swallow rejection (e.g. PTY already exited) so it
         // never surfaces as an uncaught promise rejection.
-        Promise.resolve(this.bridge.write(this.attachedProcessId, data)).catch((e: unknown) => {
+        Promise.resolve(isDeliveringBroadcast()
+          ? queueBroadcastTargetWrite(this.bridge.write.bind(this.bridge), this.attachedProcessId, data, this.cacheKey)
+          : this.bridge.write(this.attachedProcessId, data)).catch((e: unknown) => {
           this.opts.onDiag?.(() => `[TERM-DIAG] write after exit ignored: ${e}`);
         });
+        if (user && !this.inPointerEvent && !this.inNativePaste && !terminalCache.get(this.cacheKey)?.inBroadcastPaste) {
+          if (this.pendingKey) this.emitKeyBroadcast(data);
+          else emitBroadcast(this.cacheKey, { kind: 'text', data });
+        }
       }
     });
 
@@ -2310,6 +2469,14 @@ export class TerminalEngine {
       if (buf.viewportY >= buf.baseY) return;
       this.emitInputLine('');
     });
+
+    // Scrollbar ▲/▼ buttons (plan 046): the patched xterm scrollbar dispatches a bubbling
+    // event from inside term.element; this turns each one into scrollLines(±1). It lives in
+    // `disposables`, NOT `containerDisposables`: the listener is on term.element, which is
+    // the unit that MOVES on relocateTo() (design 012 D6), so it must survive a relocation
+    // and die only with the mount. Re-added on every mount() because beginMountWiring()
+    // resets `disposables` and unmount() runs them — one listener per live mount.
+    const scrollbarArrowsDispose = wireScrollbarArrows(boundTerm);
 
     // Track the live match count so refreshSearch can distinguish "user dismissed
     // an existing match" from "no match yet" (see lastSearchResultCount).
@@ -2367,7 +2534,7 @@ export class TerminalEngine {
       // exited without cleaning up (claude/copilot exit paths vary) — reset so
       // enhanced-key encoding and command suggestions return to plain-prompt
       // behavior. Observe-only: cwd parsing stays in the Rust pipeline.
-      const promptOscHeal = (): boolean => {
+      const promptOscHeal = (kind: PromptMarkKind, source: string): boolean => {
         // Every rendered prompt closes one command's span and opens the next —
         // the boundary the ended-region marks are anchored to. Recorded first,
         // so it is independent of whether the heal branches below fire.
@@ -2391,16 +2558,31 @@ export class TerminalEngine {
             this.suppressUntilSubmit = true;
           }
         }
+        this.lastPromptMarkKind = kind;
+        const markEntry = terminalCache.get(this.cacheKey);
+        if (markEntry) markEntry.lastPromptMarkKind = kind;
+        this.opts.onDiag?.(() => `[TERM-DIAG] prompt mark source=${source} kind=${kind} rearmed=${!wasArmed}`);
+        this.notifyPromptMark();
         return false;
       };
       const osc9 = boundTerm.parser.registerOscHandler(9, (data: string) => {
         // OSC 9 is overloaded (9;9=cwd, 9;4=progress, notifications): only the
         // cwd form is a prompt signal — progress can be emitted by a LIVE TUI.
-        if (data.startsWith('9;')) return promptOscHeal();
+        if (data.startsWith('9;')) return promptOscHeal('local', 'osc9;9');
         return false;
       });
-      const osc7 = boundTerm.parser.registerOscHandler(7, () => promptOscHeal());
-      this.disposables.push(() => osc9.dispose(), () => osc7.dispose());
+      const osc7 = boundTerm.parser.registerOscHandler(7, () => promptOscHeal('host', 'osc7'));
+      // OSC 133 (semantic prompt): only the prompt-start mark `A` / `A;…` is a
+      // prompt render. B/C/D mark the command's own start, output and end, and a
+      // TUI may emit those mid-run — they must not re-arm the gate. Unlike OSC 7
+      // and 9;9 the backend never reads 133, so a remote host can send it without
+      // overwriting the tab's cwd with a remote path.
+      const osc133 = boundTerm.parser.registerOscHandler(133, (data: string) => {
+        if (data === 'A' || data.startsWith('A;')) return promptOscHeal('host', `osc133 payload=${JSON.stringify(data.slice(0, 32))}`);
+        this.opts.onDiag?.(() => `[TERM-DIAG] osc133 ignored payload=${JSON.stringify(data.slice(0, 32))} (not a prompt start)`);
+        return false;
+      });
+      this.disposables.push(() => osc9.dispose(), () => osc7.dispose(), () => osc133.dispose());
 
       // Agent color-scheme guard: while a pane has an assigned agent color
       // (cache.agentColorLocked), swallow the program's own color-control OSCs so
@@ -2443,6 +2625,28 @@ export class TerminalEngine {
 
     // --- Keyboard: attachCustomKeyEventHandler (R7 + source 445-504) ---
     boundTerm.attachCustomKeyEventHandler((event) => {
+      // Every key event starts with no pending descriptor, so a keypress that does
+      // not match (dead key, composition) can never inherit the keydown's key.
+      this.pendingKey = null;
+      if (event.type !== 'keypress') this.lastKeydown = null;
+      if (inputSubscription && hasBroadcastSink() && !isDeliveringBroadcast() && !event.isComposing) {
+        if (event.type === 'keypress') {
+          // Uppercase/AltGr input may arrive after keydown's microtask expires.
+          // Consumed once, and expires like keydown's capture if xterm's keypress
+          // then emits nothing.
+          const last = this.lastKeydown;
+          this.lastKeydown = null;
+          if (last && event.key === last.key) {
+            this.pendingKey = last;
+            queueMicrotask(() => { if (this.pendingKey === last) this.pendingKey = null; });
+          }
+        } else if (event.type === 'keydown' || event.type === 'keyup') {
+          const key = describe(event);
+          this.pendingKey = key;
+          if (event.type === 'keydown') this.lastKeydown = key;
+          queueMicrotask(() => { if (this.pendingKey === key) this.pendingKey = null; });
+        }
+      }
       if (event.type === 'keydown') {
         const isModifier = ['Control', 'Shift', 'Alt', 'Meta'].includes(event.key);
         if (!isModifier) {
@@ -2591,6 +2795,7 @@ export class TerminalEngine {
           Promise.resolve(this.bridge.write(this.attachedProcessId, '\n')).catch((e: unknown) => {
             this.opts.onDiag?.(() => `[TERM-DIAG] write after exit ignored: ${e}`);
           });
+          this.emitKeyBroadcast('\n');
         }
         return false;
       }
@@ -2718,6 +2923,7 @@ export class TerminalEngine {
           Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
             this.opts.onDiag?.(() => `[TERM-DIAG] cmd-arrow home/end write ignored: ${e}`);
           });
+          this.emitKeyBroadcast(seq);
         }
         return false;
       }
@@ -2751,6 +2957,7 @@ export class TerminalEngine {
           Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
             this.opts.onDiag?.(() => `[TERM-DIAG] option-arrow word-nav write ignored: ${e}`);
           });
+          this.emitKeyBroadcast(seq);
         }
         return false;
       }
@@ -2784,6 +2991,7 @@ export class TerminalEngine {
             Promise.resolve(this.bridge.write(this.attachedProcessId, shimSeq)).catch((e: unknown) => {
               this.opts.onDiag?.(() => `[TERM-DIAG] word-delete shim write ignored: ${e}`);
             });
+            this.emitKeyBroadcast(shimSeq);
           }
           return false;
         }
@@ -2801,6 +3009,7 @@ export class TerminalEngine {
             Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
               this.opts.onDiag?.(() => `[TERM-DIAG] kb write ignored: ${e}`);
             });
+            this.emitKeyBroadcast(seq);
           }
           return false;
         }
@@ -2835,6 +3044,7 @@ export class TerminalEngine {
             Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
               this.opts.onDiag?.(() => `[TERM-DIAG] win32 kb write ignored: ${e}`);
             });
+            this.emitKeyBroadcast(seq);
           }
           return false;
         }
@@ -2884,6 +3094,7 @@ export class TerminalEngine {
       () => titleDisposable.dispose(),
       () => writeParsedDisposable.dispose(),
       () => scrollDisposable.dispose(),
+      scrollbarArrowsDispose,
       () => searchResultsDisposable.dispose(),
       () => selectionDisposable.dispose(),
       () => pathLinkDisposable.dispose(),
@@ -2939,11 +3150,27 @@ export class TerminalEngine {
       // Backlog 011: mark survives the entry swap (live capture owns it now).
       captureMark: existingCache?.captureMark ?? null,
       promptGate: existingCache?.promptGate ?? null,
+      lastPromptMarkKind: existingCache?.lastPromptMarkKind,
       // Enhanced keyboard protocol state — see the adoption comment at the top
       // of mount(). Writing `this.kbState`/`this.win32State` back here (rather
       // than existingCache's) is correct in both cases: if we adopted the cached
       // instance above, this is a no-op re-write of the same object; if this is
       // a genuinely fresh terminal, it seeds the cache with the fresh instance.
+      getBroadcastOptions: () => ({
+        shellType: this.opts.shellType?.(), enhancedKeyboard: this.enhancedKbEnabled(),
+        macOptionIsMeta: this.opts.macOptionIsMeta ?? false,
+        isMac: this.opts.isMac ?? /Mac/.test(globalThis.navigator?.platform ?? ''),
+        isWindows: this.isWindowsPlatform(),
+      }),
+      disarmBroadcastPrompt: () => {
+        this.setPromptGate(this.promptOscSeen, false);
+        this.sawInputWhileDisarmed = false;
+        this.capture?.cancel();
+        this.emitInputLine('');
+      },
+      broadcastAvailable: !!inputSubscription,
+      broadcastWrite: true,
+      broadcastRawWrite: this.bridge.write.bind(this.bridge),
       kbState: this.kbState,
       win32State: this.win32State,
       // Backlog 003: the cache-lifetime protocol handler disposers, created once
@@ -2971,11 +3198,13 @@ export class TerminalEngine {
       boundTerm.focus();
     }
 
-    // rAF settle-fit after DOM updates (source 592-596). Skipped in mirror mode.
+    // rAF settle-fit after DOM updates (source 592-596). A cached mount
+    // that is still hidden settles on activation instead.
     if (!this.opts.mirror && typeof requestAnimationFrame === 'function') {
+      const reattached = !!cached?.terminal.element;
       const rafId = requestAnimationFrame(() => {
         try {
-          if (this.container) fit?.fit();
+          if (this.container && (!reattached || this.geometryEligible())) fit?.fit();
         } catch (e) {
           console.warn('terminal-core/engine: rAF settle-fit failed:', e);
         }
@@ -3069,6 +3298,9 @@ export class TerminalEngine {
       // New shell: its own prompt hook re-proves itself (fresh gate state).
       this.setPromptGate(false, false);
       this.sawInputWhileDisarmed = false;
+      this.lastPromptMarkKind = 'local';
+      if (suggestCacheEntry) suggestCacheEntry.lastPromptMarkKind = 'local';
+      this.notifyPromptMark();
       // Review 046/047: a new processId is a new PTY session with its own
       // independent protocol handshake — carrying over the old session's
       // Kitty/Win32-Input-Mode state would be wrong (stale flags, or a
@@ -3268,11 +3500,16 @@ export class TerminalEngine {
       let snapshot = '';
       let snapCols = 0;
       let snapRows = 0;
+      // A restore's replay (previous-session scrollback only), and where its cursor must end up.
+      let prefixOnly = false;
+      let anchorRow: number | undefined;
       if (typeof this.bridge.getSnapshot === 'function') {
         const result = await this.bridge.getSnapshot(processId, cols, rows);
         snapshot = result?.snapshot || '';
         snapCols = result?.cols ?? 0;
         snapRows = result?.rows ?? 0;
+        prefixOnly = result?.prefixOnly === true;
+        anchorRow = typeof result?.anchorRow === 'number' ? result.anchorRow : undefined;
       }
 
       if (cancelled()) {
@@ -3307,15 +3544,34 @@ export class TerminalEngine {
         // FIRST chunk of every Windows session — it reliably lands in this dropped
         // window, and losing it sticks the whole session on legacy encoding (live
         // bug: every fresh Windows tab lost the handshake). Apply it before the drop.
-        if (this.isWindowsPlatform()) {
+        // (A prefix-only snapshot keeps its buffered bytes and writes them below, through the
+        // parser, so its handler sees the handshake itself.)
+        if (!prefixOnly && this.isWindowsPlatform()) {
           const verdict = scanWin32ModeSequences(entry.pendingOutput.join(''));
           if (verdict === 'enable') this.win32State.enable();
           else if (verdict === 'disable') this.win32State.disable();
         }
         term.reset();
-        term.write(snapshot);
+        // A restore's replay is placed so the cursor ends on the row ConPTY thinks the prompt is
+        // on (`anchorRow`); without one it is written as it comes, as before.
+        this.writeHydratedScreen(
+          term,
+          prefixOnly && anchorRow !== undefined ? wrapRestoreReplay(snapshot, anchorRow, term.rows) : snapshot,
+        );
+        const pendingText = prefixOnly ? entry.pendingOutput.join('') : '';
         entry.pendingOutput = [];
         entry.pendingOutputBytes = 0;
+        // A prefix-only snapshot is NOT the screen, so what the shell printed while we were
+        // hydrating (its first prompt, ConPTY's startup positioning) is not reflected in it:
+        // write it after the replay, in order, instead of dropping it as a snapshot would.
+        // Not handled: the hydration buffer is tail-capped (HYDRATION_BUFFER_CAP_BYTES). A screen
+        // snapshot covers whatever the cap evicted; a prefix-only one does not, so if the shell
+        // printed more than the cap before this point only the tail survives. That takes millions
+        // of characters inside one snapshot round trip, so it is left unrepaired rather than
+        // guessed at; a repair would need an authoritative resync that this path does not have.
+        if (pendingText) {
+          term.write(pendingText);
+        }
         // Record what we painted so mirror resync() can diff against it.
         entry.lastSnapshot = snapshot;
         // Zoom-to-fit the freshly-sized grid into the pane.
@@ -3375,7 +3631,7 @@ export class TerminalEngine {
 
       if (historyText) {
         term.reset();
-        term.write(historyText);
+        this.writeHydratedScreen(term, historyText);
       }
       const pendingText = entry.pendingOutput.join('');
       entry.pendingOutput = [];
@@ -3432,6 +3688,25 @@ export class TerminalEngine {
     // no-op FitAddon.fit() would change a hot, well-tested path for no benefit.
     // Do not "fix" it.
     this.armActivationFit();
+  }
+
+  /**
+   * xterm parses `write` asynchronously.  A freshly mounted terminal can otherwise
+   * finish hydration with the backend screen in its write queue but no render pass
+   * requested for the newly attached canvas (most visibly after a renderer reload
+   * or GPU surface recreation).  Refresh only after the parser has committed the
+   * screen, so the first visible frame is the authoritative snapshot/history.
+   */
+  private writeHydratedScreen(term: Terminal, screen: string): void {
+    term.write(screen, () => {
+      try {
+        term.refresh(0, Math.max(0, term.rows - 1));
+      } catch (error) {
+        // A terminal can be disposed while its queued write is being parsed. The
+        // screen contents are still valid; simply leave its next mount to redraw.
+        console.debug('terminal-core/engine: hydration repaint skipped', error);
+      }
+    });
   }
 
   /**
@@ -3988,7 +4263,9 @@ export class TerminalEngine {
   }
 
   paste(text: string): void {
-    this.term?.paste(text);
+    if (!this.term) return;
+    if (this.attachedProcessId) withBroadcastPaste(this.cacheKey, text, () => this.term!.paste(text));
+    else this.term.paste(text);
   }
 
   // --- Backlog 011: command capture + suggest popup -------------------------
@@ -3996,6 +4273,7 @@ export class TerminalEngine {
   /** Capture/popup allowed only at a plain shell prompt. */
   private suggestionsAllowed(): boolean {
     if (!this.term) return false;
+    if (this.opts.broadcastActive?.()) return false;
     if (this.term.buffer.active.type === 'alternate') return false;
     if (this.protocolActive()) return false;
     // An app holding mouse tracking (copilot/opencode) owns the terminal even
@@ -4045,6 +4323,11 @@ export class TerminalEngine {
 
   /** Route typed input (pre-echo) into the capture heuristic. */
   private routeCaptureData(data: string): void {
+    // Submitting consumes the shell prompt even when capture/suggestions are disabled.
+    if (/[\r\n]/.test(data)) {
+      this.setPromptGate(this.promptOscSeen, false);
+      this.sawInputWhileDisarmed = false;
+    }
     const capture = this.capture;
     if (!capture || data.length === 0) return;
     if (!this.suggestionsAllowed()) {
@@ -4213,7 +4496,7 @@ export class TerminalEngine {
    *  typed input (Right × suffix, covering mid-line cursors), erase the WHOLE
    *  input with DELs, then write the command. Shell-agnostic; does NOT run it. */
   insertCommand(command: string): void {
-    if (!this.attachedProcessId || !this.term) return;
+    if (!this.attachedProcessId || !this.term || this.opts.broadcastActive?.()) return;
     const total = Array.from(this.capture?.getCurrentInput() ?? '').length;
     const before = this.capture?.charsBeforeCursor(this.term.cols) ?? 0;
     const suffix = Math.max(0, total - before);
@@ -4302,8 +4585,15 @@ export class TerminalEngine {
     // glyph on them, and clamping to the first real character would offer "Copy Path" for a
     // right-click on whitespace.
     if (inRow < rowIndent) return null;
+    // Nor past the row's content: a hard-wrapped row that stopped short of the grid (G1's second
+    // tier) has blank cells after its last character, and the stitched text does not carry them.
+    // Unclamped, a click on that blank run lands on the NEXT row's first characters — the head of
+    // the very path the join reconstructed — and offers Copy Path for a right-click on nothing.
+    const idx = rowStart + (inRow - rowIndent);
+    const nextStart = info.rowStarts[r + 1];
+    if (nextStart !== undefined && idx >= nextStart) return null;
 
-    return linkAtIndex(info.text, rowStart + (inRow - rowIndent));
+    return linkAtIndex(info.text, idx);
   }
 
   /**
@@ -4639,6 +4929,18 @@ export class TerminalEngine {
     // — and a dependency whose disposer is not idempotent threw out of mount().
     // `splice(0)` empties the shared array in place AND hands back what to run, so
     // the entry is already empty before the first disposer is invoked.
+    const broadcastEntry = terminalCache.get(this.cacheKey);
+    if (broadcastEntry) {
+      broadcastEntry.broadcastWrite = false;
+      broadcastEntry.disarmBroadcastPrompt = undefined;
+      // Freeze the live getters so the cache stops pinning this unmounted engine.
+      const frozenOptions = broadcastEntry.getBroadcastOptions?.();
+      broadcastEntry.getBroadcastOptions = frozenOptions ? () => frozenOptions : undefined;
+    }
+    this.pendingKey = null;
+    this.lastKeydown = null;
+    this.inNativePaste = false;
+    this.pendingUserInput = false;
     const localDisposers = this.disposables.splice(0);
     this.disposables = [];
     // design 012 §5.5 site 7: the container listeners are a separate array now.
@@ -5017,28 +5319,46 @@ export class TerminalEngine {
   }
 
   // Coalesce the live refresh: onWriteParsed fires per parsed chunk, so during
-  // heavy streaming we debounce to a single trailing refreshSearch instead of
+  // heavy streaming we throttle to one refreshSearch per interval instead of
   // re-searching the whole scrollback on every write. Cheap no-op when no search
   // is active, so we don't arm a timer for the common (no-search) case.
+  //
+  // THROTTLE, not trailing-debounce: restarting the timer on every write means a
+  // stream that never pauses for SEARCH_REFRESH_INTERVAL_MS (an agent printing
+  // continuously) starves the refresh, and the counter freezes until it stops.
   private scheduleSearchRefresh(): void {
     if (!this.activeSearch) return;
-    if (this.searchRefreshTimer) clearTimeout(this.searchRefreshTimer);
+    if (this.searchRefreshTimer) return;
     this.searchRefreshTimer = setTimeout(() => {
       this.searchRefreshTimer = null;
       this.refreshSearch();
-    }, SEARCH_REFRESH_DEBOUNCE_MS);
+    }, SEARCH_REFRESH_INTERVAL_MS);
   }
 
   // Re-run the active query in place (incremental) — driven by onWriteParsed so
   // live output keeps the counter/highlights fresh without moving the selection.
   // No-op when no search is active.
   //
-  // findNext re-selects the active match and scrolls it into view as a side
-  // effect. On live output (agent still printing) that yanks the viewport back
-  // up to the first match every write. So we snapshot the viewport before the
-  // re-search and restore it after: stay pinned to the bottom if we were
-  // following output, otherwise hold the exact scroll position. Only an explicit
-  // Next/Prev (searchNext/searchPrevious) should move the viewport.
+  // This must NOT be findNext. In @xterm/addon-search 0.16 `incremental` is
+  // ignored: a findNext for the term it already has cached starts from the END of
+  // the current selection, i.e. it ADVANCES to the next match. Used as a refresh
+  // it walked the selection one match per tick while output streamed (the "jumps
+  // incorrectly" symptom), and because the addon only recounts when the term
+  // changes, the "N of M" was never recomputed either — so row indices in its
+  // result list also went stale once the scrollback trimmed.
+  //
+  // Instead, mirror the addon's own onWriteParsed refresh (debounced, hence starved
+  // by a stream that never goes quiet): forget the cached term, then findPrevious.
+  // With a changed cached term, findPrevious re-highlights and recounts, and
+  // "expands the selection to the right" — re-selecting the SAME match. The addon
+  // clears the term through a private method; the only public call with that effect
+  // is clearDecorations(), which is why it is used here (it also drops the
+  // highlights, which findPrevious rebuilds synchronously in the same call).
+  // `noScroll` (an internal option, absent from the typings) keeps the viewport
+  // where it is, so only an explicit Next/Prev ever moves it.
+  //
+  // With NO selection (count was 0), findPrevious searches from the bottom, so the
+  // match that first appears is the NEWEST one (counter "N of N", not "1 of N").
   refreshSearch(): void {
     if (!this.activeSearch || !this.searchAddon || !this.term) return;
     // If the user dismissed an EXISTING match (had results, then cleared the
@@ -5047,13 +5367,13 @@ export class TerminalEngine {
     // keep refreshing so a match that scrolls into view from new output still
     // gets highlighted. A fresh type / Next / Prev re-arms via searchNext.
     if (this.lastSearchResultCount > 0 && !this.term.hasSelection()) return;
-    const buffer = this.term.buffer.active;
-    const prevViewportY = buffer.viewportY;
-    const wasAtBottom = prevViewportY >= buffer.baseY;
     const { query, opts } = this.activeSearch;
-    this.searchAddon.findNext(query, this.toSearchOptions(opts, true));
-    if (wasAtBottom) this.term.scrollToBottom();
-    else this.term.scrollToLine(prevViewportY);
+    this.searchAddon.clearDecorations();
+    (
+      this.searchAddon as unknown as {
+        findPrevious(t: string, o: ISearchOptions, internal: { noScroll: boolean }): boolean;
+      }
+    ).findPrevious(query, this.toSearchOptions(opts, true), { noScroll: true });
   }
 
   // Subscribe to result-count changes (the "N of M" feed). Forwards the addon's

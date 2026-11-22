@@ -18,6 +18,7 @@ const mockTabsState: { activeTabId: string | null; tabs: Array<{ id: string; has
   activeTabId: null,
   tabs: [],
 };
+const mockPanesState = { treesByTabId: {} as Record<string, unknown> };
 // Canvas view state. Only `overlayId` reaches the tracker — it is the one terminal the user
 // may be watching at 1:1, and therefore the only one whose own busy→idle must not notify.
 const mockCanvasState: { overlayId: string | null } = { overlayId: null };
@@ -26,7 +27,7 @@ const mockStoreSub: { cb: (() => void) | null } = { cb: null };
 jest.mock('../../store', () => ({
   store: {
     dispatch: (action: unknown) => dispatch(action),
-    getState: () => ({ panes: { treesByTabId: {} }, tabs: mockTabsState, canvas: mockCanvasState }),
+    getState: () => ({ panes: mockPanesState, tabs: mockTabsState, canvas: mockCanvasState }),
     subscribe: (cb: () => void) => {
       mockStoreSub.cb = cb;
       return () => { mockStoreSub.cb = null; };
@@ -56,17 +57,36 @@ const mockPaneTree = { ready: true };
 // Per-terminal pane-level mute the tracker consults (isTerminalMuted). Tests toggle it.
 const mockMutedTerminals = new Set<string>();
 jest.mock('../../store/slices/paneTreeOps', () => ({
-  findTabIdByTerminalId: (_trees: unknown, terminalId: string) => {
+  findTabIdByTerminalId: (trees: unknown, terminalId: string) => {
     if (!mockPaneTree.ready) return null;
+    if (trees && typeof trees === 'object') {
+      const keys = Object.keys(trees);
+      if (keys.length > 0) {
+        for (const [tabId, tree] of Object.entries(trees)) {
+          if (tree && Array.isArray((tree as any).terminals) && (tree as any).terminals.includes(terminalId)) {
+            return tabId;
+          }
+        }
+        return null;
+      }
+    }
     return terminalId === 'tm-1' ? 'tb-1'
       : terminalId === 'tm-2' ? 'tb-2'
       : terminalId === 'tm-3' ? 'tb-3'
       : null;
   },
   isTerminalMuted: (_trees: unknown, terminalId: string) => mockMutedTerminals.has(terminalId),
+  getAllTerminalIds: (tree: unknown) => {
+    if (!tree) return [];
+    if (typeof tree === 'object' && Array.isArray((tree as any).terminals)) {
+      return (tree as any).terminals;
+    }
+    return [];
+  },
 }));
 
 import { runningActivityTracker } from '../RunningActivityTracker';
+import { terminalCache } from '@termflow/terminal-core';
 
 function emitData(processId: string, bytes: number): void {
   window.dispatchEvent(
@@ -983,5 +1003,291 @@ describe('RunningActivityTracker spawn grace (a new shell is not "new activity")
     jest.advanceTimersByTime(SETTLE_MS);
     done();
     expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
+  });
+});
+
+describe('RunningActivityTracker visual change suppression (unseen bell)', () => {
+  const collect = () => {
+    const bells: Array<{ tabId: string }> = [];
+    const h = (e: Event) => bells.push((e as CustomEvent).detail);
+    window.addEventListener('activity:bell', h);
+    return { bells, done: () => window.removeEventListener('activity:bell', h) };
+  };
+
+  function setTerminalScreen(terminalId: string, lines: string[]): void {
+    terminalCache.set(terminalId, {
+      terminal: {
+        rows: lines.length,
+        cols: 80,
+        buffer: {
+          active: {
+            type: 'normal',
+            baseY: 0,
+            length: lines.length,
+            getLine: (n: number) => ({
+              translateToString: (trim?: boolean) => (trim ? (lines[n]?.trimEnd() ?? '') : (lines[n] ?? '')),
+            }),
+          },
+        },
+      },
+      hydrating: false,
+    } as any);
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    dispatch.mockClear();
+    mockTabsState.activeTabId = null;
+    mockTabsState.tabs = [];
+    mockPaneTree.ready = true;
+    mockMutedTerminals.clear();
+    mockCanvasState.overlayId = null;
+  });
+
+  afterEach(() => {
+    runningActivityTracker.stop();
+    jest.useRealTimers();
+    terminalCache.clear();
+    mockPanesState.treesByTabId = {};
+  });
+
+  it('does NOT ring bell when background terminal output produces no visual screen change (idle agent)', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    mockTabsState.tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
+    setTerminalScreen('tm-1', ['Claude Code > ', '']);
+    mockPanesState.treesByTabId = { 'tb-1': { terminals: ['tm-1'] } };
+    runningActivityTracker.start(0);
+
+    // User switches from Tab 1 to Tab 2
+    mockTabsState.activeTabId = 'tb-2';
+    mockStoreSub.cb?.(); // handleActiveTabChange captures baseline for tm-1
+
+    jest.advanceTimersByTime(100);
+
+    // Idle agent emits a chunk (e.g. non-visual OSC title \x1b]0;Claude Code\x07 or cursor toggle)
+    // Visual terminal screen remains identical
+    const { bells, done } = collect();
+    emitData('p1', 30);
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+
+    // Assert: No bell was emitted, and tab was not flagged unseen
+    expect(bells).toHaveLength(0);
+    expect(unseenTabIds()).not.toContain('tb-1');
+  });
+
+  it('DOES ring bell when background terminal output produces genuine visual change', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    mockTabsState.tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
+    setTerminalScreen('tm-1', ['Claude Code > ', '']);
+    mockPanesState.treesByTabId = { 'tb-1': { terminals: ['tm-1'] } };
+    runningActivityTracker.start(0);
+
+    mockTabsState.activeTabId = 'tb-2';
+    mockStoreSub.cb?.(); // captures baseline for tm-1
+
+    jest.advanceTimersByTime(100);
+
+    // Agent finishes task and updates visual screen
+    setTerminalScreen('tm-1', ['Claude Code > ', 'Task complete in 3.4s!']);
+
+    const { bells, done } = collect();
+    emitData('p1', 50);
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+
+    expect(bells).toHaveLength(1);
+    expect(bells[0].tabId).toBe('tb-1');
+    expect(unseenTabIds()).toContain('tb-1');
+  });
+
+  it('does NOT ring bell on process exit if screen has no visual change', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    mockTabsState.tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
+    setTerminalScreen('tm-1', ['prompt $', '']);
+    mockPanesState.treesByTabId = { 'tb-1': { terminals: ['tm-1'] } };
+    runningActivityTracker.start(0);
+
+    mockTabsState.activeTabId = 'tb-2';
+    mockStoreSub.cb?.(); // captures baseline for tm-1
+
+    jest.advanceTimersByTime(100);
+
+    const { bells, done } = collect();
+    emitData('p1', 10);
+    emitExit('p1', 'tm-1');
+    done();
+
+    expect(bells).toHaveLength(0);
+    expect(unseenTabIds()).not.toContain('tb-1');
+  });
+
+  it('DOES ring bell on process exit if screen produced visual change', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    mockTabsState.tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
+    setTerminalScreen('tm-1', ['prompt $', '']);
+    mockPanesState.treesByTabId = { 'tb-1': { terminals: ['tm-1'] } };
+    runningActivityTracker.start(0);
+
+    mockTabsState.activeTabId = 'tb-2';
+    mockStoreSub.cb?.(); // captures baseline for tm-1
+
+    jest.advanceTimersByTime(100);
+
+    setTerminalScreen('tm-1', ['prompt $ build', 'Build finished: 0 errors']);
+    const { bells, done } = collect();
+    emitData('p1', 50);
+    emitExit('p1', 'tm-1');
+    done();
+
+    expect(bells).toHaveLength(1);
+    expect(bells[0].tabId).toBe('tb-1');
+    expect(unseenTabIds()).toContain('tb-1');
+  });
+
+  it('awaits pending write drain on process exit before inspecting screen (R1)', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    mockTabsState.tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
+    setTerminalScreen('tm-1', ['prompt $', '']);
+    mockPanesState.treesByTabId = { 'tb-1': { terminals: ['tm-1'] } };
+    runningActivityTracker.start(0);
+
+    mockTabsState.activeTabId = 'tb-2';
+    mockStoreSub.cb?.(); // captures baseline for tm-1
+
+    jest.advanceTimersByTime(100);
+
+    // Terminal has unflushed live write buffer at the moment of exit
+    const entry = terminalCache.get('tm-1')!;
+    entry.liveWriteBuf = 'Build finished';
+    // When write is flushed and drained, the screen updates
+    (entry.terminal as any).write = (data: string, cb?: () => void) => {
+      setTerminalScreen('tm-1', ['prompt $ build', 'Build finished: 0 errors']);
+      if (cb) cb();
+    };
+
+    const { bells, done } = collect();
+    emitData('p1', 50);
+    emitExit('p1', 'tm-1');
+    done();
+
+    expect(bells).toHaveLength(1);
+    expect(bells[0].tabId).toBe('tb-1');
+    expect(unseenTabIds()).toContain('tb-1');
+  });
+
+  it('synchronizes baselines when cooldown ends so subsequent non-visual output does not ring (R3)', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    mockTabsState.tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
+    setTerminalScreen('tm-1', ['initial 80 cols', '']);
+    mockPanesState.treesByTabId = { 'tb-1': { terminals: ['tm-1'] } };
+    runningActivityTracker.start(0);
+
+    mockTabsState.activeTabId = 'tb-2';
+    mockStoreSub.cb?.(); // captures baseline for tm-1
+
+    // A resize event occurs, arming cooldown
+    window.dispatchEvent(new Event('resize'));
+
+    // During cooldown, terminal geometry changes to 120 cols
+    terminalCache.set('tm-1', {
+      terminal: {
+        rows: 2,
+        cols: 120,
+        buffer: {
+          active: {
+            type: 'normal',
+            baseY: 0,
+            length: 2,
+            getLine: (n: number) => ({
+              translateToString: () => (n === 0 ? 'resized 120 cols' : ''),
+            }),
+          },
+        },
+      },
+      hydrating: false,
+    } as any);
+
+    // Cooldown expires and evaluate runs
+    jest.advanceTimersByTime(RESIZE_COOLDOWN_MS + EVAL_INTERVAL_MS);
+
+    // Now inactive terminal emits an idle non-visual chunk
+    const { bells, done } = collect();
+    emitData('p1', 10);
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+
+    // Assert: No bell because baseline was synchronized to the post-cooldown screen
+    expect(bells).toHaveLength(0);
+    expect(unseenTabIds()).not.toContain('tb-1');
+  });
+
+  it('updates baselines during repaint burst suppression (R3)', () => {
+    // Setup 6 tabs (BURST_TAB_THRESHOLD = 5)
+    mockTabsState.activeTabId = 'tb-active';
+    mockTabsState.tabs = [{ id: 'tb-active' }];
+    mockPanesState.treesByTabId = {};
+    for (let i = 1; i <= 6; i++) {
+      const tabId = `tb-${i}`;
+      const termId = `tm-${i}`;
+      const procId = `p${i}`;
+      mockTabsState.tabs.push({ id: tabId });
+      mockPanesState.treesByTabId[tabId] = { terminals: [termId] };
+      setTerminalScreen(termId, [`screen-${i}`, '']);
+    }
+    runningActivityTracker.start(0);
+
+    // Switch away from all to establish baselines
+    for (let i = 1; i <= 6; i++) {
+      mockTabsState.activeTabId = `tb-${i}`;
+      mockStoreSub.cb?.();
+    }
+    mockTabsState.activeTabId = 'tb-active';
+    mockStoreSub.cb?.();
+
+    // All 6 tabs change visually at the same time (burst)
+    for (let i = 1; i <= 6; i++) {
+      setTerminalScreen(`tm-${i}`, [`screen-${i}-changed`, '']);
+      emitData(`p${i}`, 20);
+    }
+
+    const { bells, done } = collect();
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+
+    // The simultaneous 6-tab burst is suppressed
+    expect(bells).toHaveLength(0);
+
+    // Subsequent non-visual output on tb-1 must NOT ring because its baseline was updated
+    const { bells: bells2, done: done2 } = collect();
+    emitData('p1', 5);
+    jest.advanceTimersByTime(SETTLE_MS);
+    done2();
+
+    expect(bells2).toHaveLength(0);
+  });
+
+  it('prunes unowned baselines when pane/tab is closed (R4)', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    mockTabsState.tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
+    setTerminalScreen('tm-1', ['prompt $', '']);
+    mockPanesState.treesByTabId = {
+      'tb-1': { terminals: ['tm-1'] },
+      'tb-2': { terminals: ['tm-2'] },
+    };
+    runningActivityTracker.start(0);
+
+    mockTabsState.activeTabId = 'tb-2';
+    mockStoreSub.cb?.(); // captures baseline for tm-1
+
+    expect((runningActivityTracker as any).terminalBaselines.has('tm-1')).toBe(true);
+
+    // Tab 1 is closed
+    delete mockPanesState.treesByTabId['tb-1'];
+
+    // Next eval tick prunes unowned baseline
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+
+    expect((runningActivityTracker as any).terminalBaselines.has('tm-1')).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { CanvasEdge } from '../store/slices/canvasSlice';
+import { captureWorkspace, isCurrentWorkspace } from './workspaceReplacement';
 
 /**
  * REST client for the canvas connection graph — `plan/013` Task 18, against the routes
@@ -142,9 +143,14 @@ export async function reconnectEdge(
   edge: CanvasEdge,
   from: string,
   to: string,
+  current: () => boolean = (() => {
+    const workspace = captureWorkspace();
+    return () => isCurrentWorkspace(workspace);
+  })(),
 ): Promise<Reconnected | null> {
+  if (!current()) return null;
   const created = await createEdge(from, to, edge.label);
-  if (!created) return null;
+  if (!created || !current()) return null;
   // The pair already existed AS this edge: nothing to delete, and deleting would remove the row
   // just confirmed. Only reachable if a caller asks for the pair the edge already has.
   if (created.id === edge.id) return { edge: created, removedId: null };

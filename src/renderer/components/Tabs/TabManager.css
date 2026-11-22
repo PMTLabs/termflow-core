@@ -249,6 +249,20 @@
   flex-shrink: 0;
 }
 
+/* Admin-tab badge (plan 045) — this tab's shell is running at High integrity
+   (Administrator). A dedicated element, not a swapped profile icon, since the
+   profile emoji is user-facing data the badge must not hide. Reused verbatim
+   on the pane header (TerminalPane.tsx). */
+.tab-admin-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+  color: var(--tab-admin-badge, #e0a030);
+}
+
 /* Notifications-muted indicator — a dim, deliberately COLORLESS slashed bell so
    it reads as a passive status ("muted"), never as a notification the way the
    colored unseen 🔔 does. */
@@ -259,6 +273,20 @@
   color: var(--tab-muted-icon, #8a8a8a);
   opacity: 0.7;
   flex-shrink: 0;
+}
+
+/* Previous-host marker — a shell in this tab is served by a terminal host from an older
+   build. An inline icon with its own `title`, like the other standing per-tab states: it takes
+   its own width in the row and overlays nothing. It is rendered before the title, with the
+   admin badge: the trailing badges sit under `.tab-close`, which would cover it. */
+.tab-previous-host {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+  color: var(--tab-previous-host, #c9a227);
 }
 
 /* Tab "running" sweep — a process inside the tab is actively producing output. */
@@ -286,7 +314,69 @@
   );
   background-size: 160px 100%;
   background-repeat: repeat-x;
-  animation: tab-running-sweep 1.2s linear infinite;
+  /* STEPPED, not `linear`. `background-position` cannot be composited, so a linear sweep
+     repaints the tab every vsync for as long as anything in it is busy — and an agent's
+     spinner keeps a tab busy for hours. Each of those frames is a full-window composition
+     for DWM (worse again across a DisplayLink / second adapter). Measured in Edge 155 at
+     2560x1440: linear ≈ 3.7% renderer GPU and +15–20 points of DWM GPU; `steps(6)` is
+     indistinguishable from no animation, because Blink only invalidates when a step lands.
+     6 steps per 1.2s = 5 moves a second, still readable as motion. Don't put `linear` back. */
+  animation: tab-running-sweep 1.2s steps(6) infinite;
+}
+
+/* Settings › Appearance › "Busy indicator on tabs" (`tabRunningCue`), set on `.tabs-list`.
+   The base rule above is `animated`; every other cue overrides it here. */
+
+/* `pulse` (the default): the tab's shell icon blinks — lit with an accent glow for 1s, dimmed
+   for 1s. One change a second, a fifth of the sweep's cost. `steps(1, end)` holds each keyframe
+   interval's starting value, and the keyframes name only 50%, so 0%/100% are the rule's own
+   values: no second copy of the glow to drift. A smooth fade here would repaint every frame.
+
+   The icon, not the tab. A whole-tab wash was easy to see but too loud with several agents
+   working at once; the Canvas sidebar already blinks the same icon for the same state.
+
+   Not on the active tab: you are looking at its output already, so a blink there is noise. */
+.tabs-list[data-running-cue="pulse"] .tab-item.tab-running::after {
+  display: none;
+}
+.tabs-list[data-running-cue="pulse"] .tab-item.tab-running:not(.active) .shell-profile-icon {
+  filter: drop-shadow(0 0 3px var(--tab-running-accent, #3aa6ff))
+    drop-shadow(0 0 1px var(--tab-running-accent, #3aa6ff));
+  animation: tab-running-pulse 2s steps(1, end) infinite;
+}
+@keyframes tab-running-pulse {
+  50% { opacity: 0.3; filter: none; }
+}
+
+/* `static`: no motion, so it has to be seen at a glance. The sweep's band held still (back ~45%
+   of a 160px tile at 0.18) read as a smudge. A soft accent wash across the whole tab, deepest at
+   the centre, with the alpha in the colours. A 1px accent line along the bottom edge marks the
+   busy tab; it is thinner than the active tab's marker so the two stay distinguishable. Rendered
+   on both themes before choosing these numbers. */
+.tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 8%, transparent) 0%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 20%, transparent) 50%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 8%, transparent) 100%
+  );
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  box-shadow: inset 0 -1px 0 var(--tab-running-accent, #3aa6ff);
+  opacity: 1;
+  animation: none;
+}
+/* The active tab's near-black background needs a deeper wash to show the same. */
+.tabs-list[data-running-cue="static"] .tab-item.active.tab-running::after {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 0%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 28%, transparent) 50%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 100%
+  );
+}
+.tabs-list[data-running-cue="off"] .tab-item.tab-running::after {
+  display: none;
 }
 
 @keyframes tab-running-sweep {

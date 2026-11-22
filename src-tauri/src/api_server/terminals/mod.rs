@@ -58,6 +58,9 @@ pub(crate) fn health_body(instance_id: &str) -> serde_json::Value {
 ///                        a major-version change, explicitly not done here.
 ///   `owningTabId`      — NEW: the tab that owns the leaf. `null` for a
 ///                        headless (no-renderer-pane) terminal.
+///   `generation`       — `"current"` or `"previous"`: whether the host serving the
+///                        terminal belongs to the running build. Always present;
+///                        `"previous"` also means "cannot be shown to be current".
 /// Resolve any caller-supplied terminal reference to THIS RUN's process id.
 ///
 /// Prefix-dispatched deliberately. Before design 014 the id spaces overlapped —
@@ -116,7 +119,11 @@ pub fn classify_terminal_ref(id: &str) -> Result<TerminalRef, (StatusCode, Strin
     Ok(if id.starts_with("tm-") { TerminalRef::Leaf } else { TerminalRef::Process })
 }
 
-pub(crate) fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json::Value {
+pub(crate) fn terminal_identity_json(
+    t: &crate::state::Terminal,
+    mode: &str,
+    generation: crate::state::Marker,
+) -> serde_json::Value {
     json!({
         "id": t.id,
         "processId": t.id,
@@ -139,11 +146,18 @@ pub(crate) fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> 
         // gate DISARMED; the ARMED decision is sampled pre-mount via
         // probe_reattach_prompt_gate, NOT here (review 008 M-1).
         "promptHook": t.prompt_hook,
+        // `"previous"` when the host serving this terminal is not the running
+        // build's, or cannot be shown to be: the tab strip marks it.
+        "generation": generation.as_str(),
     })
 }
 
 pub(crate) async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
-    let terminals: Vec<_> = state.terminals.iter().map(|e| terminal_identity_json(e.value(), "ui")).collect();
+    let terminals: Vec<_> = state
+        .terminals_with_markers()
+        .iter()
+        .map(|(t, generation)| terminal_identity_json(t, "ui", *generation))
+        .collect();
     // Owner discriminator. Terminals live in this process's own AppState, so
     // every entry above belongs to this instance by construction — the useful
     // guarantee is therefore at the RESPONSE level: a client that reaches the
@@ -287,6 +301,10 @@ pub(crate) async fn create_terminal(
     State(state): State<AppState>,
     Json(payload): Json<CreateTerminalReq>,
 ) -> impl IntoResponse {
+    // Bind the parent incarnation before spawning can await. Resolving its leaf
+    // again after the spawn could credit a replacement for the old shell's edge.
+    let parent_process = payload.parent_terminal_id.as_deref()
+        .and_then(|parent| state.host_table.keys().resolve_process(parent, false));
     // Resolve profile if provided (handle multiple field names for compatibility)
     let profile_to_use = payload.profile_id.clone()
         .or(payload.profile.clone())
@@ -363,6 +381,9 @@ pub(crate) async fn create_terminal(
             shell_args,
             cwd: shell_cwd,
             name: Some(terminal_name.clone()),
+            // Elevation via the REST/MCP path is out of scope (plan 045).
+            elevated: false,
+            ssh_launch_connection_id: None,
         },
     )
     .await;
@@ -399,8 +420,19 @@ pub(crate) async fn create_terminal(
                         );
                         // Never fail the spawn for a graph write. Task 16 returns `Result`
                         // precisely so this is a LOGGED failure rather than a silent one.
-                        if let Err(e) = state.canvas_store.insert_edge(&edge) {
-                            log::warn!("[CANVAS] auto-connect edge not stored: {}", e);
+                        if let Some(parent_process) = parent_process {
+                            let worker = state.clone();
+                            let process = id.clone();
+                            let stored = tokio::task::spawn_blocking(move || {
+                                worker.host_table.keys().write_shells(&[
+                                    (&edge.from_id, &parent_process), (&edge.to_id, &process),
+                                ], || worker.canvas_store.insert_edge(&edge))
+                            }).await;
+                            match stored {
+                                Ok(Some(Err(e))) => log::warn!("[CANVAS] auto-connect edge not stored: {e}"),
+                                Err(e) => log::warn!("[CANVAS] auto-connect worker failed: {e}"),
+                                _ => {}
+                            }
                         }
                     }
                     Some(_) => log::debug!(
@@ -453,7 +485,7 @@ pub(crate) async fn create_terminal(
             }
 
             if let Some(t) = state.terminals.get(&id) {
-                (StatusCode::OK, Json(terminal_identity_json(t.value(), "ui"))).into_response()
+                (StatusCode::OK, Json(terminal_identity_json(t.value(), "ui", state.terminal_marker(t.value())))).into_response()
             } else {
                 (StatusCode::OK, Json(json!({ "id": id, "status": "running" }))).into_response()
             }
@@ -470,17 +502,9 @@ pub(crate) async fn delete_terminal(
     // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
-    let id = state.resolve_ref(&id);
-    // Take the pid first (guard drops at end of statement, before cleanup).
-    let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
+    if !state.close_process(&id, crate::state::CloseStorage::Preserve) {
         return Json(json!({ "error": "Terminal not found" }));
-    };
-    // Parity with the UI close path: host-owned → tell the sidecar to close the
-    // session; otherwise kill the local shell tree. Then clean up every map.
-    if !state.host_close(&id) {
-        crate::pty_manager::kill_process_tree(pid);
     }
-    state.cleanup_terminal_state(&id);
     Json(json!({ "status": "ok" }))
 }
 
@@ -508,6 +532,9 @@ pub(crate) async fn resize_terminal(
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
     let id = state.resolve_ref(&id);
+    if crate::state::ingress::registered_target(state.host_table.keys(), &id).is_none() {
+        return Json(json!({ "error": "Terminal not found" })).into_response();
+    }
     log::info!("Resize request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Host-owned terminals resize via the sidecar.
@@ -623,26 +650,19 @@ pub(crate) fn write_data_to_terminal(
     id: &str,
     data: &str,
 ) -> Result<(), (StatusCode, String)> {
-    use std::io::Write;
-    // Host-owned terminals: forward to the sidecar.
-    if state.host_write(id, data.as_bytes()) {
-        emit_external_activity(state, id);
-        return Ok(());
+    use crate::pty_manager::input_gate::{write_input, InputSource, FailureKind};
+    if crate::state::ingress::registered_target(state.host_table.keys(), id).is_none() {
+        return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
     }
-    // Clone the writer Arc out of the map, dropping the DashMap shard guard
-    // before locking the inner Mutex.
-    let writer_mutex = match state.shell_writer_channels.get(id) {
-        Some(r) => r.clone(),
-        None => return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string())),
-    };
-    {
-        let mut writer = writer_mutex
-            .lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
-        writer
-            .write_all(data.as_bytes())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+    write_input(state, id, InputSource::Rest, None, data.as_bytes()).map_err(|e| {
+        let status = match e.kind {
+            FailureKind::Missing => StatusCode::NOT_FOUND,
+            FailureKind::Locked => StatusCode::LOCKED,
+            FailureKind::Stale => StatusCode::CONFLICT,
+            FailureKind::Write => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, e.message)
+    })?;
     emit_external_activity(state, id);
     Ok(())
 }
@@ -803,9 +823,9 @@ pub(crate) async fn get_terminal_snapshot(
     // after the divider, pushing the restored content up into scrollback where the
     // user can scroll back to it.
     if let Some((_, prefix)) = state.replay_prefix.remove(&id) {
-        log::info!("Restored {} bytes of prior-session scrollback for terminal {}", prefix.len(), id);
+        log::info!("Restored {} bytes of prior-session scrollback for terminal {}", prefix.text.len(), id);
         let (rows, cols) = terminal_size_for_output(&state, &id);
-        return Json(json!({ "snapshot": prefix, "rows": rows, "cols": cols }));
+        return Json(restore_snapshot_body(&prefix, rows, cols));
     }
     match state.screen_snapshot(&id) {
         Some(mut bytes) => {
@@ -825,6 +845,22 @@ pub(crate) async fn get_terminal_snapshot(
             Json(json!({ "snapshot": "", "rows": 0, "cols": 0 }))
         }
     }
+}
+
+/// The `/snapshot` body for a restore replay.
+///
+/// `prefixOnly` says the snapshot is NOT the terminal's screen: it holds only the previous session's
+/// scrollback, so whatever the shell printed since it started (live output the renderer already
+/// received) is not in it and must be kept, not discarded as a snapshot would let it be.
+/// `anchorRow` is the row the renderer must put its cursor on after the replay, the row ConPTY
+/// believes the shell's prompt is on (`state::restore_frame`); absent when nothing needs aligning,
+/// and the renderer then leaves the cursor where the replay ended.
+pub(crate) fn restore_snapshot_body(prefix: &crate::state::ReplayPrefix, rows: u16, cols: u16) -> serde_json::Value {
+    let mut body = json!({ "snapshot": prefix.text, "rows": rows, "cols": cols, "prefixOnly": true });
+    if let Some(row) = prefix.anchor_row {
+        body["anchorRow"] = json!(row);
+    }
+    body
 }
 
 /// The `GET /api/terminals/:id/screen` response body, extracted so a unit test can pin
@@ -938,7 +974,7 @@ pub(crate) async fn get_terminal(
     // documented round trip - read `terminalId`, then address it - 404s.
     let id = state.resolve_ref(&id);
     if let Some(terminal) = state.terminals.get(&id) {
-        let mut body = terminal_identity_json(terminal.value(), "default");
+        let mut body = terminal_identity_json(terminal.value(), "default", state.terminal_marker(terminal.value()));
         // Canvas identity, so an agent learns which node and group it is in one call
         // (`plan/013` Task 19). Merged HERE rather than inside `terminal_identity_json`,
         // which has three call sites: adding it there would put a canvas-registry lock and a

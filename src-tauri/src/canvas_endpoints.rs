@@ -338,19 +338,35 @@ pub async fn create_edge(
         request.label,
         request.origin.unwrap_or(EdgeOrigin::User).as_str(),
     );
-    match state.canvas_store.insert_edge(&edge) {
-        Ok(InsertOutcome::Inserted(edge)) | Ok(InsertOutcome::Existing(edge)) => {
+    let stored = tokio::task::spawn_blocking(move || {
+        crate::state::leaf_storage::with_leaves(&[&edge.from_id, &edge.to_id], || state.canvas_store.insert_edge(&edge))
+    }).await;
+    match stored {
+        Ok(Ok(InsertOutcome::Inserted(edge))) | Ok(Ok(InsertOutcome::Existing(edge))) => {
             (StatusCode::OK, Json(edge)).into_response()
         }
-        Err(_) => store_error(),
+        _ => store_error(),
+    }
+}
+
+// Edge endpoints are immutable. Read them before taking stripes, never while
+// holding the store's internal connection lock.
+fn edit_stored_edge<T>(store: &crate::canvas_store::CanvasStore, id: &str,
+    edit: impl FnOnce() -> Result<T, crate::canvas_store::CanvasStoreError>) -> Result<T, crate::canvas_store::CanvasStoreError> {
+    match store.get_by_id(id)? {
+        Some(edge) => crate::state::leaf_storage::with_leaves(&[&edge.from_id, &edge.to_id], edit),
+        None => crate::state::leaf_storage::with_all(edit),
     }
 }
 
 pub async fn delete_edge(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    match state.canvas_store.delete_edge(&id) {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => error(StatusCode::NOT_FOUND, "canvas edge not found"),
-        Err(_) => store_error(),
+    let deleted = tokio::task::spawn_blocking(move || {
+        edit_stored_edge(&state.canvas_store, &id, || state.canvas_store.delete_edge(&id))
+    }).await;
+    match deleted {
+        Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(false)) => error(StatusCode::NOT_FOUND, "canvas edge not found"),
+        _ => store_error(),
     }
 }
 
@@ -363,13 +379,17 @@ pub async fn patch_edge(
         Ok(request) => request,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid canvas edge patch request"),
     };
-    match state
-        .canvas_store
-        .update_label(&id, request.label.as_deref())
-    {
-        Ok(false) => error(StatusCode::NOT_FOUND, "canvas edge not found"),
-        Err(_) => store_error(),
-        Ok(true) => match state.canvas_store.get_by_id(&id) {
+    let worker = state.clone();
+    let edge_id = id.clone();
+    let updated = tokio::task::spawn_blocking(move || {
+        edit_stored_edge(&worker.canvas_store, &edge_id, || {
+            worker.canvas_store.update_label(&edge_id, request.label.as_deref())
+        })
+    }).await;
+    match updated {
+        Ok(Ok(false)) => error(StatusCode::NOT_FOUND, "canvas edge not found"),
+        Ok(Err(_)) | Err(_) => store_error(),
+        Ok(Ok(true)) => match state.canvas_store.get_by_id(&id) {
             // Indexed by id rather than `all_edges()` + a linear find: the request names
             // its row exactly, and scanning every edge ever created to return one made a
             // constant-cost operation grow with the table.
@@ -866,9 +886,11 @@ mod tests {
         #[test]
         fn closing_a_terminal_deletes_its_edges() {
             let terminal = include_str!("commands/terminal.rs").replace("\r\n", "\n");
+            assert!(crate::state::source_scan::fn_body(&terminal, "async fn close_terminal(").contains("CloseStorage::Delete"));
+            let ending = include_str!("state/owner_lifecycle.rs").replace("\r\n", "\n");
             assert!(
-                terminal.contains("canvas_store.delete_edges_for(&tab_id)"),
-                "close_terminal must delete the closed terminal's edges"
+                crate::state::source_scan::fn_body(&ending, "fn end_shell(").contains("canvas_store.delete_edges_for(leaf)"),
+                "the shared close ending must delete the closed terminal's edges"
             );
             // ...and it must stay the TARGETED delete, crate-wide -- not just in the file
             // close_terminal happens to live in after the commands.rs split. `prune_edges`

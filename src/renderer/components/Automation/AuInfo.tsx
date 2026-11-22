@@ -64,10 +64,15 @@ export function infoPopPosition(
 export interface AuInfoProps {
     /** Names the button AND the panel: a screen reader meets the panel with no icon to look at. */
     label: string;
+    /**
+     * A one-line summary shown as the icon's hover tooltip. The panel stays click-to-open (see
+     * above); this only tells a hovering user what they would get by clicking.
+     */
+    hint?: string;
     children: React.ReactNode;
 }
 
-export const AuInfo: React.FC<AuInfoProps> = ({ label, children }) => {
+export const AuInfo: React.FC<AuInfoProps> = ({ label, hint, children }) => {
     const [open, setOpen] = useState(false);
     const [at, setAt] = useState<{ left: number; top: number } | null>(null);
     const triggerRef = useRef<HTMLButtonElement>(null);
@@ -125,6 +130,7 @@ export const AuInfo: React.FC<AuInfoProps> = ({ label, children }) => {
                 className={`au-info${open ? ' on' : ''}`}
                 aria-label={label}
                 aria-expanded={open}
+                title={open ? undefined : hint}
                 onClick={() => setOpen((was) => !was)}
             >
                 <span aria-hidden="true">i</span>

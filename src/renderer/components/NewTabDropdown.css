@@ -65,8 +65,20 @@
      a single line instead of wrapping. */
   min-width: 260px;
   max-width: 360px;
+  max-height: min(65vh, 32rem);
+  overflow-y: auto;
   margin-top: 4px;
 }
+
+.dropdown-item.ssh-menu-item {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.dropdown-item.ssh-menu-item:hover:not(:disabled) { background: var(--bg-hover); }
 
 .dropdown-section {
   padding: 4px 0;

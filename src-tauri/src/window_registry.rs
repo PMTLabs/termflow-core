@@ -208,9 +208,41 @@ pub struct WindowTracker {
     ids: DashMap<String, String>,
     dirty: AtomicBool,
     last_write: Mutex<Option<Instant>>,
+    persistence: Mutex<()>,
+}
+
+/// A pre-build binding rolls back only while it still names this reservation.
+/// A failed duplicate-label build must restore the live window's storage id.
+pub(crate) struct WindowIdGuard {
+    tracker: std::sync::Arc<WindowTracker>,
+    label: String,
+    id: String,
+    previous: Option<String>,
+    committed: bool,
+}
+impl WindowIdGuard {
+    pub(crate) fn id(&self) -> &str { &self.id }
+    pub(crate) fn commit(mut self) { self.committed = true; }
+}
+impl Drop for WindowIdGuard {
+    fn drop(&mut self) {
+        if self.committed { return; }
+        let _registry = self.tracker.registry.lock();
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) = self.tracker.ids.entry(self.label.clone()) {
+            if entry.get() != &self.id { return; }
+            if let Some(previous) = self.previous.take() { entry.insert(previous); }
+            else { entry.remove(); }
+        }
+    }
 }
 
 impl WindowTracker {
+    pub(crate) fn reserve_id(self: &std::sync::Arc<Self>, label: &str, id: String) -> WindowIdGuard {
+        let _registry = self.registry.lock();
+        let previous = self.ids.insert(label.to_string(), id.clone());
+        WindowIdGuard { tracker: self.clone(), label: label.into(), id, previous, committed: false }
+    }
+
     pub fn new(path: PathBuf, registry: Registry) -> Self {
         Self {
             path,
@@ -218,6 +250,7 @@ impl WindowTracker {
             ids: DashMap::new(),
             dirty: AtomicBool::new(false),
             last_write: Mutex::new(None),
+            persistence: Mutex::new(()),
         }
     }
 
@@ -232,9 +265,10 @@ impl WindowTracker {
         self.registry.lock().clone()
     }
 
-    /// Bind a live window's label to its stable id. Called for every window,
-    /// whether recreated at boot or opened during the session.
+    /// Explicitly bind the already-created main window. Secondary builders use
+    /// a reservation and compare-qualified publication instead.
     pub fn bind(&self, label: &str, id: &str) {
+        let _registry = self.registry.lock();
         self.ids.insert(label.to_string(), id.to_string());
     }
 
@@ -247,12 +281,26 @@ impl WindowTracker {
         self.ids.get(label).map(|v| v.clone())
     }
 
-    /// Register a window and persist immediately — a new window must survive a
-    /// crash before its first geometry tick.
+    /// Explicit binding and publication for the already-created main window.
     pub fn register(&self, record: WindowRecord) {
-        self.bind(&record.label, &record.id);
-        self.registry.lock().upsert(record);
+        {
+            let mut registry = self.registry.lock();
+            self.ids.insert(record.label.clone(), record.id.clone());
+            registry.upsert(record);
+        }
         self.persist_now();
+    }
+
+    /// Native geometry queries can finish after Destroyed. Publish only while
+    /// the builder's binding is still live, without recreating a retired label.
+    pub(crate) fn publish_reserved(&self, record: WindowRecord) -> bool {
+        {
+            let mut registry = self.registry.lock();
+            if self.id_for_label(&record.label).as_deref() != Some(&record.id) { return false; }
+            registry.upsert(record);
+        }
+        self.persist_now();
+        true
     }
 
     /// Drop a record by id, for a window that never came to exist.
@@ -267,11 +315,14 @@ impl WindowTracker {
 
     /// Drop a window. Persisted immediately: a closed window must not come back.
     pub fn forget(&self, label: &str) {
-        let Some((_, id)) = self.ids.remove(label) else {
-            // Never registered (e.g. `drag-preview`) — nothing to forget.
-            return;
-        };
-        self.registry.lock().remove(&id);
+        {
+            let mut registry = self.registry.lock();
+            let Some((_, id)) = self.ids.remove(label) else {
+                // Never registered (e.g. `drag-preview`) — nothing to forget.
+                return;
+            };
+            registry.remove(&id);
+        }
         self.persist_now();
     }
 
@@ -312,6 +363,9 @@ impl WindowTracker {
     /// Write unconditionally. Used on register/forget and before exit, where a
     /// debounce would mean losing the very change we care about.
     pub fn persist_now(&self) {
+        // Serialize snapshots with writes so an older snapshot cannot overwrite
+        // a later retirement. No binding/registry guard is held during disk I/O.
+        let _persistence = self.persistence.lock();
         let registry = self.registry.lock().clone();
         if let Err(e) = save(&self.path, &registry) {
             log::warn!("failed to persist the window registry: {e}");

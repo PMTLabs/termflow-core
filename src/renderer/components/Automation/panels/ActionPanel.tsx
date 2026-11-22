@@ -18,11 +18,12 @@ import React from 'react';
 import type { AutomationKeep, AutomationSendTo } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
-import { SEND_PHRASES } from '../automationDerive';
+import { MASKED_MESSAGE, SEND_PHRASES } from '../automationDerive';
 import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
 import { isReservedToken, previewSubstitute, tokensUsed } from '../automationTokens';
 import type { PreviewPart } from '../automationTokens';
 import { sayPattern } from '../automationPresets';
+import { AuInfo } from '../AuInfo';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
 import { SnippetPickerButton } from './SnippetPickerButton';
 import { restoreCaret, spliceAtCaret } from './caretInsert';
@@ -79,10 +80,43 @@ export function sampleFromPattern(find: string, keep: AutomationKeep): Record<st
     return out;
 }
 
+/** What *Hide message* does, behind the ⓘ next to its checkbox. */
+const HideMessageInfo: React.FC = () => (
+    <>
+        <p className="au-infolead">
+            For a message that contains a password, token or other secret.
+        </p>
+        <h4>What changes</h4>
+        <ul>
+            <li>The message shows as dots here, and as <code>••••••••</code> on the canvas, in the rule list and in Test results.</li>
+            <li>Copy and cut are blocked while it is hidden. <b>Reveal</b> shows it until you switch rules or hide it again.</li>
+            <li>It is stored encrypted, with a key kept in your system keystore (Windows Credential Manager, macOS Keychain or Linux Secret Service).</li>
+        </ul>
+        <h4>What does not change</h4>
+        <p>
+            The terminal receives exactly what you typed, with captured values and Enter handled the same way.
+            The terminal itself may still show the text if the program echoes it.
+        </p>
+        <h4>If it can&apos;t be read</h4>
+        <p>
+            On another computer, or if the keystore entry is removed, the rule stays but will not run until
+            you type the message again.
+        </p>
+    </>
+);
+
 export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch, sample }) => {
     const { parse, action } = draft.rule.graph;
     const messageRef = React.useRef<HTMLTextAreaElement | null>(null);
+    const [revealed, setRevealed] = React.useState(false);
+    React.useEffect(() => { setRevealed(false); }, [action?.masked, draft.rule.id]);
+    React.useLayoutEffect(() => {
+        const el = messageRef.current;
+        if (el && action && el.value !== action.message) el.value = action.message;
+    });
     if (!action) return null;
+    const hidden = action.masked === true && !revealed;
+    const unreadable = action.masked && action.message === '' && !!action.messageCipher;
 
     // **This panel survives an absent parse step, and must**: `action` is the one step every rule
     // has (plan 032 §3.1), so a schedule rule reaches here with no pattern behind it. No pattern is
@@ -109,13 +143,13 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     const usesTokens = tokensUsed(action.message).length > 0;
     const usesPatternTokens = tokensUsed(action.message).some((token) => !isReservedToken(token));
 
-    const preview = !substitute || !usesTokens
+    const preview = hidden
+        ? { blocked: false as const, parts: [{ kind: 'text', text: MASKED_MESSAGE }] as PreviewPart[] }
+        : !substitute || !usesTokens
         ? {
             blocked: false as const,
-            // From the MODEL (`stepValues(rule,'action').message`), so an empty message previews
-            // as the same "nothing to send" placeholder the node face and problem list use —
-            // not a bare `> ⏎` a second source of truth would draw.
-            parts: [{ kind: 'text', text: model.values.message.text }] as PreviewPart[],
+            // Reveal uses the original message; every other surface keeps the masked model.
+            parts: [{ kind: 'text', text: action.masked ? action.message || 'nothing to send' : model.values.message.text }] as PreviewPart[],
         }
         : !patternReady && usesPatternTokens
             ? {
@@ -134,7 +168,7 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
 
     // Only true while an actually-resolved, guessed preview is on screen — a blocked preview
     // already explains itself, and a caller-supplied sample is not a guess.
-    const showsGuessedExample = substitute && sampleIsDerived && !preview.blocked;
+    const showsGuessedExample = !hidden && substitute && sampleIsDerived && !preview.blocked;
 
     // One chip per group the pattern declares, plus $0 (the whole match) and $$ (the escape), plus
     // ONE extra chip past the last real group — marked `.dead` — so the boundary itself is visible
@@ -151,7 +185,7 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     ];
     // The tokens typed into the message that this pattern COULD fill in — see `resolvableTokens`.
     // Only asked while substitution is off, the one state they can go out literal in.
-    const typed = substitute ? [] : resolvableTokens(action.message, parse?.find ?? '');
+    const typed = substitute || hidden ? [] : resolvableTokens(action.message, parse?.find ?? '');
 
     /**
      * Insert a token **and turn substitution on**, in one patch — see `WebhookPanel`'s twin, where
@@ -169,15 +203,31 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     return (
         <>
             <AuField label="Message">
+                <div className="au-frow au-frow-message">
                 <textarea
                     ref={messageRef}
-                    className={`au-finput au-finput-message${model.values.message.missing ? ' err' : ''}`}
+                    className={`au-finput au-finput-message${hidden ? ' au-finput-masked' : ''}${model.values.message.missing ? ' err' : ''}`}
                     aria-label="Message to send"
                     placeholder="e.g. prepare to do context-hand-off"
                     rows={3}
-                    value={action.message}
+                    defaultValue=""
+                    onCopy={(e) => { if (hidden) e.preventDefault(); }}
+                    onCut={(e) => { if (hidden) e.preventDefault(); }}
                     onChange={(e) => dispatch({ type: 'action', patch: { message: e.target.value } })}
                 />
+                {action.masked && (
+                    <button
+                        className="au-mini"
+                        type="button"
+                        aria-label={revealed ? 'Hide message text' : 'Reveal message'}
+                        title={revealed ? 'Show dots again' : 'Show the message until you switch rules or hide it again'}
+                        aria-pressed={revealed}
+                        onClick={() => setRevealed(!revealed)}
+                    >
+                        {revealed ? 'Hide' : 'Reveal'}
+                    </button>
+                )}
+                </div>
                 <div className="au-tokens" aria-label="Available tokens">
                     {chips.map((chip) => (
                         <button
@@ -223,6 +273,30 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                     </AuHelp>
                 )}
             </AuField>
+
+            <AuCheck
+                on={action.masked ?? false}
+                disabled={!!unreadable}
+                label="Hide message (password or secret)"
+                extra={
+                    <AuInfo
+                        label="About hiding the message"
+                        hint="Shows the message as dots everywhere and stores it encrypted. The terminal still receives exactly what you typed. Click for details."
+                    >
+                        <HideMessageInfo />
+                    </AuInfo>
+                }
+                sub="Shown as dots on every screen and stored encrypted. The terminal still receives exactly what you typed."
+                onToggle={() => {
+                    setRevealed(false);
+                    dispatch({ type: 'action', patch: { masked: !action.masked } });
+                }}
+            />
+            {unreadable && (
+                <AuHelp warn>
+                    This hidden message can&apos;t be read on this computer. Type the message again before un-hiding it.
+                </AuHelp>
+            )}
 
             <AuCheck
                 on={substitute}

@@ -1,16 +1,28 @@
+import { paneIncarnations, accepted, describePanes, type PaneCapture, type CreateMode, type PaneIncarnations } from './paneIncarnations';
 import { termDiag } from '../utils/diag';
+import { earlyOutput } from './earlyOutput';
+import { findLeafByTerminalId, findTabIdByTerminalId } from '../store/slices/paneTreeOps';
+import { isWaitingForSshLaunch, observeOwnedSshLaunch, sshLaunchFailure, staleSshLaunch, type ReconnectSshResult, type SshLaunchObservation } from './sshLaunchAttempt';
+import type { LaunchSnapshot } from '../types/ssh';
+import { reattachPromptGate } from './reattachGate';
+import type { PaneNode } from '../store/slices/panesSlice';
+import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
+import { isAdminUacCancelled } from './adminUacCancelled';
+import { sshAttachmentResolved } from '../store/slices/sshSessionSlice';
 import { clearZoom } from '../store/slices/zoomSlice';
 import { reassertOwnerAfterSpawn } from './paneOwnership';
 import { reassertLabelAfterSpawn } from './terminalLabelSync';
 import { reassertTitleColorAfterSpawn } from './terminalTitleColorSync';
-import type { PromptGate } from '@termflow/terminal-core';
+import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
+
+export type HostWaitState = 'waiting' | 'retry' | undefined;
 
 export interface TerminalProcess {
   id: string;
   terminalId: string;
 }
 
-class TerminalServiceClass {
+export class TerminalServiceClass {
   private processes: Map<string, TerminalProcess> = new Map();
   private listenersInitialized = false;
   // Backlog 011 prompt-gate handoff for a cross-window attach: stashed here by
@@ -22,15 +34,32 @@ class TerminalServiceClass {
   // webview reload). Consumed once by TerminalDisplay as `initialWin32InputMode`;
   // see markReattachedSession.
   private win32InputModeHandoff: Set<string> = new Set();
-  // Single-flight guard keyed by leaf (terminalId): a re-entrant restart/create
-  // for the same leaf (e.g. a double Restart click or Ctrl+R key-repeat while
-  // `closedInfo` is still set — review 109 H1) must not reach the backend twice,
-  // since two spawns for one leaf register two `Terminal` rows under the same
-  // `renderer_terminal_id`, breaking the PRIMARY KEY invariant. Cleared in a
-  // `finally` so a failed create does not permanently poison the leaf.
-  private inFlightCreates: Map<string, Promise<string>> = new Map();
+  // Kitty / modifyOtherKeys state carried by a cross-window attach (the live
+  // object stayed in the source window's heap). Consumed once by TerminalDisplay
+  // as `initialKeyboardProtocol`, same lifecycle as promptGateHandoff.
+  private keyboardProtocolHandoff: Map<string, KeyboardProtocolStateData> = new Map();
+  // Double Restart clicks share a promise, but a different pane copy must still
+  // ask for its own admission. Browser/test clients use a leaf-keyed guard.
+  // Cleared in finally so a failed create never poisons the next attempt.
+  private inFlightCreates = new Map<string | PaneCapture, { terminalId: string; promise: Promise<string> }>();
+  private hostWaitStates = new Map<string, HostWaitState>();
+  private sshReconnects = new WeakMap<PaneCapture, { pc: string; work: Promise<ReconnectSshResult> }>();
+  private sshLaunches = new WeakMap<PaneCapture, { pc: string; work: Promise<SshLaunchObservation | undefined> }>();
+  // Keep the raw placement outcome even when its original copy leaves. A replacement
+  // must wait for that work and bind its exact process, not race a Parked placement.
+  private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
+  // Plan 058: window-wide single-flight elevated reconnect and denial latch.
+  // Prevents multiple concurrent elevated panes from prompting UAC repeatedly,
+  // and remembers consent denial until explicitly re-requested by the user.
+  private elevatedConsentDenied = false;
+  private reconnectElevatedPromise: Promise<string> | null = null;
 
-  constructor() {
+  constructor(
+    private readonly paneTrees: () => Record<string, PaneNode | null> =
+      () => (window as any).__REDUX_STORE__?.getState().panes.treesByTabId ?? {},
+    private readonly api: () => typeof window.electronAPI = () => window.electronAPI,
+    private readonly incarnations: () => PaneIncarnations = () => paneIncarnations,
+  ) {
     // Initialize listeners immediately and synchronously
     this.initializeListeners();
     // Also try to initialize on DOMContentLoaded if not already done
@@ -56,6 +85,8 @@ class TerminalServiceClass {
       // attached the console retains every message, so a long agent session grows the
       // renderer's memory and slows the console down the longer it runs.
       termDiag(() => `[TERM-DIAG] terminal data (processId=${processId} length=${data.length})`);
+      // Held until a pane subscribes to this process (see earlyOutput.ts).
+      earlyOutput.record(processId, data);
       // Always emit the event - let TerminalDisplay filter by processId
       window.dispatchEvent(new CustomEvent('pty:data', {
         detail: { processId, data }
@@ -63,9 +94,14 @@ class TerminalServiceClass {
     });
 
     window.electronAPI.onTerminalExit((processId: string, exitCode: number, cwd?: string | null) => {
+      earlyOutput.exited(processId);
       // Resolve the UI terminalId mapped to this backend process so listeners
       // (e.g. tab close/mark-terminated logic) know which tab/pane exited.
       let exitedTerminalId: string | undefined;
+      for (const [leaf, placement] of this.placements) {
+        if (placement.pc !== processId) continue;
+        this.placements.delete(leaf);
+      }
       for (const [terminalId, process] of this.processes) {
         if (process.id === processId) {
           exitedTerminalId = terminalId;
@@ -74,18 +110,12 @@ class TerminalServiceClass {
           // — since terminalId reuse is exactly what this cleanup enables below —
           // a later fresh session on the same id could wrongly inherit a stale gate.
           this.promptGateHandoff.delete(terminalId);
+          this.keyboardProtocolHandoff.delete(terminalId);
 
           // Also clean up from the global terminal init map (if available)
           // This allows re-creation if the same terminalId is used again
-          if ((window as any).terminalInitMap) {
-            (window as any).terminalInitMap.delete(terminalId);
-          }
-          if ((window as any).terminalInitPromises) {
-            (window as any).terminalInitPromises.delete(terminalId);
-          }
-          if ((window as any).terminalInitLock) {
-            (window as any).terminalInitLock.delete(terminalId);
-          }
+          this.clearInitGuards(terminalId);
+          if (this.placements.get(terminalId)?.pc === processId) this.placements.delete(terminalId);
           break;
         }
       }
@@ -122,24 +152,138 @@ class TerminalServiceClass {
      *  that session: the same trap design 011 6 called out for `owningTabId`,
      *  where assigning the Rust field without plumbing is a no-op. */
     sessionKey?: string,
+    /** Plan 045: spawn this pane against the UAC-elevated sidecar instead of
+     *  the primary one. Undefined/false for every ordinary pane. */
+    elevated?: boolean,
+    mode: CreateMode = 'Mount',
+    paneId?: string,
+    sshLaunchConnectionId?: string,
   ): Promise<string> {
-    // Re-entrant call for the same leaf while a create is already pending:
-    // return the SAME in-flight promise instead of starting a second spawn.
-    const pending = this.inFlightCreates.get(terminalId);
+    // Re-entrant calls for this copy share the pending placement, not another copy's authority.
+    const protocol = this.incarnations();
+    const createKey = protocol.enabled ? this.capturePane(terminalId, paneId) ?? terminalId : terminalId;
+    const pending = this.inFlightCreates.get(createKey)
+      ?? (!protocol.enabled ? [...this.inFlightCreates.values()].find(entry => entry.terminalId === terminalId) : undefined);
     if (pending) {
       console.log(`TerminalService: Create already in flight for ${terminalId}, reusing pending promise`);
-      return pending;
+      return pending.promise;
     }
-    const createPromise = this.createTerminalInner(terminalId, shellType, name, cwd, cols, rows, owningTabId, sessionKey);
-    this.inFlightCreates.set(terminalId, createPromise);
+    // Keep the ordinary path explicit at the renderer/bridge boundary.  Leaving
+    // this as `undefined` relies on JSON serialization to omit the field and
+    // makes an old bridge/backend pair indistinguishable from an admin request
+    // that failed to carry its flag.  Every non-admin pane is deliberately
+    // routed as `false`; only the pane-tree marker can opt into elevation.
+    const createPromise = this.createTerminalWithRetry(
+      terminalId, shellType, name, cwd, cols, rows, owningTabId,
+      sessionKey ?? (typeof createKey === 'string' ? undefined : protocol.restoreKey(createKey)),
+      elevated === true, mode, paneId, typeof createKey === 'string' ? undefined : createKey,
+      protocol.enabled ? [...this.inFlightCreates.entries()].find(([key, entry]) => key !== createKey && entry.terminalId === terminalId
+        && typeof key !== 'string' && (!protocol.capturesForLeaf(terminalId).includes(key) || protocol.isSuppressed(key)))?.[1].promise : undefined,
+      sshLaunchConnectionId,
+    );
+    this.inFlightCreates.set(createKey, { terminalId, promise: createPromise });
     try {
       return await createPromise;
     } finally {
       // Only clear if we're still the current entry (guards against a later
       // caller having already replaced it, though callers always await before
       // starting a new one so this is effectively always true).
-      if (this.inFlightCreates.get(terminalId) === createPromise) {
-        this.inFlightCreates.delete(terminalId);
+      if (this.inFlightCreates.get(createKey)?.promise === createPromise) {
+        this.inFlightCreates.delete(createKey);
+      }
+    }
+  }
+
+  getHostWaitState(terminalId: string): HostWaitState {
+    return this.hostWaitStates.get(terminalId);
+  }
+
+  isElevatedConsentDenied(): boolean {
+    return this.elevatedConsentDenied;
+  }
+
+  /**
+   * A fresh, user-initiated elevated attempt (Open Admin Tab, Restart). The latch exists so N
+   * restored panes do not each raise a UAC prompt; it must not outlive the user's next explicit
+   * request, or one cancelled prompt would make every later admin action fail without a prompt.
+   * Unlike `reconnectElevated` this does not wake the panes that are showing the banner.
+   */
+  beginUserElevatedAttempt(): void {
+    this.elevatedConsentDenied = false;
+    this.reconnectElevatedPromise = null;
+  }
+
+  reconnectElevated(): void {
+    this.elevatedConsentDenied = false;
+    this.reconnectElevatedPromise = null;
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('pty:elevated-reconnect'));
+    }
+  }
+
+  private setHostWaitState(terminalId: string, state: HostWaitState): void {
+    if (state) this.hostWaitStates.set(terminalId, state);
+    else this.hostWaitStates.delete(terminalId);
+    window.dispatchEvent(new CustomEvent('pty:host-wait', { detail: { terminalId, state } }));
+  }
+
+  /** The single-flight promise includes sleeps, so a remount cannot race the next attach. */
+  private async createTerminalWithRetry(
+    terminalId: string, shellType: string, name?: string, cwd?: string,
+    cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean,
+    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture, predecessor?: Promise<string>, sshLaunchConnectionId?: string,
+  ): Promise<string> {
+    if (predecessor) await predecessor.catch(() => {});
+    let hostDeadline: number | undefined;
+    let lifecycleDeadline: number | undefined;
+    let hostDelay = 1000;
+    let firstAttempt = true;
+    while (true) {
+      if (this.incarnations().ended
+          || (this.incarnations().enabled && (this.incarnations().capture(terminalId, paneId) !== pi || (pi && this.incarnations().isSuppressed(pi))))) return '';
+      if (firstAttempt && !(mode === 'Mount' && this.getHostWaitState(terminalId) === 'waiting')) {
+        this.setHostWaitState(terminalId, undefined);
+      }
+      // A move is not a close. Only this webview's trees may authorize its next attempt.
+      const owner = findTabIdByTerminalId(this.paneTrees(), terminalId);
+      if (!owner) {
+        this.setHostWaitState(terminalId, undefined);
+        return ''; // Silent cancellation; never forget restore intent on a move.
+      }
+      const attemptOwner = firstAttempt ? owningTabId : owner;
+      firstAttempt = false;
+      try {
+        const pid = await this.createTerminalInner(
+          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated, mode, paneId, pi, sshLaunchConnectionId,
+        );
+        if (!this.incarnations().enabled || this.incarnations().isCurrent(terminalId, paneId, pi)) this.setHostWaitState(terminalId, undefined);
+        return pid;
+      } catch (error) {
+        if (this.incarnations().ended
+            || (this.incarnations().enabled && (this.incarnations().capture(terminalId, paneId) !== pi || (pi && this.incarnations().isSuppressed(pi))))) return '';
+        // An attempt can be in flight when the pane moves away. Whatever it
+        // reports, this window no longer has a pane to report it to.
+        if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
+          this.setHostWaitState(terminalId, undefined);
+          return '';
+        }
+        if (!isHostOwnershipPending(error) && !isLifecycleBusy(error)) {
+          this.setHostWaitState(terminalId, undefined);
+          throw error;
+        }
+        const now = Date.now();
+        const hostPending = isHostOwnershipPending(error);
+        if (hostPending) hostDeadline ??= now + 90_000;
+        else lifecycleDeadline ??= now + 10_000;
+        const deadline = hostPending ? hostDeadline! : lifecycleDeadline!;
+        if (now >= deadline) {
+          this.setHostWaitState(terminalId, hostPending ? 'retry' : undefined);
+          throw error;
+        }
+        if (hostPending) this.setHostWaitState(terminalId, 'waiting');
+        const delay = Math.min(hostPending ? hostDelay : 500, deadline - now);
+        if (hostPending) hostDelay = Math.min(hostDelay * 2, 8000);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
   }
@@ -153,7 +297,44 @@ class TerminalServiceClass {
     rows?: number,
     owningTabId?: string,
     sessionKey?: string,
+    elevated: boolean = false,
+    mode: CreateMode = 'Mount', paneId?: string, attemptPi?: PaneCapture, sshLaunchConnectionId?: string,
   ): Promise<string> {
+    if (elevated) {
+      if (this.elevatedConsentDenied) {
+        throw new Error('ADMIN_UAC_CANCELLED');
+      }
+      // `while`, not `if`: when the flight settles several waiters resume together, and each must
+      // re-check that nobody else has already started the next flight before it becomes the owner.
+      while (this.reconnectElevatedPromise) {
+        try {
+          await this.reconnectElevatedPromise;
+        } catch (error) {
+          if (isAdminUacCancelled(error) || this.elevatedConsentDenied) {
+            throw new Error('ADMIN_UAC_CANCELLED');
+          }
+          throw error;
+        }
+        if (this.elevatedConsentDenied) {
+          throw new Error('ADMIN_UAC_CANCELLED');
+        }
+      }
+    }
+
+    let isElevatedFlightOwner = false;
+    let flightResolve: ((val: string) => void) | undefined;
+    let flightReject: ((err: any) => void) | undefined;
+    let flight: Promise<string> | undefined;
+    if (elevated && !this.reconnectElevatedPromise) {
+      isElevatedFlightOwner = true;
+      flight = new Promise<string>((res, rej) => {
+        flightResolve = res;
+        flightReject = rej;
+      });
+      flight.catch(() => {});
+      this.reconnectElevatedPromise = flight;
+    }
+
     try {
       console.log(`TerminalService: Creating terminal ${terminalId} with shell type: "${shellType}", name: ${name}, cwd: ${cwd}`);
 
@@ -173,48 +354,234 @@ class TerminalServiceClass {
 
       // Call IPC to create actual PTY process
       console.log(`TerminalService: Calling electronAPI.createTerminal with profileId: "${shellType}", cwd: "${cwd}", tabId: "${terminalId}"`);
-      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey);
+      let processId: string;
+      const protocol = this.incarnations();
+      let admission: Awaited<ReturnType<PaneIncarnations['admit']>> = { status: 'Inert' };
+      if (protocol.enabled) {
+        if (!attemptPi) throw new Error('host-session-contended: pane copy is not present');
+        const previous = this.placements.get(terminalId);
+        if (previous && previous.pi !== attemptPi
+            && (!protocol.capturesForLeaf(terminalId).includes(previous.pi) || protocol.isSuppressed(previous.pi))) {
+          const pc = await previous.work;
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          const bound = await protocol.bind(attemptPi, pc, 'restore');
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          if (bound.status === 'Retry') {
+            // Missing rows are ended shells, not an invitation to attach by leaf.
+            // Resume admission for the still-current copy; contention stays closed.
+            if (this.placements.get(terminalId) === previous) this.placements.delete(terminalId);
+            admission = await protocol.admit(attemptPi, mode);
+          } else {
+            if (!accepted(bound)) throw new Error('host-session-contended: original placement cannot be rebound');
+            admission = { status: 'Existing', pc };
+          }
+        } else {
+          admission = await protocol.admit(attemptPi, mode);
+        }
+      }
+      if (admission.status === 'Inert') {
+        const args = [shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated] as const;
+        processId = await (sshLaunchConnectionId === undefined
+          ? this.api().createTerminal(...args)
+          : this.api().createTerminal(...args, sshLaunchConnectionId));
+      } else if (admission.status === 'Existing' || admission.status === 'AlreadyBound') {
+        // This leaf's own process: its held early output stays claimable (earlyOutput.ts).
+        processId = admission.pc;
+      } else if (admission.status === 'Create' || admission.status === 'Join') {
+        const work = protocol.create(admission.cg, {
+          leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
+          ...(admission.status === 'Create' && sshLaunchConnectionId !== undefined ? { sshLaunchConnectionId } : {}),
+        });
+        const placement: { pi: PaneCapture; work: Promise<string>; pc?: string } = { pi: attemptPi!, work };
+        this.placements.set(terminalId, placement);
+        void work.then(pc => { placement.pc = pc; }, () => {
+          if (this.placements.get(terminalId) === placement) this.placements.delete(terminalId);
+        });
+        const created = await work;
+        if (protocol.ended) return '';
+        processId = created;
+      } else if (admission.status === 'Retry' || admission.status === 'Pending') {
+        throw new Error('LIFECYCLE_BUSY: placement is pending');
+      } else {
+        throw new Error('host-session-contended: pane copy does not own this shell');
+      }
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
-      // Store the mapping
-      this.bindProcess(terminalId, processId);
-      console.log(`TerminalService: Mapped terminal ${terminalId} to process ${processId}`);
+      // The pane may have left this window while this create was in flight.
+      if (protocol.ended) return '';
+      if (!findTabIdByTerminalId(this.paneTrees(), terminalId)
+          || (protocol.enabled && (protocol.capture(terminalId, paneId) !== attemptPi || (attemptPi && protocol.isSuppressed(attemptPi))))) {
+        return ''; // Backend ownership follows the pane even after placement finishes.
+      }
 
-      // A FRESH spawn. Announced so RunningActivityTracker can give this shell's startup
-      // banner the same grace the app-start path already gives a restored one — see
-      // SPAWN_GRACE_MS. Without it a terminal notifies about its own prompt.
-      //
-      // Here rather than in `bindProcess`, which looks like the tidier home and is the wrong
-      // one: that is also where a cross-window attach and a hot-swap reattach bind, and those
-      // processes are already running — their output is genuine activity the user may well
-      // have missed, not a banner they just asked for.
-      //
-      // An event rather than a direct call, for the reason `pty:resize` documents below: the
-      // tracker already imports this module, so calling it would be a cycle.
-      window.dispatchEvent(new CustomEvent('pty:spawn', {
-        detail: { processId, terminalId },
-      }));
+      // An admitted Create can still attach to a surviving host shell. The native
+      // reattach seed is present even for a hookless shell and is staged before
+      // create resolves. Claim it here before publishing the process to any mount.
+      let freshSsh = false;
+      let reattached = admission.status !== 'Create' && admission.status !== 'Inert';
+      if (sshLaunchConnectionId && attemptPi && admission.status === 'Create') {
+        try {
+          const seed = await this.api().takeReattachPromptHook?.(processId);
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          if (seed) {
+            this.stashPromptGate(terminalId, reattachPromptGate(seed.promptHook, seed.atPrompt));
+            this.markReattachedSession(terminalId);
+            reattached = true;
+          }
+          freshSsh = seed === null;
+        } catch {
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          // An ambiguous attach result is not a fresh launch authorization.
+        }
+      }
+      if (attemptPi) protocol.setRestoreResolved(attemptPi);
+      if (sshLaunchConnectionId) {
+        (window as any).__REDUX_STORE__?.dispatch(sshAttachmentResolved({
+          terminalId, connectionId: sshLaunchConnectionId, reattachedProcessId: reattached ? processId : undefined,
+        }));
+      }
+      this.bindCreated(terminalId, processId, owningTabId);
 
-      // The spawn carried the owner resolved BEFORE the await, and the backend
-      // only registers the terminal at the very end of it — so a pane dragged to
-      // another tab while this create was in flight had its ownership update
-      // land on a terminal that did not exist yet, and nothing re-sends it
-      // (external review 101, F2). This is the first moment the leaf is
-      // registered, so it is where that correction belongs. No-ops unless the
-      // tree moved under us.
-      reassertOwnerAfterSpawn(terminalId, owningTabId);
-      // Same race, and labels need it MORE: the owner was at least sent as a spawn parameter, so
-      // the re-assert only corrects a move. No label is sent at spawn, so without this a terminal
-      // created before its tree was committed has no label for the rest of the session.
-      reassertLabelAfterSpawn(terminalId);
-      reassertTitleColorAfterSpawn(terminalId);
+      if (freshSsh && sshLaunchConnectionId && attemptPi) {
+        const placement = this.sshPlacement(terminalId, paneId, attemptPi, processId, sshLaunchConnectionId);
+        const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
+        this.sshLaunches.set(attemptPi, { pc: processId, work });
+        // Launch failure does not discard the successfully created local shell.
+        void work.catch(() => {});
+      }
+
+      if (isElevatedFlightOwner) flightResolve?.(processId);
 
       return processId;
     } catch (error) {
-      console.error('Failed to create terminal:', error);
-      console.error('Shell type was:', shellType);
+      if (isElevatedFlightOwner) {
+        if (isAdminUacCancelled(error)) {
+          this.elevatedConsentDenied = true;
+        }
+        flightReject?.(error);
+      }
+      if (!isHostOwnershipPending(error) && !isLifecycleBusy(error)) {
+        console.error('Failed to create terminal:', error);
+        console.error('Shell type was:', shellType);
+      }
       throw error;
+    } finally {
+      // The owner can leave through any of the early `return ''` exits (pane unmounted, incarnation
+      // superseded, window ended) without settling the flight; a flight that never settles would
+      // make every later elevated create wait forever. Settling an already-settled promise is a
+      // no-op, and the flight is only cleared if it is still OURS (reconnectElevated may have
+      // replaced it).
+      if (isElevatedFlightOwner) {
+        flightResolve?.('');
+        if (this.reconnectElevatedPromise === flight) this.reconnectElevatedPromise = null;
+      }
     }
+  }
+
+  private sshPlacement(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted = () => true) {
+    const protocol = this.incarnations();
+    return { terminalId, connectionId, processIncarnation: pc, owner, current: () =>
+      mounted() && protocol === this.incarnations() && protocol.isCurrent(terminalId, paneId, owner)
+      && this.getProcessId(terminalId) === pc
+      && findLeafByTerminalId(this.paneTrees(), terminalId)?.ssh?.connectionId === connectionId };
+  }
+
+  /** A mounted copy re-reads the owned session and launch with its own acknowledged identity. */
+  async querySshLaunch(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted: () => boolean) {
+    const placement = this.sshPlacement(terminalId, paneId, owner, pc, connectionId, mounted);
+    if (!placement.current()) return;
+    const started = this.sshLaunches.get(owner);
+    const startFailure = started?.pc === pc
+      ? await started.work.then(() => undefined, sshLaunchFailure) : undefined;
+    if (!placement.current()) return;
+    const result = await observeOwnedSshLaunch(this.api(), placement, 'query');
+    if (placement.current() && !result?.snapshot && startFailure) throw startFailure;
+    return result;
+  }
+
+  reconnectSshTerminal(terminalId: string, registered: (snapshot: LaunchSnapshot) => void): Promise<ReconnectSshResult> {
+    const owner = this.incarnations().capture(terminalId);
+    const pc = this.getProcessId(terminalId);
+    const connectionId = findLeafByTerminalId(this.paneTrees(), terminalId)?.ssh?.connectionId;
+    if (!owner || !pc || !connectionId) return Promise.resolve({ ok: false, error: staleSshLaunch });
+    const active = this.sshReconnects.get(owner);
+    if (active?.pc === pc) return active.work;
+    const placement = this.sshPlacement(terminalId, undefined, owner, pc, connectionId);
+    const notAtPrompt = { ok: false, error: { code: 'NotAtPrompt', message: 'Return to the local prompt to reconnect' } } as const;
+    const reconnect = async (): Promise<ReconnectSshResult> => {
+      try {
+        const old = await observeOwnedSshLaunch(this.api(), placement, 'query');
+        if (!placement.current()) return { ok: false, error: staleSshLaunch };
+        // Do not retire the app channel for a positively known live login, or
+        // supersede an acceptance that T5 hasn't identified/retired yet.
+        if (old?.snapshot?.stage === 'running' || old?.snapshot?.stage === 'typed') return notAtPrompt;
+        if (old?.snapshot && isWaitingForSshLaunch(old.snapshot.stage)) {
+          return { ok: false, error: { code: 'InputLocked', message: 'Cancel the current SSH launch before reconnecting.' } };
+        }
+        const result = await observeOwnedSshLaunch(this.api(), placement, 'reconnect');
+        if (!placement.current() || !result?.snapshot) return { ok: false, error: staleSshLaunch };
+        let snapshot = result.snapshot;
+        registered(snapshot);
+        const generation = snapshot.attempt.sessionGeneration;
+        // The native worker, not renderer output or a guessed prompt, decides
+        // whether we have returned to a genuine, bare local shell prompt.
+        while (isWaitingForSshLaunch(snapshot.stage)) {
+          await new Promise<void>(resolve => setTimeout(resolve, 250));
+          if (!placement.current()) return { ok: false, error: staleSshLaunch };
+          const next = await observeOwnedSshLaunch(this.api(), placement, 'query');
+          if (!placement.current() || next?.snapshot?.attempt.sessionGeneration !== generation) {
+            return { ok: false, error: staleSshLaunch };
+          }
+          snapshot = next.snapshot;
+        }
+        if (snapshot.error?.code === 'Timeout') return notAtPrompt;
+        return { ok: true, snapshot };
+      } catch (error) {
+        const failure = sshLaunchFailure(error);
+        return failure.code === 'Timeout' || failure.code === 'NotAtPrompt' ? notAtPrompt : { ok: false, error: failure };
+      }
+    };
+    const work = reconnect().finally(() => {
+      if (this.sshReconnects.get(owner)?.work === work) this.sshReconnects.delete(owner);
+    });
+    this.sshReconnects.set(owner, { pc, work });
+    return work;
+  }
+
+  /** Everything a window does once a create has produced the process for `terminalId`. */
+  private bindCreated(terminalId: string, processId: string, owningTabId: string | undefined): void {
+    // Store the mapping
+    this.bindProcess(terminalId, processId);
+    console.log(`TerminalService: Mapped terminal ${terminalId} to process ${processId}`);
+
+    // A FRESH spawn. Announced so RunningActivityTracker can give this shell's startup
+    // banner the same grace the app-start path already gives a restored one — see
+    // SPAWN_GRACE_MS. Without it a terminal notifies about its own prompt.
+    //
+    // Here rather than in `bindProcess`, which looks like the tidier home and is the wrong
+    // one: that is also where a cross-window attach and a hot-swap reattach bind, and those
+    // processes are already running — their output is genuine activity the user may well
+    // have missed, not a banner they just asked for.
+    //
+    // An event rather than a direct call, for the reason `pty:resize` documents below: the
+    // tracker already imports this module, so calling it would be a cycle.
+    window.dispatchEvent(new CustomEvent('pty:spawn', {
+      detail: { processId, terminalId },
+    }));
+
+    // The spawn carried the owner resolved BEFORE the await, and the backend
+    // only registers the terminal at the very end of it — so a pane dragged to
+    // another tab while this create was in flight had its ownership update
+    // land on a terminal that did not exist yet, and nothing re-sends it
+    // (external review 101, F2). This is the first moment the leaf is
+    // registered, so it is where that correction belongs. No-ops unless the
+    // tree moved under us.
+    reassertOwnerAfterSpawn(terminalId, owningTabId);
+    // Same race, and labels need it MORE: the owner was at least sent as a spawn parameter, so
+    // the re-assert only corrects a move. No label is sent at spawn, so without this a terminal
+    // created before its tree was committed has no label for the rest of the session.
+    reassertLabelAfterSpawn(terminalId);
+    reassertTitleColorAfterSpawn(terminalId);
   }
 
   async writeToTerminal(terminalId: string, data: string): Promise<void> {
@@ -262,18 +629,48 @@ class TerminalServiceClass {
     }
   }
 
-  async closeTerminal(terminalId: string): Promise<void> {
+  capturePane(terminalId: string, paneId?: string): PaneCapture | undefined {
+    const protocol = this.incarnations();
+    const captured = protocol.capture(terminalId, paneId);
+    if (captured) return captured;
+    const panes = Object.values(this.paneTrees()).flatMap(tree => describePanes(tree));
+    const pane = panes.find(p => p.leaf === terminalId && (!paneId || p.paneId === paneId));
+    return pane ? protocol.prepare([pane])[0] : undefined;
+  }
+
+  async authorizeExisting(terminalId: string, processId: string, paneId?: string): Promise<boolean> {
+    const protocol = this.incarnations();
+    if (!protocol.enabled) return true;
+    const pi = this.capturePane(terminalId, paneId);
+    if (!pi) return false;
+    const result = await protocol.bind(pi, processId, 'restore');
+    return protocol.isCurrent(terminalId, paneId, pi) && accepted(result);
+  }
+
+  async closeTerminal(terminalId: string, captured?: PaneCapture | PaneCapture[]): Promise<void> {
     console.log(`TerminalService: closeTerminal called for ${terminalId}`);
+    const protocol = this.incarnations();
+    if (protocol.ended) return;
+    const pi = captured ?? protocol.captureClose(terminalId);
+    const pis = Array.isArray(pi) ? pi : pi ? [pi] : [];
+    // Queue every copy before any await: a tab can hold several copies of one leaf.
+    const closing = Promise.all(pis.map(copy => protocol.close(copy)));
     const process = this.processes.get(terminalId);
+    const results = protocol.enabled ? await closing : [{ status: 'Inert' } as const];
+    const ownedClose = results.every(result => result.status !== 'Inert');
+    if (ownedClose && !results.some(accepted)) return;
     if (!process) {
       console.log(`TerminalService: No process found for terminal ${terminalId} - already closed?`);
-      return; // Already closed
+      if (!protocol.enabled || pis.some(copy => protocol.capture(terminalId) === copy)) this.setHostWaitState(terminalId, undefined);
+      return; // A waiting restored pane has no process, but still has restore intent.
     }
 
     console.log(`TerminalService: Found process ${process.id} for terminal ${terminalId}, calling electronAPI.closeTerminal`);
     try {
-      await window.electronAPI.closeTerminal(process.id);
+      if (!ownedClose) await this.api().closeTerminal(process.id);
+      if (this.processes.get(terminalId) !== process) return;
       this.processes.delete(terminalId);
+      this.placements.delete(terminalId);
       // Forget this terminal's per-pane zoom so closed terminals don't pile up in
       // the zoom slice. Moves use detachTerminal (which keeps the entry so zoom
       // survives the move), so clearing here only affects genuine closes. Dispatch
@@ -282,6 +679,7 @@ class TerminalServiceClass {
       // Same reasoning for a handoff gate that never got consumed — e.g. a
       // cross-window-attached pane closed again before its mount effect ran.
       this.promptGateHandoff.delete(terminalId);
+      this.keyboardProtocolHandoff.delete(terminalId);
       console.log(`TerminalService: Successfully closed and removed terminal ${terminalId} from process map`);
     } catch (error) {
       console.error('Failed to close terminal:', error);
@@ -291,6 +689,9 @@ class TerminalServiceClass {
 
   registerExistingTerminal(terminalId: string, processId: string): void {
     console.log(`TerminalService: Registering existing terminal ${terminalId} with process ${processId}`);
+    // Already running when this window learned of it: hydrate it as before, from the screen,
+    // never from output this window happened to hold (earlyOutput.ts).
+    earlyOutput.close(processId);
     this.bindProcess(terminalId, processId);
   }
 
@@ -309,7 +710,7 @@ class TerminalServiceClass {
       id: processId,
       terminalId
     });
-    window.electronAPI?.adoptConsoleWindow?.(processId)?.catch(() => { });
+    this.api()?.adoptConsoleWindow?.(processId)?.catch(() => { });
   }
 
   /**
@@ -323,9 +724,13 @@ class TerminalServiceClass {
   attachExistingTerminal(terminalId: string, processId: string, promptGate?: PromptGate | null): void {
     this.registerExistingTerminal(terminalId, processId);
     const w = window as any;
-    if (w.terminalInitLock) w.terminalInitLock.set(terminalId, true);
-    if (w.terminalInitPromises) w.terminalInitPromises.set(terminalId, Promise.resolve(processId));
-    if (w.terminalInitMap) w.terminalInitMap.set(terminalId, true);
+    const protocol = this.incarnations();
+    const keys: (string | PaneCapture)[] = protocol.enabled ? protocol.capturesForLeaf(terminalId) : [terminalId];
+    for (const key of keys) {
+      w.terminalInitLock?.set(key, true);
+      w.terminalInitPromises?.set(key, Promise.resolve(processId));
+      w.terminalInitMap?.set(key, true);
+    }
     if (promptGate) this.promptGateHandoff.set(terminalId, promptGate);
     console.log(`TerminalService: Attached existing terminal ${terminalId} -> process ${processId} (guards seeded)`);
   }
@@ -377,20 +782,51 @@ class TerminalServiceClass {
   }
 
   /**
+   * Stash the Kitty / modifyOtherKeys state a cross-window detach carried for
+   * `terminalId`'s first-ever mount in this window. The app pushed its flags once
+   * in the SOURCE window and will not repeat them here; without this the pane
+   * sends legacy encodings to a TUI that negotiated CSI u. Null clears any stash.
+   */
+  stashKeyboardProtocol(terminalId: string, data: KeyboardProtocolStateData | null): void {
+    if (data) this.keyboardProtocolHandoff.set(terminalId, data);
+    else this.keyboardProtocolHandoff.delete(terminalId);
+  }
+
+  /**
+   * Single-use companion to stashKeyboardProtocol, consumed by TerminalDisplay as
+   * the engine's `initialKeyboardProtocol` — first-ever mount only, like the
+   * prompt gate; a same-window remount adopts the live cache entry instead.
+   */
+  takeKeyboardProtocolHandoff(terminalId: string): KeyboardProtocolStateData | undefined {
+    const data = this.keyboardProtocolHandoff.get(terminalId);
+    this.keyboardProtocolHandoff.delete(terminalId);
+    return data;
+  }
+
+  /**
    * Drop this window's mapping + init guards for a terminal WITHOUT closing the
    * PTY — used when a pane is moved out of this window (detach / cross-window
    * drop). The process keeps running in the shared backend for the new owner.
    */
   detachTerminal(terminalId: string): void {
     this.processes.delete(terminalId);
-    const w = window as any;
-    w.terminalInitLock?.delete(terminalId);
-    w.terminalInitPromises?.delete(terminalId);
-    w.terminalInitMap?.delete(terminalId);
+    this.hostWaitStates.delete(terminalId);
+    this.placements.delete(terminalId);
+    this.clearInitGuards(terminalId);
     // A pane attached-but-not-yet-mounted here, then detached again to a THIRD
     // window before it ever mounted, would otherwise leak this entry forever.
     this.promptGateHandoff.delete(terminalId);
+    this.keyboardProtocolHandoff.delete(terminalId);
     console.log(`TerminalService: Detached terminal ${terminalId} (PTY left running)`);
+  }
+
+  private clearInitGuards(terminalId: string): void {
+    const w = window as any;
+    for (const key of [terminalId, ...this.incarnations().capturesForLeaf(terminalId)]) {
+      w.terminalInitLock?.delete(key);
+      w.terminalInitPromises?.delete(key);
+      w.terminalInitMap?.delete(key);
+    }
   }
 
   getProcessId(terminalId: string): string | undefined {

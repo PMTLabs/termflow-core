@@ -233,6 +233,8 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     const expectActions = (row: any) => {
       expect(row).toBeDefined();
       expect(row.contextActions.map((a: any) => a.id)).toEqual(['copy', 'insert', 'edit', 'delete']);
+      expect(row.contextActions.find((a: any) => a.id === 'edit').keepMenuOpen).toBe(true);
+      expect(row.contextActions.find((a: any) => a.id === 'delete').keepMenuOpen).toBe(true);
       const expectedId = row.id.replace(/^snippet-/, '');
       for (const [actionId, callback] of [
         ['copy', callbacks.onCopy], ['edit', callbacks.onEdit], ['delete', callbacks.onDelete],
@@ -712,7 +714,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
 
   it('does not touch useCommandSuggest / CommandSuggestPopup wiring', () => {
     expect(DISPLAY).toMatch(/useCommandSuggest\(engineRef, \(\) => getCwdSnapshot\(terminalId\)\)/);
-    expect(DISPLAY).toMatch(/suggest\.open && \(/);
+    expect(DISPLAY).toMatch(/suggest\.open && !broadcastActive && \(/);
   });
 
   /**
@@ -754,7 +756,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(body).toMatch(/onAddNew: \(seedText\) => openSnippetDialog\(seedText\)/);
     expect(body).not.toContain('closeMenu()');
     expect(DISPLAY).toMatch(/onOpenSettings: \(\) => \{ closeMenu\(\); openSettingsTab\('snippets'\); \}/);
-    expect((DISPLAY.match(/suppressDismiss=\{snippetDialogOpen\}/g) ?? [])).toHaveLength(2);
+    expect((DISPLAY.match(/suppressDismiss=\{snippetDialogOpen \|\| snippetDeleteTarget !== null\}/g) ?? [])).toHaveLength(2);
   });
 
   /**
@@ -796,19 +798,22 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(refocusBody).toContain('engineRef.current?.focus();');
 
     const onCloses = code.match(/onClose=\{[^}]*\}/g) ?? [];
-    expect(onCloses.length).toBeGreaterThanOrEqual(4);
+    // Three, not four (2026-09-16): the agent color-scheme picker (`closeSchemaPicker`) is
+    // gone — it is a submenu INSIDE `contextMenu` now (`customFlyout`), which closes and
+    // refocuses through `closeContextMenu` like the rest of that menu's own submenus.
+    expect(onCloses.length).toBeGreaterThanOrEqual(3);
     // No `onClose={() => setX(null)}` survivors: an inline clear is exactly the shape
-    // that drops the refocus, and it is the shape all four of these used to have.
+    // that drops the refocus, and it is the shape all three of these used to have.
     for (const handler of onCloses) {
       expect(handler).toMatch(/^onClose=\{close[A-Za-z]+\}$/);
     }
     // …and each named handler really does refocus.
-    for (const name of ['closeContextMenu', 'closeSnippetsMenu', 'closePathPicker', 'closeSchemaPicker']) {
+    for (const name of ['closeContextMenu', 'closeSnippetsMenu', 'closePathPicker']) {
       const re = new RegExp(`const ${name} = useCallback\\(\\(\\) => \\{[^}]*?refocusTerminal\\(\\);`, 's');
       expect(code).toMatch(re);
     }
     // The dialog is the one deliberate exception, and it closes the loop itself.
-    expect(code).toMatch(/snippetDialogOpenRef\.current\) return;/);
+    expect(code).toMatch(/snippetDialogOpenRef\.current \|\| snippetDeleteTargetRef\.current !== null\) return;/);
     expect(code).toMatch(/const closeSnippetDialog = useCallback\(\(\) => \{[\s\S]*?refocusTerminal\(\);/);
   });
 

@@ -20,7 +20,7 @@ export interface WorkspaceSnapshot {
   treesByTabId: Record<string, PaneNode | null>;
   activePaneByTabId: Record<string, string>;
   maximizedPaneByTabId: Record<string, string>;
-  tabPanes: Record<string, PaneNode>;
+  tabPanes: Record<string, PaneNode | null>;
   terminalCwds: Record<string, string>;
   canvas?: CanvasPersisted;
   capturedAt: number;
@@ -67,6 +67,7 @@ export function captureWorkspaceSnapshot(state: RootState, label: string): Works
       sidebarZoom: state.canvas.sidebarZoom,
       hidden: state.canvas.hidden,
       dynamicSpacing: state.canvas.dynamicSpacing,
+      mainOnly: state.canvas.mainOnly,
     },
     capturedAt: Date.now(),
     label,
@@ -97,6 +98,7 @@ function durableTab(tab: Tab) {
     titleColor: tab.titleColor,
     titleIsCustom: tab.titleIsCustom,
     notifyMuted: tab.notifyMuted,
+    elevated: tab.elevated,
   };
 }
 

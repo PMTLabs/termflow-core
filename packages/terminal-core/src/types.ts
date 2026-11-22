@@ -1,12 +1,34 @@
 import type { FontWeight, Terminal } from '@xterm/xterm';
 
-export interface TerminalSnapshot { snapshot: string; rows: number; cols: number }
+export interface TerminalSnapshot {
+  snapshot: string;
+  rows: number;
+  cols: number;
+  /**
+   * The snapshot is NOT the terminal's screen but only a restored session's previous scrollback
+   * (plus the "session restored" divider). Whatever the new shell printed since it started is
+   * not in it, so output the engine buffered while hydrating must be kept and written after it
+   * instead of being discarded as "already reflected in the snapshot".
+   */
+  prefixOnly?: boolean;
+  /**
+   * 1-based row the cursor must be on after the replay: the row ConPTY believes the shell's prompt
+   * is on. Absent = leave the cursor where the replay ended. See `restoreReplay.ts`.
+   */
+  anchorRow?: number;
+}
 export interface Disposable { dispose(): void }
 
 // Backlog 011 prompt gate (see TerminalEngine's promptOscSeen/promptArmed doc
 // comment). Shared shape for the cache entry, engine options, and the
 // cross-window detach handoff — one type, not a repeated inline literal.
 export interface PromptGate { seen: boolean; armed: boolean }
+
+// Who rendered the most recent prompt mark: the local hooked shell (OSC 9;9) or
+// the host on the far side of an ssh (OSC 133;A, OSC 7). Order-based, so a mark
+// that lands before the renderer notices the ssh process is still counted.
+export type PromptMarkKind = 'local' | 'host';
+export interface PromptMarkState { seen: boolean; kind: PromptMarkKind }
 
 // VS Code-style search modifiers. Map 1:1 onto @xterm/addon-search ISearchOptions.
 export interface TerminalSearchOptions {
@@ -41,6 +63,7 @@ export interface TerminalBridge {
 }
 
 export interface TerminalEngineOptions {
+  broadcastActive?: () => boolean;
   theme?: Record<string, string>;
   fontFamily?: string;
   fontSize?: number;       // default 14
@@ -160,6 +183,14 @@ export interface TerminalEngineOptions {
   // and a cache entry with its own tracked state always wins (that's first-hand
   // knowledge); self-heals from any later ?9001l / DECSTR.
   initialWin32InputMode?: boolean;
+  // Enhanced-keyboard-protocol (Kitty / modifyOtherKeys) state carried across a
+  // cross-window detach/reattach — the sibling of initialPromptGate. An app pushes
+  // its Kitty flags once per session and never repeats them, and the live state
+  // object exists only in the SOURCE window's heap, so the destination's fresh
+  // terminalCache entry would otherwise start empty and send legacy bytes to a TUI
+  // that negotiated CSI u. Only consulted on this cacheKey's first-ever mount in
+  // this window (a cache entry with its own tracked state always wins).
+  initialKeyboardProtocol?: import('./keyboardProtocol').KeyboardProtocolStateData | null;
   // Current prompt input changed (shell echo applied). '' means "no input /
   // submitted / suppressed" — the host closes the popup on it.
   onInputLineChanged?(text: string): void;

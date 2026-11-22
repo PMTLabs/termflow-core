@@ -15,6 +15,7 @@
  */
 import { WorkspaceSnapshot, isWorkspaceEmpty } from './workspaceSnapshot';
 import { layoutUndoKey } from './windowScope';
+import { sanitizePaneTreeMapSshFields, sanitizePaneTreeSshFields } from './sshPanePersistence';
 
 /** The in-memory slot. `undefined` means "not yet read from localStorage this
  *  page life"; `null` means "read, and there was nothing (or nothing valid)". */
@@ -33,7 +34,16 @@ function hydrate(): void {
   slot = null;
   try {
     const raw = localStorage.getItem(layoutUndoKey());
-    if (raw) slot = JSON.parse(raw) as WorkspaceSnapshot;
+    if (raw) {
+      const snapshot = JSON.parse(raw) as WorkspaceSnapshot | null;
+      if (!snapshot) return;
+      slot = {
+        ...snapshot,
+        paneTree: sanitizePaneTreeSshFields(snapshot.paneTree),
+        treesByTabId: sanitizePaneTreeMapSshFields(snapshot.treesByTabId ?? {}),
+        tabPanes: sanitizePaneTreeMapSshFields(snapshot.tabPanes ?? {}),
+      };
+    }
   } catch {
     // Corrupt entry or inaccessible storage — behave as if nothing was saved.
     slot = null;

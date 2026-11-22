@@ -17,7 +17,7 @@ jest.mock('../../store', () => ({
   },
 }));
 jest.mock('../TerminalService', () => ({
-  terminalService: { getTerminalIdForProcess: (pid: string) => (pid === 'p1' ? 'tm-1' : undefined) },
+  terminalService: { getTerminalIdForProcess: (pid: string) => ({ p1: 'tm-1', p2: 'tm-2' } as Record<string, string>)[pid] },
 }));
 jest.mock('../../store/terminalTheme', () => ({
   applyEffectiveThemes: jest.fn(),
@@ -130,4 +130,52 @@ it('tick polls when a chip subscriber is mounted even with NO color mappings (re
   expect(getActiveProcesses).toHaveBeenCalled();
   expect(agentSchemeTracker.getDetectedAgentForTerminal('tm-1')).toBe('agy');
   unsub();
+});
+
+// Plan 061: the remote prompt-hook chip needs to know which terminals have ssh in front.
+// It rides this poll rather than starting another one.
+describe('ssh foreground (plan 061)', () => {
+  it('reports ssh per terminal, matched by process id, and not for other programs', async () => {
+    mockProcs.value = [
+      { id: 'p1', currentApp: { pid: 10, name: 'ssh.exe' } },
+      { id: 'p2', currentApp: { pid: 11, name: 'pwsh.exe' } },
+    ];
+    const unsub = agentSchemeTracker.subscribe(() => {});
+    agentSchemeTracker.start();
+    await agentSchemeTracker.refreshNow();
+    expect(agentSchemeTracker.isSshForeground('tm-1')).toBe(true);
+    expect(agentSchemeTracker.isSshForeground('tm-2')).toBe(false);
+    unsub();
+  });
+
+  it('notifies subscribers when ssh comes and goes even though no agent is involved', async () => {
+    const seen: boolean[] = [];
+    const unsub = agentSchemeTracker.subscribe(() => seen.push(agentSchemeTracker.isSshForeground('tm-1')));
+    agentSchemeTracker.start();
+
+    mockProcs.value = [{ id: 'p1', agent: null, currentApp: { pid: 10, name: 'pwsh.exe' } }];
+    await agentSchemeTracker.refreshNow();
+    expect(seen).toEqual([]); // nothing changed yet
+
+    mockProcs.value = [{ id: 'p1', agent: null, currentApp: { pid: 10, name: 'ssh.exe' } }];
+    await agentSchemeTracker.refreshNow();
+    expect(seen).toEqual([true]);
+
+    await agentSchemeTracker.refreshNow(); // same snapshot again: no notification
+    expect(seen).toEqual([true]);
+
+    mockProcs.value = [{ id: 'p1', agent: null, currentApp: { pid: 10, name: 'pwsh.exe' } }];
+    await agentSchemeTracker.refreshNow();
+    expect(seen).toEqual([true, false]);
+    unsub();
+  });
+
+  it('tolerates a process row with no currentApp', async () => {
+    mockProcs.value = [{ id: 'p1' }];
+    const unsub = agentSchemeTracker.subscribe(() => {});
+    agentSchemeTracker.start();
+    await agentSchemeTracker.refreshNow();
+    expect(agentSchemeTracker.isSshForeground('tm-1')).toBe(false);
+    unsub();
+  });
 });

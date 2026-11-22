@@ -1,6 +1,9 @@
-import { ElectronAPI, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import type { SshSessionView, SshPromptReceipt, SshMetricsAPI } from '../types/ssh';
+import { ElectronAPI, HostGeneration, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import { browserSshBridge } from './sshBridge';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
+import { getStoredApiToken } from '../services/profileScope';
 
 // Configuration for connecting to the Rust backend. Default matches this build's
 // instance (dev backend = 42051, prod = 42031).
@@ -11,6 +14,40 @@ const WS_URL = `ws://localhost:${API_PORT}/api/ws`;
 console.log('Initializing Browser Bridge...');
 
 class BrowserBridge implements ElectronAPI {
+    ssh = browserSshBridge; // Store and filesystem stubs never use this bridge's HTTP/WS transport.
+    pickFile = async (): Promise<null> => null;
+  // ssh_session_open: desktop-only, never return a fabricated session.
+  async sshSessionOpen(_terminalId: string, _connectionId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_state: desktop-only, never return a fabricated session.
+  async sshSessionState(_terminalId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_close: desktop-only, never return a fabricated session.
+  async sshSessionClose(_terminalId: string, _generation?: number): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_reconnect: desktop-only, never return a fabricated session.
+  async sshSessionReconnect(_terminalId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_submit_secret: desktop-only, never return a fabricated session.
+  async sshSessionSubmitSecret(_terminalId: string, _secret: string, _remember: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_trust_host: desktop-only, never return a fabricated session.
+  async sshSessionTrustHost(_terminalId: string, _accept: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_connection: desktop-only, never return a fabricated session.
+  async sshTestConnection(_connectionId: string): Promise<{ probeId: string }> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_state: desktop-only, never return a fabricated session.
+  async sshTestState(_probeId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_close: desktop-only, never return a fabricated session.
+  async sshTestClose(_probeId: string): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_submit_secret: desktop-only, never return a fabricated session.
+  async sshTestSubmitSecret(_probeId: string, _secret: string, _remember: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_trust_host: desktop-only, never return a fabricated session.
+  async sshTestTrustHost(_probeId: string, _accept: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  async onSshSessionState(_listener: (view: SshSessionView) => void): Promise<() => void> { throw new Error('SSH is desktop-only'); }
+  async onSshTestState(_listener: (view: SshSessionView) => void): Promise<() => void> { throw new Error('SSH is desktop-only'); }
+
+    sshMetricsWatch: SshMetricsAPI['sshMetricsWatch'] = async () => { throw new Error('SSH host metrics are desktop-only'); };
+    sshMetricsUnwatch: SshMetricsAPI['sshMetricsUnwatch'] = async () => { throw new Error('SSH host metrics are desktop-only'); };
+    sshMetricsResume: SshMetricsAPI['sshMetricsResume'] = async () => { throw new Error('SSH host metrics are desktop-only'); };
+    // No browser event transport. The command still rejects rather than arming a fake watch.
+    onSshMetricsSample: SshMetricsAPI['onSshMetricsSample'] = async () => () => {};
+    onSshMetricsControl: SshMetricsAPI['onSshMetricsControl'] = async () => () => {};
+
     private ws: WebSocket | null = null;
     private dataListeners: ((id: string, data: string) => void)[] = [];
     private exitListeners: ((id: string, code: number, cwd?: string | null) => void)[] = [];
@@ -76,7 +113,7 @@ class BrowserBridge implements ElectronAPI {
     }
 
     private buildAuthHeaders(): Record<string, string> {
-        const token = localStorage.getItem('api_token');
+        const token = getStoredApiToken();
         return token ? { Authorization: `Bearer ${token}` } : {};
     }
 
@@ -149,7 +186,10 @@ class BrowserBridge implements ElectronAPI {
         return await response.json();
     }
 
-    async createTerminal(profile?: string, name?: string, cwd?: string): Promise<string> {
+    async createTerminal(profile?: string, name?: string, cwd?: string, _tabId?: string,
+        _cols?: number, _rows?: number, _owningTabId?: string, _sessionKey?: string,
+        _elevated?: boolean, sshLaunchConnectionId?: string): Promise<string> {
+        if (sshLaunchConnectionId !== undefined) throw new Error('SSH shell creation is desktop-only');
         try {
             const response = await fetch(`${API_BASE_URL}/terminals`, {
                 method: 'POST',
@@ -183,6 +223,8 @@ class BrowserBridge implements ElectronAPI {
     async setTerminalOwningTab(_rendererTerminalId: string, _owningTabId: string): Promise<void> { }
     async setTerminalDisplayLabel(_rendererTerminalId: string, _label: string): Promise<void> { }
     async setTerminalTitleColor(_rendererTerminalId: string, _titleColor: string): Promise<void> { }
+
+    /// A browser session has no other window to hand a session to or from.
 
     async closeTerminal(id: string): Promise<void> {
         try {
@@ -238,6 +280,24 @@ class BrowserBridge implements ElectronAPI {
 
     async getTerminalCwds(_processIds: string[]): Promise<Record<string, string | null>> {
         return {};
+    }
+
+    async getTerminalGenerations(): Promise<Record<string, HostGeneration>> {
+        const response = await fetch(`${API_BASE_URL}/terminals`, {
+            headers: { ...this.buildAuthHeaders() },
+        });
+        if (!response.ok) throw new Error(`Failed to fetch terminals: ${response.status}`);
+        const data = await response.json();
+        const generations: Record<string, HostGeneration> = {};
+        for (const terminal of Array.isArray(data?.terminals) ? data.terminals : []) {
+            // Only a pane's terminal has a leaf to mark, and only the two known
+            // words count; anything else is not read as either.
+            const { terminalId, generation } = terminal ?? {};
+            if (typeof terminalId === 'string' && (generation === 'current' || generation === 'previous')) {
+                generations[terminalId] = generation;
+            }
+        }
+        return generations;
     }
 
     async resolveTerminalPath(_processId: string, _rel: string): Promise<string[]> {
@@ -310,7 +370,7 @@ class BrowserBridge implements ElectronAPI {
 
     async getShellProfiles(): Promise<any[]> {
         try {
-            const response = await fetch(`${API_BASE_URL}/profiles`);
+            const response = await fetch(`${API_BASE_URL}/profiles`, { headers: this.buildAuthHeaders() });
             if (response.ok) {
                 const data = await response.json();
                 return data.profiles || [];
@@ -319,6 +379,29 @@ class BrowserBridge implements ElectronAPI {
             console.warn('BrowserBridge: getShellProfiles failed', e);
         }
         return [];
+    }
+
+    async addShellProfile(profile: { name: string; path: string; args: string[]; cwd?: string }): Promise<any> {
+        const response = await fetch(`${API_BASE_URL}/profiles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...this.buildAuthHeaders() },
+            body: JSON.stringify(profile),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Adding the profile failed (${response.status})`);
+        const listed = await this.getShellProfiles();
+        return listed.find((p) => p.id === data.id) ?? { ...profile, id: data.id, env: {}, is_custom: true };
+    }
+
+    async deleteShellProfile(id: string): Promise<void> {
+        const response = await fetch(`${API_BASE_URL}/profiles/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+            headers: this.buildAuthHeaders(),
+        });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || `Deleting the profile failed (${response.status})`);
+        }
     }
 
     async getSystemInfo(): Promise<any> {
@@ -570,6 +653,10 @@ class BrowserBridge implements ElectronAPI {
     // Background mode (Plan 010) is a native/tray concern — no-op in the browser host.
     async setKeepRunningInBackground(_enabled: boolean): Promise<void> {
         // No tray / background process in the browser host.
+    }
+
+    async setExemptLoopbackFromProxy(_enabled: boolean): Promise<void> {
+        // The browser host spawns no shells.
     }
 
     // --- Terminal Automations (Plan 028) ---

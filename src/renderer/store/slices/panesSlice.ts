@@ -1,9 +1,13 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { generateId } from '../../utils/id';
-import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, EdgeZone } from './paneTreeOps';
+import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, findLeafByTerminalId, EdgeZone } from './paneTreeOps';
 import { setInitialCwd } from '../../services/initialCwd';
 
+import { normalizeHiddenMetrics, type MetricKey, type SshPaneTag } from '../../types/ssh';
+
 export interface PaneNode {
+  /** Saved connection preferences on terminal leaves only; never a live launch receipt. */
+  ssh?: SshPaneTag;
   id: string;
   type: 'terminal' | 'split';
   direction?: 'horizontal' | 'vertical';
@@ -50,6 +54,22 @@ export interface PaneNode {
    *  non-determinism that function exists to remove. Legacy trees have no value
    *  here and fall back to the id equality. */
   seededForTabId?: string;
+  /** Is this terminal's pty-host session running at High integrity (Administrator)?
+   *
+   *  Set only by `openAdminTabWithProfile` (plan 045) and read at both
+   *  `TerminalPane` spawn call sites (mount and restart-in-place) to route the
+   *  spawn to the elevated sidecar instead of the primary one. Never restored
+   *  across an app restart — an elevated tab comes back as a normal one. */
+  elevated?: boolean;
+  /** Was this terminal created by an API/MCP call rather than by the user?
+   *
+   *  Set only by the API create paths in `App.tsx handleAPICreateTerminalTab` (Mode 0 via
+   *  `runApiCreateMode0`, Modes 1-3 and the auto-split) — never by a UI new tab/split, a canvas
+   *  spawn, or orphan recovery. Absent means "main" (plan 048), which is also what every pane
+   *  persisted before this field existed reads as. Read by Canvas Mode's Main only filter. */
+  apiCreated?: true;
+  /** Custom title/header colour for this pane. */
+  titleColor?: string;
 }
 
 export type DropZone = EdgeZone | 'center';
@@ -163,9 +183,9 @@ function survivingLeaf(node: PaneNode, fallbackName: string): PaneNode {
 function splitLeafInTree(
   tree: PaneNode,
   paneId: string,
-  opts: { direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string },
+  opts: { direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string; apiCreated?: boolean; titleColor?: string },
 ): string | null {
-  const { direction, shellType, name, terminalId } = opts;
+  const { direction, shellType, name, terminalId, apiCreated, titleColor } = opts;
   const recurse = (node: PaneNode): string | null => {
     if (node.id === paneId && node.type === 'terminal') {
       const newPaneId = generateId('pn');
@@ -176,6 +196,17 @@ function splitLeafInTree(
         terminalId: newTerminalId,
         name: name || `Terminal ${direction === 'horizontal' ? 'Bottom' : 'Right'}`,
         shellType,
+        // R8: a split of an admin pane must elevate BOTH panes, not just the
+        // surviving one `survivingLeaf` below already covers — otherwise the
+        // new sibling spawns Medium while the tab strip still badges it
+        // Administrator (plan 045 T8 / runbook step 23).
+        elevated: node.elevated,
+        // An explicit colour (the API caller's) wins over the split target's: the target is
+        // whatever pane the API picked, which need not be the pane whose agent asked.
+        titleColor: titleColor ?? node.titleColor,
+        // The NEW pane only — the surviving one keeps its own origin via `survivingLeaf`
+        // (plan 048: origin belongs to whoever created that pane, not to its tab).
+        ...(apiCreated ? { apiCreated: true as const } : {}),
       };
       const originalPane = survivingLeaf(
         node,
@@ -190,6 +221,9 @@ function splitLeafInTree(
       // The node is now a split container, not a terminal leaf — drop the flag so
       // it isn't stranded where no tracker/UI lookup would ever read it.
       delete node.notifyMuted;
+      delete node.apiCreated;
+      delete node.titleColor;
+      delete node.ssh;
       return newPaneId;
     }
     if (node.type === 'split' && node.children) {
@@ -267,8 +301,8 @@ const panesSlice = createSlice({
       syncActive(state);
     },
 
-    splitPaneInTab: (state, action: PayloadAction<{ tabId: string; paneId?: string; direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string }>) => {
-      const { tabId, paneId, direction, shellType, name, terminalId } = action.payload;
+    splitPaneInTab: (state, action: PayloadAction<{ tabId: string; paneId?: string; direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string; apiCreated?: boolean; titleColor?: string }>) => {
+      const { tabId, paneId, direction, shellType, name, terminalId, apiCreated, titleColor } = action.payload;
       const tree = state.treesByTabId[tabId] ?? null;
       const hasTerminal = !!firstLeafId(tree);
 
@@ -281,6 +315,8 @@ const panesSlice = createSlice({
           terminalId: terminalId || generateId('tm'),
           name: name || 'Terminal',
           shellType,
+          ...(apiCreated ? { apiCreated: true as const } : {}),
+          ...(titleColor ? { titleColor } : {}),
         };
         state.treesByTabId[tabId] = seeded;
         state.activePaneByTabId[tabId] = pn;
@@ -290,7 +326,7 @@ const panesSlice = createSlice({
         // tab's first leaf so the requested terminal is still added rather than
         // silently dropped (which would make the API report a misleading success).
         const target = (paneId && findLeaf(tree, paneId)) ? paneId : firstLeafId(tree)!;
-        const newPaneId = splitLeafInTree(tree, target, { direction, shellType, name, terminalId });
+        const newPaneId = splitLeafInTree(tree, target, { direction, shellType, name, terminalId, apiCreated, titleColor });
         if (newPaneId) {
           state.activePaneByTabId[tabId] = newPaneId;
           // Splitting reshapes the tab — exit maximize (avoid a stale split-node id).
@@ -359,6 +395,29 @@ const panesSlice = createSlice({
           // NOT reflect into the other — reassign so active-tab readers see it.
           if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
           return;
+        }
+      }
+    },
+
+    setPaneTitleColor: (
+      state,
+      action: PayloadAction<{ paneId: string; titleColor?: string }>
+    ) => {
+      const { paneId, titleColor } = action.payload;
+      for (const tabId of Object.keys(state.treesByTabId)) {
+        const node = findLeaf(state.treesByTabId[tabId], paneId);
+        if (node) {
+          if (titleColor) node.titleColor = titleColor;
+          else delete node.titleColor;
+          if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+          return;
+        }
+      }
+      if (state.paneTree) {
+        const node = findLeaf(state.paneTree, paneId);
+        if (node) {
+          if (titleColor) node.titleColor = titleColor;
+          else delete node.titleColor;
         }
       }
     },
@@ -559,6 +618,40 @@ const panesSlice = createSlice({
       // the rename we just made.
       if (state.activeTabId === targetTabId) {
         state.paneTree = state.treesByTabId[targetTabId];
+      }
+    },
+
+    patchSshPaneTag: (state, action: PayloadAction<{
+      terminalId: string;
+      patch: Partial<Pick<SshPaneTag, 'browserCollapsed' | 'browserPath' | 'followCd'>>;
+    }>) => {
+      const { terminalId, patch } = action.payload;
+      for (const [tabId, tree] of Object.entries(state.treesByTabId)) {
+        const tag = findLeafByTerminalId({ [tabId]: tree }, terminalId)?.ssh;
+        if (!tag) continue;
+
+        // Copy only the three browser fields, even if an untyped caller sends more.
+        if (typeof patch.browserCollapsed === 'boolean') tag.browserCollapsed = patch.browserCollapsed;
+        if (typeof patch.followCd === 'boolean') tag.followCd = patch.followCd;
+        if (Object.prototype.hasOwnProperty.call(patch, 'browserPath')) {
+          if (patch.browserPath === undefined) delete tag.browserPath;
+          else if (typeof patch.browserPath === 'string') tag.browserPath = patch.browserPath;
+        }
+        if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+        return;
+      }
+    },
+
+    /** An empty list resets the terminal to showing every metric. */
+    setSshHiddenMetrics: (state, action: PayloadAction<{ terminalId: string; hiddenMetrics: readonly MetricKey[] }>) => {
+      const { terminalId, hiddenMetrics } = action.payload;
+      for (const [tabId, tree] of Object.entries(state.treesByTabId)) {
+        const leaf = findLeafByTerminalId({ [tabId]: tree }, terminalId);
+        if (!leaf) continue;
+        if (!leaf.ssh) return;
+        leaf.ssh.hiddenMetrics = normalizeHiddenMetrics(hiddenMetrics);
+        if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+        return;
       }
     },
 
@@ -778,8 +871,14 @@ const panesSlice = createSlice({
     builder.addCase(splitPaneWithTab.fulfilled, (state, action) => {
       const { paneId, direction, position, shellType, newTerminalId, uniqueTitle, uniqueOriginalTitle } = action.payload;
       
-      if (!state.paneTree) return;
-      
+      // The tab context menu can split a background tab while Canvas is active.
+      // Only update the active mirror if it actually owns the selected pane.
+      const active = state.paneTree && findLeaf(state.paneTree, paneId) ? state.paneTree : null;
+      const background = active ? undefined : Object.entries(state.treesByTabId)
+        .find(([, tree]) => tree && findLeaf(tree, paneId)?.type === 'terminal');
+      const tree = active ?? background?.[1];
+      if (!tree) return;
+
       const findAndSplitPane = (node: PaneNode): boolean => {
         if (node.id === paneId && node.type === 'terminal') {
           // Create new terminal pane
@@ -791,8 +890,12 @@ const panesSlice = createSlice({
             terminalId: newTerminalId,
             name: uniqueTitle,
             shellType: shellType,
+            // R8: see the matching comment in `splitLeafInTree` — the new
+            // sibling must inherit elevation too, not just the surviving pane.
+            elevated: node.elevated,
+            titleColor: node.titleColor,
           };
-          
+
           // Convert current terminal pane to split pane. Goes through the SAME
           // helper `splitLeafInTree` uses — this reducer carried only `notifyMuted`
           // and dropped `seededForTabId`/`sessionKey`, which is how an ordinary UI
@@ -806,12 +909,17 @@ const panesSlice = createSlice({
           node.children = position === 'before' ? [newPane, originalPane] : [originalPane, newPane];
           delete node.terminalId;
           delete node.notifyMuted; // node is a split container now, not a leaf
+          delete node.apiCreated;
+          delete node.titleColor;
+          delete node.ssh;
 
-          // Set the new pane as active
-          state.activePaneId = newPaneId;
-          // Splitting the maximized pane reshapes the tab — exit maximize so the new
-          // split is visible (the flag would otherwise point at a now-split node id).
-          if (state.activeTabId) delete state.maximizedPaneByTabId[state.activeTabId];
+          if (active) {
+            state.activePaneId = newPaneId;
+            if (state.activeTabId) delete state.maximizedPaneByTabId[state.activeTabId];
+          } else if (background) {
+            state.activePaneByTabId[background[0]] = newPaneId;
+            delete state.maximizedPaneByTabId[background[0]];
+          }
 
           return true;
         }
@@ -825,8 +933,7 @@ const panesSlice = createSlice({
         return false;
       };
 
-      findAndSplitPane(state.paneTree);
-      syncActive(state);
+      if (findAndSplitPane(tree) && active) syncActive(state);
     });
   },
 });
@@ -838,12 +945,15 @@ export const {
   toggleMaximizePane,
   setMaximizedPane,
   setPaneMuted,
+  setPaneTitleColor,
   closePane,
   resizePane,
   resizeFocusedPane,
   focusPane,
   focusPaneInTab,
   renamePanes,
+  patchSshPaneTag,
+  setSshHiddenMetrics,
   setPaneTree,
   resetPanes,
   setActiveTabId,
@@ -854,5 +964,13 @@ export const {
   movePaneWithinTab,
   movePaneToTab,
 } = panesSlice.actions;
+
+const EMPTY_HIDDEN_METRICS: readonly MetricKey[] = Object.freeze([]);
+
+export function selectSshHiddenMetrics(
+  state: { panes: Pick<PanesState, 'treesByTabId'> }, terminalId: string,
+): readonly MetricKey[] {
+  return findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.hiddenMetrics ?? EMPTY_HIDDEN_METRICS;
+}
 
 export default panesSlice.reducer;

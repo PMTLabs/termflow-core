@@ -272,6 +272,8 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
                 submit: true,
                 cli_type: "claude".into(),
                 substitute: false,
+            masked: false,
+            message_cipher: None,
             }),
             webhook: None,
         },

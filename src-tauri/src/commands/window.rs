@@ -3,7 +3,7 @@
 //! Split out of the former `commands.rs`.
 
 use tauri::State;
-use crate::state::AppState;
+use crate::state::{AppState, CloseBounds};
 use super::menu::refresh_menu;
 
 /// The window label that API/MCP-created terminals currently route to (normalized to
@@ -77,12 +77,11 @@ pub fn open_settings_in_main_window(
 /// the new window into the main window's session. That is precisely the defect
 /// this feature exists to remove, so the ordering is load-bearing, not a
 /// micro-optimisation.
-pub fn reserve_window_id(app: &tauri::AppHandle, label: &str) -> Option<String> {
+pub(crate) fn reserve_window_id(app: &tauri::AppHandle, build: crate::state::WindowBuildGuard) -> Result<crate::state::WindowBuildGuard, String> {
     use tauri::Manager as _;
-    let state = app.try_state::<AppState>()?;
+    let state = app.try_state::<AppState>().ok_or("window state not ready")?;
     let id = uuid::Uuid::new_v4().simple().to_string();
-    state.windows.bind(label, &id);
-    Some(id)
+    Ok(build.with_stable_id(state.windows.clone(), id))
 }
 
 /// Record a just-built window's real geometry under its reserved id.
@@ -101,7 +100,7 @@ pub fn record_new_window(
     let Some(state) = app.try_state::<AppState>() else { return };
     let pos = window.outer_position().ok();
     let size = window.inner_size().ok();
-    state.windows.register(crate::window_registry::WindowRecord {
+    state.windows.publish_reserved(crate::window_registry::WindowRecord {
         id,
         label: window.label().to_string(),
         x: pos.map(|p| p.x).unwrap_or(0),
@@ -143,6 +142,21 @@ pub fn list_window_session_ids(state: State<'_, AppState>) -> Vec<String> {
     state.windows.snapshot().windows.into_iter().map(|w| w.id).collect()
 }
 
+/// Register the calling renderer without waiting for a native build. The payload
+/// is `{status: "Retry"}` or `{status: "Registered", wi, pg}`. Registration alone
+/// never settles or ends an older page; the ordered page stream does that.
+#[tauri::command]
+pub(crate) fn register_page(
+    app_handle: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<crate::state::PageRegistration, String> {
+    use tauri::Manager as _;
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return Ok(crate::state::PageRegistration::Retry);
+    };
+    state.host_table.keys().register_page(window.label())
+}
+
 // ----- Quit: give every window a chance to persist first ---------------------
 //
 // `AppHandle::exit` tears the process down without firing `CloseRequested` for
@@ -159,32 +173,152 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 /// `FLUSH_TIMEOUT` elapses.
 /// The ONLY route from a user-initiated quit to `exit(0)`.
 ///
-/// Releases the pty-host's detach arm before exiting. An armed host that loses
-/// its GUI *holds* its sessions instead of tearing them down (see the sidecar's
-/// `on_gui_disconnect`), so exiting while armed leaves the user's shells — and
-/// any agent CLI running under them — alive with no window and no tray to reach
-/// them. Users read "Exit" as "exit everything", so a quit must never leave that
-/// behind.
+/// Releases every pty-host's detach arm, then ANNOUNCES the exit to each, before
+/// exiting. Admission to the hosts is closed first and stays closed.
+/// A host that loses its GUI *holds* its sessions instead of tearing them down
+/// when it is armed — and, since the 2026-09-21 crash, also when the pipe just
+/// drops with live children (a crashed GUI is indistinguishable from a quitting
+/// one on the wire; see the sidecar's `on_gui_disconnect`). Exiting without
+/// saying so therefore leaves the user's shells — and any agent CLI running
+/// under them — alive with no window and no tray to reach them. Users read
+/// "Exit" as "exit everything", so a quit must never leave that behind:
+/// `disarm` ends the hold, `shutdown` tells the host this disconnect is final.
 ///
 /// Deliberately NOT used by `restart_for_update` or the updater: those arm on
 /// purpose and exit so terminals survive the swap.
 pub fn disarm_then_exit(app: &tauri::AppHandle) {
-    use tauri::Manager as _;
-
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        // Resolve the client and drop the `State` borrow before awaiting.
-        let client = app.try_state::<AppState>().and_then(|s| s.pty_host_clone());
-        if let Some(client) = client {
-            if !client.disarm().await {
-                log::error!(
-                    "quit: pty-host never acknowledged the disarm; it may keep \
-                     holding sessions after we exit"
-                );
-            }
-        }
+        close_all_hosts(&app, None).await;
         app.exit(0);
     });
+}
+
+/// Everything a quit does to the shells' hosts, short of exiting: release every
+/// pty-host this instance owns, then close the elevated transport and stop admitting
+/// elevated sessions. Before closing that transport, signal a live held elevated
+/// survivor this run never reconnected to; the signal is instance-scoped and does not
+/// elevate. A connected elevated host is shut down through its existing transport.
+///
+/// With `bounds`, the hosts get that long and no more, for a caller that has
+/// something else waiting for it (an update that has started its updater).
+pub(crate) async fn close_all_hosts(app: &tauri::AppHandle, bounds: Option<CloseBounds>) {
+    use tauri::Manager as _;
+
+    // Clone out of the `State` borrow before awaiting.
+    let state = app.try_state::<AppState>().map(|s| s.inner().clone());
+    if let Some(state) = &state {
+        stand_down_unreconnected_survivor(state);
+        state.exit_hosts_within(bounds).await;
+    }
+    if let Some(elevated) = state.map(|s| s.elevated_host.clone()) {
+        elevated.shutdown().await;
+    }
+}
+
+#[cfg(windows)]
+fn stand_down_unreconnected_survivor(state: &AppState) {
+    let Some(runtime_dir) = crate::pty_host_client::runtime_host_dir() else { return };
+    let profile_key = crate::profile::current().info().key;
+    let survivor_path = crate::elevated_host::survivor::survivor_record_path(&runtime_dir, &profile_key);
+    let result = stand_down_unreconnected_survivor_with(
+        &survivor_path,
+        |path| match termflow_pty_protocol::rendezvous::read_elevated_survivor(path) {
+            Ok(record) => record,
+            Err(error) => {
+                log::warn!("[ADMIN] could not read elevated survivor record before quit: {error}");
+                None
+            }
+        },
+        survivor_record_is_live,
+        |pid| state.elevated_host.is_connected_to_pid(pid),
+        termflow_pty_protocol::rendezvous::request_elevated_stand_down,
+    );
+    if let Err(error) = result {
+        log::warn!("[ADMIN] could not request elevated survivor stand-down: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn stand_down_unreconnected_survivor(_state: &AppState) {}
+
+#[cfg(windows)]
+fn stand_down_unreconnected_survivor_with(
+    survivor_path: &std::path::Path,
+    read_record: impl FnOnce(&std::path::Path) -> Option<termflow_pty_protocol::ElevatedSurvivorRecord>,
+    is_live: impl FnOnce(&termflow_pty_protocol::ElevatedSurvivorRecord) -> bool,
+    is_connected: impl FnOnce(u32) -> bool,
+    request: impl FnOnce(&std::path::Path, u128) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let Some(record) = read_record(survivor_path) else { return Ok(()) };
+    if !is_live(&record) || is_connected(record.host_pid) {
+        return Ok(());
+    }
+    let Some(stand_down_path) = termflow_pty_protocol::rendezvous::elevated_stand_down_path_for_survivor(survivor_path) else {
+        return Ok(());
+    };
+    request(&stand_down_path, record.instance_id)
+}
+
+#[cfg(windows)]
+fn survivor_record_is_live(record: &termflow_pty_protocol::ElevatedSurvivorRecord) -> bool {
+    crate::elevated_host::survivor::open_live_process(record).is_some()
+}
+
+#[cfg(all(test, windows))]
+mod stand_down_tests {
+    use super::*;
+
+    fn record() -> termflow_pty_protocol::ElevatedSurvivorRecord {
+        termflow_pty_protocol::ElevatedSurvivorRecord {
+            format: 1,
+            user_sid: "S-1-5-21-test".into(),
+            host_pid: 2345,
+            host_creation_time: 6789,
+            instance_id: 0xDEADBEEF_CAFE_1234,
+            rendezvous_pipe: r"\\.\pipe\termflow-admin-rendezvous.test.2345.nonce".into(),
+            proto_min: 1,
+            proto_max: 1,
+            capabilities: 0,
+        }
+    }
+
+    fn run_case(tag: &str, record: Option<termflow_pty_protocol::ElevatedSurvivorRecord>, live: bool, connected: bool) -> Option<u128> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("termflow-app-standdown-{}-{nonce}-{tag}", std::process::id()));
+        let survivor_path = dir.join("elevated-survivor-default.json");
+        let stand_down_path = dir.join("elevated-standdown-default.json");
+        stand_down_unreconnected_survivor_with(
+            &survivor_path,
+            |path| {
+                assert_eq!(path, survivor_path.as_path());
+                record
+            },
+            |_| live,
+            |pid| {
+                assert_eq!(pid, 2345);
+                connected
+            },
+            termflow_pty_protocol::rendezvous::request_elevated_stand_down,
+        )
+        .unwrap();
+        let requested = termflow_pty_protocol::rendezvous::read_elevated_stand_down(&stand_down_path);
+        let _ = std::fs::remove_file(stand_down_path);
+        let _ = std::fs::remove_dir(dir);
+        requested
+    }
+
+    #[test]
+    fn stand_down_unreconnected_survivor_signals_only_live_unconnected_records() {
+        let rec = record();
+        assert_eq!(run_case("live-unconnected", Some(rec.clone()), true, false), Some(rec.instance_id));
+        assert_eq!(run_case("no-record", None, true, false), None);
+        assert_eq!(run_case("connected", Some(rec.clone()), true, true), None);
+        assert_eq!(run_case("dead", Some(rec), false, false), None);
+    }
 }
 
 /// Ask every window to persist its state — including the spec 045 §3.3 cwd
@@ -200,16 +334,20 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
 /// outright, so a tab offloaded/updated between autosave ticks came back on
 /// relaunch with no persisted cwd and fell through to whatever directory
 /// `CreateProcess` picked with none given (reported: `C:\Windows`).
-pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
+///
+/// Returns whether THIS call is what marked the application as exiting. A caller
+/// that backs out afterwards (an update that is abandoned) may clear the mark only
+/// then: otherwise it would clear a quit's.
+pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) -> bool {
     use tauri::{Emitter, Manager as _};
 
-    let Some(state) = app.try_state::<AppState>() else { return };
+    let Some(state) = app.try_state::<AppState>() else { return false };
 
     // A second Quit while a flush is in flight means "I am done waiting" — the
     // caller's own exit still proceeds; there is just nothing further to await.
-    if state.exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if !mark_exiting(&state.exiting) {
         log::info!("flush_all_windows: already flushing; not waiting again.");
-        return;
+        return false;
     }
 
     let expected: Vec<String> = app
@@ -219,14 +357,14 @@ pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
         .cloned()
         .collect();
     if expected.is_empty() {
-        return;
+        return true;
     }
 
     state.flush_acks.clear();
     if let Err(e) = app.emit("app:flush-session", ()) {
         // Nothing will ack, so do not make the caller wait out the timeout.
         log::warn!("flush_all_windows: could not ask windows to flush ({e}); continuing.");
-        return;
+        return true;
     }
 
     let acks = state.flush_acks.clone();
@@ -242,6 +380,13 @@ pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
             FLUSH_TIMEOUT.as_millis()
         );
     }
+    true
+}
+
+/// Mark the application as exiting. True when this call set the mark, false when
+/// it was already set.
+fn mark_exiting(exiting: &std::sync::atomic::AtomicBool) -> bool {
+    !exiting.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
 pub fn flush_then_exit(app: &tauri::AppHandle) {
@@ -281,6 +426,16 @@ mod flush_tests {
     use dashmap::DashMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// Whoever's swap set the mark is the only one that may take it back: an update
+    /// that backs out after a quit marked the application must leave the quit's mark.
+    #[test]
+    fn only_the_call_that_set_the_exit_mark_owns_it() {
+        let exiting = std::sync::atomic::AtomicBool::new(false);
+        assert!(mark_exiting(&exiting), "the first call sets it");
+        assert!(!mark_exiting(&exiting), "a second one finds it set and owns nothing");
+        assert!(exiting.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn a_window_that_never_acks_does_not_wedge_the_quit() {
@@ -330,34 +485,9 @@ pub fn flush_session_ack(state: State<'_, AppState>, window: tauri::WebviewWindo
     state.flush_acks.insert(window.label().to_string(), ());
 }
 
-// ----- Detach / cross-window pane handoff -----------------------------------
-//
-// The PTY processes live in this shared backend (AppState), so moving a pane to
-// a new window does NOT restart the shell. The source window serializes the
-// moving unit into a single-use payload stashed here under a token; the new
-// window fetches it and reattaches to the same live processes by id.
-
-#[tauri::command]
-pub fn stash_detach_payload(
-    state: State<'_, AppState>,
-    token: String,
-    payload: serde_json::Value,
-) -> Result<(), String> {
-    state.detach_payloads.insert(token, payload);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn take_detach_payload(
-    state: State<'_, AppState>,
-    token: String,
-) -> Result<Option<serde_json::Value>, String> {
-    Ok(state.detach_payloads.remove(&token).map(|(_, v)| v))
-}
-
 /// Open a new app window that will reconstruct the detached tab/pane. The token
-/// is carried in the window label (`detach-<token>`) so the new window can read
-/// it from its own label and call `take_detach_payload` on boot.
+/// is carried in the window label (`detach-<token>`) so the new window can take
+/// and adopt the transfer through its page stream on boot.
 #[tauri::command]
 pub async fn create_detached_window(
     app_handle: tauri::AppHandle,
@@ -365,7 +495,11 @@ pub async fn create_detached_window(
     token: String,
     x: Option<f64>,
     y: Option<f64>,
+    pg: u64,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
+    state.host_table.keys().verify_transfer_source(window.label(), pg, &token)?;
+    let taken = state.host_table.keys().watch_transfer(window.label(), pg, &token)?;
     let label = format!("detach-{}", token);
     // Match the main window (tauri.conf): empty/hidden title + Overlay title bar
     // so the custom in-app tab bar is the only header (no native "TermFlow"
@@ -429,13 +563,25 @@ pub async fn create_detached_window(
 
     // Reserve BEFORE build (see reserve_window_id): a detached window saves its
     // own session from the moment it mounts, so it must know its id by then.
-    let reserved = reserve_window_id(&app_handle, &label);
+    let build = crate::window_lifetime::reserve(&app_handle, &label)?;
+    let build = reserve_window_id(&app_handle, build)?;
+    let reserved = build.stable_id().map(str::to_string);
     let window = builder.build().map_err(|e| e.to_string())?;
+    // Wry's native CreateWindow result is asynchronous: `build()` can return a
+    // handle even when the event loop later logs and drops the webview. Verify
+    // before waiting for the pane transfer so the renderer can roll it back.
+    window
+        .is_visible()
+        .map_err(|e| format!("detached window webview failed to initialize: {e}"))?;
+    crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
+    crate::webview_recovery::install(&window);
     if let Some(id) = reserved {
         record_new_window(&app_handle, &window, id, (900, 600));
     }
+    crate::memory_trim::activate(&app_handle);
     refresh_menu(&app_handle);
+    if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
     Ok(label)
 }
 
@@ -486,12 +632,17 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
     }
 
     // Reserve BEFORE build: the webview resolves its id as its first action.
-    let reserved = reserve_window_id(app, &label);
+    let build = crate::window_lifetime::reserve(app, &label)?;
+    let build = reserve_window_id(app, build)?;
+    let reserved = build.stable_id().map(str::to_string);
     let window = builder.build().map_err(|e| e.to_string())?;
+    crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
+    crate::webview_recovery::install(&window);
     if let Some(id) = reserved {
         record_new_window(app, &window, id, (1280, 800));
     }
+    crate::memory_trim::activate(app);
     Ok(label)
 }
 
@@ -583,17 +734,92 @@ mod quit_teardown_wiring_tests {
         panic!("unbalanced braces after `{signature}`");
     }
 
-    /// Drop `//` line comments. Without this the guards read our own prose: this
+    /// Drop `//` line comments AND `/* ... */` block comments (non-nested,
+    /// may span lines). Without this the guards read our own prose: this
     /// module and the code it guards both *describe* exiting and disarming, and a
-    /// sentence must never stand in for — or trip — an assertion about code.
+    /// sentence must never stand in for — or trip — an assertion about code. A
+    /// call wrapped in a block comment (disabling it) must also read as absent,
+    /// not merely as a line-commented one would.
     fn strip_line_comments(code: &str) -> String {
-        code.lines()
+        let mut without_block = String::with_capacity(code.len());
+        let mut rest = code;
+        while let Some(start) = rest.find("/*") {
+            without_block.push_str(&rest[..start]);
+            match rest[start + 2..].find("*/") {
+                Some(end) => rest = &rest[start + 2 + end + 2..],
+                None => {
+                    // Unterminated block comment: drop the remainder.
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        without_block.push_str(rest);
+
+        without_block
+            .lines()
             .map(|l| match l.find("//") {
                 Some(i) => &l[..i],
                 None => l,
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The `(start, end)` byte range of the `{ ... }` block whose opening
+    /// brace is the first one at-or-after byte offset `at` (`start` is the
+    /// position of `{`; `end` is one past the matching `}`), found by
+    /// counting brace depth (not a naive next-`}`) so a nested block inside
+    /// does not truncate the match early. Returns plain indices — rather
+    /// than a borrowed `&str` — so callers that need the block's absolute
+    /// end offset are not tempted to reconstruct it via pointer arithmetic
+    /// against an owned copy (which is a dangling-pointer bug: a `.to_string()`
+    /// of the slice lives in a different allocation than the original).
+    fn block_range_at(src: &str, at: usize) -> (usize, usize) {
+        let open = src[at..]
+            .find('{')
+            .map(|i| at + i)
+            .unwrap_or_else(|| panic!("no `{{` at-or-after byte {at}"));
+        let mut depth = 0i32;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (open, open + i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces starting at byte {open}");
+    }
+
+    /// The `{ ... }` block text itself; see `block_range_at`.
+    fn block_at(src: &str, at: usize) -> &str {
+        let (start, end) = block_range_at(src, at);
+        &src[start..end]
+    }
+
+    /// Remove `if false { ... }` and `#[cfg(any())] { ... }` dead blocks
+    /// (including their condition/attribute) so a call placed inside one
+    /// cannot satisfy an ordering check that only ever looked at textual
+    /// position, never reachability.
+    fn strip_dead_blocks(src: &str) -> String {
+        let mut out = src.to_string();
+        loop {
+            let at = match (out.find("if false"), out.find("#[cfg(any())]")) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let Some(at) = at else { break };
+            let (_, block_end) = block_range_at(&out, at);
+            out.replace_range(at..block_end, "");
+        }
+        out
     }
 
     /// Whether `code` terminates the process by ANY spelling used in this repo.
@@ -689,6 +915,88 @@ mod quit_teardown_wiring_tests {
         );
     }
 
+    /// A real quit must close every host, the elevated one included, before exiting:
+    /// `exit_hosts` tears down what was not armed, and `close_all_hosts` then closes the
+    /// elevated transport. Order matters: after `exit(0)` the process is already gone, so
+    /// a close placed after it would never run.
+    #[test]
+    fn disarm_then_exit_shuts_down_the_elevated_host_before_exiting() {
+        let window = source("commands/window.rs");
+        let quit = strip_line_comments(&fn_body(&window, "pub fn disarm_then_exit"));
+        let closes_at = quit.find("close_all_hosts(").unwrap_or_else(|| {
+            panic!("the quit must close the hosts through `close_all_hosts`. Body:\n{quit}")
+        });
+        let exit_at = quit.find(".exit(").expect("disarm_then_exit must still exit");
+        assert!(closes_at < exit_at, "the hosts are closed BEFORE exit(0). Body:\n{quit}");
+
+        let body = fn_body(&window, "pub(crate) async fn close_all_hosts");
+        let stripped = strip_line_comments(&body);
+        assert!(
+            stripped.contains("elevated_host") && stripped.contains("elevated.shutdown("),
+            "close_all_hosts must tear down state.elevated_host. Body:\n{body}"
+        );
+        // Named receiver: the primary host now has a `.shutdown(` of its own on
+        // this path, so the bare method name would match that call instead and
+        // pin nothing about the elevated host.
+        assert!(
+            !has_process_exit(&stripped),
+            "close_all_hosts must not exit: the update closes the hosts and exits itself. Body:\n{body}"
+        );
+    }
+
+    /// Since the 2026-09-21 crash a host HOLDS live sessions on a bare
+    /// disconnect (a crash and a quit look the same on the wire) and only tears
+    /// down on an explicit `Shutdown`. Disarming alone is no longer a quit: a
+    /// `disarm_then_exit` that forgets to announce the exit leaves the user's
+    /// shells and agent CLIs running, unreachable, for the host's whole
+    /// retention window — the exact orphan "Exit" must never produce.
+    ///
+    /// The quit hands every owned host to `exit_hosts` before `exit(0)`; what is
+    /// done to each host lives in `release_host`, which requires the acks to be
+    /// CHECKED (`if !client.shutdown().await` with a logged failure), placed after
+    /// the disarm — the host clears its latch when a GUI adopts, and a stale arm
+    /// released after the announcement would be the wrong order to reason about —
+    /// and before the stream is closed.
+    #[test]
+    fn disarm_then_exit_announces_the_exit_to_every_host() {
+        let window = source("commands/window.rs");
+        let close = strip_line_comments(&fn_body(&window, "pub(crate) async fn close_all_hosts"));
+        // Awaited: a future that is dropped releases nothing, and the exit would go
+        // ahead with every host still held.
+        let hosts_at = close.find(".exit_hosts_within(bounds).await").unwrap_or_else(|| {
+            panic!("the quit must release every owned host via `exit_hosts_within(..).await`. Body:\n{close}")
+        });
+        let elevated_at = close.find("elevated.shutdown(").expect("the elevated host is torn down too");
+        let stand_down_at = close.find("stand_down_unreconnected_survivor(state)")
+            .expect("the quit signals an abandoned held survivor before closing the elevated transport");
+        assert!(stand_down_at < elevated_at, "the stand-down signal is written before the elevated transport closes. Body:\n{close}");
+        assert!(hosts_at < elevated_at, "the owned hosts are released first. Body:\n{close}");
+        let quit = strip_line_comments(&fn_body(&window, "pub fn disarm_then_exit"));
+        assert!(
+            quit.contains("close_all_hosts(&app, None).await"),
+            "a quit closes the hosts without a bound, and waits for it. Body:\n{quit}"
+        );
+
+        let release = strip_line_comments(&fn_body(
+            &source("state/host_lifecycle.rs"),
+            "async fn release_host",
+        ));
+        let if_at = release.find("if !client.shutdown().await").unwrap_or_else(|| {
+            panic!("the shutdown ack must be checked via `if !client.shutdown().await`. Body:\n{release}")
+        });
+        let arm = block_at(&release, if_at);
+        assert!(
+            arm.contains("log::error!"),
+            "an unacknowledged shutdown on the quit path must be logged. Block:\n{arm}"
+        );
+        let disarm_at = release.find("client.disarm(").expect("the disarm is still required");
+        let close_at = release.find("client.close_transport(").expect("the stream is closed");
+        assert!(
+            disarm_at < if_at && if_at < close_at,
+            "expected disarm, then shutdown, then close. Body:\n{release}"
+        );
+    }
+
     /// The other half of the contract. `restart_for_update` arms ON PURPOSE and
     /// exits so the shells survive the swap; disarming there would defeat the
     /// feature. Pins that the new choke point was not applied indiscriminately.
@@ -729,6 +1037,29 @@ mod quit_teardown_wiring_tests {
         );
     }
 
+    /// Every spelling that closes the elevated host. The offload and relaunch paths must use
+    /// none of them; matching only `state.elevated_host.shutdown` missed the `elevated.shutdown(`
+    /// alias `close_all_hosts` itself uses, and `close_all_hosts` as a whole.
+    const ELEVATED_CLOSE_SPELLINGS: [&str; 3] = ["elevated_host.shutdown", "elevated.shutdown(", "close_all_hosts("];
+
+    /// Plan 058 AC1: `restart_for_update` arms all hosts (elevated included via begin_offload)
+    /// and does NOT shut down elevated_host on offload.
+    #[test]
+    fn the_offload_path_arms_and_does_not_shut_down_elevated_host() {
+        let body = fn_body(&source("commands/update.rs"), "pub async fn restart_for_update");
+        let stripped = strip_line_comments(&body);
+        for alias in ELEVATED_CLOSE_SPELLINGS {
+            assert!(
+                !stripped.contains(alias),
+                "restart_for_update must NOT close the elevated host (`{alias}`): it holds across offload. Body:\n{body}"
+            );
+        }
+        assert!(
+            stripped.contains("begin_offload"),
+            "restart_for_update must arm via begin_offload. Body:\n{body}"
+        );
+    }
+
     /// `flush_all_windows` is the shared piece both the normal quit path and the
     /// offload/update paths build on. It must never itself decide to disarm or
     /// exit — the three callers disagree on that (quit disarms, offload/update
@@ -748,6 +1079,236 @@ mod quit_teardown_wiring_tests {
             "flush_all_windows must not exit the process itself — callers that \
              need to stay armed (restart_for_update, update_and_restart) would \
              inherit an exit they never asked for. Body:\n{body}"
+        );
+    }
+
+    /// `restart_keeping_terminals` (plan 044 T1) reuses the same arm step
+    /// `restart_for_update` does, then — unlike offload — actually relaunches.
+    /// The order is load-bearing: arming before flushing means a refused arm
+    /// never touches the renderer, flushing before spawning means a tab's cwd
+    /// is persisted before anything about the successor happens, and spawning
+    /// before exit means we never terminate without a successor spawned.
+    /// Also assert `.exit(` is reachable only via the spawn match's success
+    /// path — after the match resolves, since the Err arm returns early —
+    /// and that no anchor lives inside dead code (`if false { }` /
+    /// `#[cfg(any())] { }`) that would otherwise still satisfy a purely
+    /// textual/offset ordering check.
+    #[test]
+    fn restart_keeping_terminals_arms_flushes_spawns_then_exits() {
+        let body = fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        );
+        let stripped = strip_line_comments(&body);
+        let live = strip_dead_blocks(&stripped);
+
+        let pos = |needle: &str| {
+            live.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` not found in reachable body:\n{live}"))
+        };
+        let preflight_at = pos("local_terminals_refusal");
+        let admission_at = pos(".begin_relaunch()");
+        let arm_at = pos("arm_detach");
+        let flush_at = pos("flush_all_windows");
+        let spawn_at = pos("spawn_relaunch");
+        let exit_at = pos(".exit(");
+        assert!(
+            preflight_at < admission_at
+                && admission_at < arm_at
+                && arm_at < flush_at
+                && flush_at < spawn_at
+                && spawn_at < exit_at,
+            "restart_keeping_terminals must local_terminals_refusal -> begin_relaunch -> arm_detach -> \
+             flush_all_windows -> spawn_relaunch -> exit, in that order, reachably. Body:\n{live}"
+        );
+
+        let match_at = pos("match crate::relaunch::spawn_relaunch()");
+        let (_, match_end) = block_range_at(&live, match_at);
+        assert!(
+            exit_at >= match_end,
+            "`.exit(` must sit after the spawn match resolves — reachable only once \
+             spawn_relaunch succeeded, since the Err arm returns early — not merely \
+             somewhere lexically after the text `spawn_relaunch`. Body:\n{live}"
+        );
+    }
+
+    /// Plan 058 AC1: `restart_keeping_terminals` arms all hosts and does NOT shut down
+    /// elevated_host on relaunch.
+    #[test]
+    fn restart_keeping_terminals_arms_and_does_not_shut_down_elevated_host() {
+        let body = fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        );
+        let stripped = strip_line_comments(&body);
+        let live = strip_dead_blocks(&stripped);
+        for alias in ELEVATED_CLOSE_SPELLINGS {
+            assert!(
+                !live.contains(alias),
+                "restart_keeping_terminals must NOT close the elevated host (`{alias}`): it holds across relaunch. Body:\n{live}"
+            );
+        }
+        assert!(
+            live.contains("begin_relaunch"),
+            "restart_keeping_terminals must arm via begin_relaunch. Body:\n{live}"
+        );
+    }
+
+    /// The spawn-failure path must release the hold (disarming every host it
+    /// armed) and must be the ONLY place this function does — the success path
+    /// exits deliberately armed, same as `restart_for_update`, so the pty-hosts
+    /// keep holding.
+    ///
+    /// Checks BLOCK containment (the release call must live inside the `Err(`
+    /// arm's own block), not textual order — a release sitting between
+    /// `spawn_relaunch` and `.exit(` purely by offset could still actually be
+    /// inside the `Ok(` arm.
+    #[test]
+    fn restart_keeping_terminals_disarms_only_on_spawn_failure() {
+        let body = fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        );
+        let stripped = strip_line_comments(&body);
+
+        // Count CALLS (`.release(`), not the word: the branch also comments on it.
+        let release_positions: Vec<_> = stripped.match_indices(".release(").collect();
+        assert_eq!(
+            release_positions.len(),
+            1,
+            "expected exactly one `.release(` call — only on the spawn-failure path. Body:\n{body}"
+        );
+        assert!(
+            !stripped.contains(".disarm("),
+            "a disarm that bypasses the hold would leave admission closed. Body:\n{body}"
+        );
+
+        let match_at = stripped
+            .find("match crate::relaunch::spawn_relaunch()")
+            .expect("spawn_relaunch match not found");
+        let match_block = block_at(&stripped, match_at);
+        let err_at = match_block
+            .find("Err(")
+            .expect("spawn match must have an Err( arm");
+        let err_arm = block_at(match_block, err_at);
+        assert!(
+            err_arm.contains(".release("),
+            "`.release(` must be inside the Err( arm's own block of the spawn_relaunch \
+             match — not merely textually between spawn_relaunch and exit. Err arm:\n{err_arm}"
+        );
+    }
+
+    /// `PtyHostClient::disarm` returns whether the host ACKED. A spawn failure
+    /// that then loses the disarm leaves the host holding a 15-minute window
+    /// under a fully connected GUI; the least this path can do is say so, and
+    /// name the host. The release goes through `disarm_hosts`.
+    ///
+    /// Requires the ack to actually be CHECKED — an `if !acknowledged` condition
+    /// whose block logs the failure — not merely evaluated and discarded
+    /// (`let _ = client.disarm().await;`).
+    #[test]
+    fn restart_keeping_terminals_checks_the_disarm_ack() {
+        let body = strip_line_comments(&fn_body(
+            &source("state/host_lifecycle.rs"),
+            "async fn disarm_hosts",
+        ));
+        assert!(body.contains("client.disarm().await"), "the disarm is sent. Body:\n{body}");
+        let if_at = body.find("if !acknowledged").unwrap_or_else(|| {
+            panic!("the disarm ack must be checked via `if !acknowledged`. Body:\n{body}")
+        });
+        let arm = block_at(&body, if_at);
+        assert!(
+            arm.contains("log::error!") && arm.contains("{name}"),
+            "a disarm that goes unacknowledged must be logged by host name. Block:\n{arm}"
+        );
+    }
+
+    /// Auto-recovery and the tray item can both call this for one death. The
+    /// latch must be taken BEFORE any side effect (the preflight is the first
+    /// one), and kept only on the success path — a failure that left it set
+    /// would wedge the tray item for the life of the process.
+    ///
+    /// `keep = true` must sit at-or-after the END of the spawn match's block
+    /// (block containment, not offset order): the Err arm returns early, so
+    /// anything after the match's closing brace is reachable only via a
+    /// successful spawn. A caller that sets `keep = true` BEFORE even
+    /// attempting the spawn (so a failure leaves it set) would satisfy a
+    /// purely textual "after spawn_relaunch, before exit" check while still
+    /// being wrong.
+    #[test]
+    fn restart_keeping_terminals_is_single_flight() {
+        let body = strip_line_comments(&fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        ));
+        let pos = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` not found in body:\n{body}"))
+        };
+        let latch_at = pos("restart_in_flight.swap(true");
+        // The first thing it looks at, and the first thing it changes.
+        let preflight_at = pos("local_terminals_refusal");
+        assert!(
+            latch_at < preflight_at && latch_at < pos(".begin_relaunch()"),
+            "the in-flight latch must be taken before the preflight. Body:\n{body}"
+        );
+        assert!(
+            pos("RESTART_IN_FLIGHT") < preflight_at,
+            "a second caller must be refused with RESTART_IN_FLIGHT before any side effect"
+        );
+
+        let match_at = pos("match crate::relaunch::spawn_relaunch()");
+        let match_block = block_at(&body, match_at);
+        let (_, match_end) = block_range_at(&body, match_at);
+        let err_at = match_block
+            .find("Err(")
+            .expect("spawn match must have an Err( arm");
+        let err_arm = block_at(match_block, err_at);
+        assert!(
+            err_arm.contains("return Err("),
+            "the Err( arm of the spawn match must return early, so nothing after the \
+             match runs on a failed spawn. Err arm:\n{err_arm}"
+        );
+
+        let keep_at = pos("keep = true");
+        assert!(
+            keep_at >= match_end,
+            "`keep = true` must sit at-or-after the end of the spawn match — reachable \
+             only via its Ok arm, since the Err arm returns early — found at byte \
+             {keep_at}, match ends at byte {match_end}. Body:\n{body}"
+        );
+        assert!(
+            keep_at < pos(".exit("),
+            "the latch must be kept before exit. Body:\n{body}"
+        );
+    }
+
+    /// `FlushPolicy::Skip` exists so the automatic path does not wait 1.5 s on
+    /// a dead renderer (plan 044 R3). The order test above cannot see the
+    /// guard; this one pins that `flush_all_windows` sits inside its block,
+    /// and appears nowhere else in the body — an `if flush == ... {}` guard
+    /// with an unconditional `flush_all_windows` call right after it would
+    /// otherwise satisfy a proximity-only check.
+    #[test]
+    fn restart_keeping_terminals_flushes_only_for_the_renderer_policy() {
+        let body = strip_line_comments(&fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        ));
+        let guard_at = body
+            .find("if flush == FlushPolicy::Renderer")
+            .expect("the Renderer guard must exist");
+        let guard_block = block_at(&body, guard_at);
+        assert!(
+            guard_block.contains("flush_all_windows"),
+            "flush_all_windows must sit INSIDE the FlushPolicy::Renderer guard's block. \
+             Guard block:\n{guard_block}"
+        );
+        let flush_count = body.matches("flush_all_windows").count();
+        assert_eq!(
+            flush_count, 1,
+            "flush_all_windows must be called exactly once in the body (inside the \
+             guard); found {flush_count}. Body:\n{body}"
         );
     }
 

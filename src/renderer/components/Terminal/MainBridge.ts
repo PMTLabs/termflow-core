@@ -1,4 +1,5 @@
 import type { TerminalBridge, Disposable, TerminalSnapshot } from '@termflow/terminal-core';
+import { earlyOutput } from '../../services/earlyOutput';
 
 // Main-app bridge for terminal-core (spec §6.1 / §17 R2).
 //
@@ -19,6 +20,9 @@ export function createMainBridge(): TerminalBridge {
         const d = (e as CustomEvent).detail as { processId: string; data: string };
         if (d.processId === processId) cb(d.data);
       };
+      // What the shell printed before this subscription existed comes first (earlyOutput.ts).
+      // Synchronous with adding the listener, so no live chunk can land in between.
+      for (const chunk of earlyOutput.claim(processId)) cb(chunk);
       window.addEventListener('pty:data', handler as EventListener);
       return { dispose: () => window.removeEventListener('pty:data', handler as EventListener) };
     },

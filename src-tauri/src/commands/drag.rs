@@ -105,7 +105,9 @@ pub async fn show_drag_preview(
             builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
         }
 
+        let build = crate::window_lifetime::reserve(&app_handle, PREVIEW_LABEL)?;
         let w = builder.build().map_err(|e| e.to_string())?;
+        crate::window_lifetime::commit(build, &w)?;
         // Click-through so it never steals the in-flight drag's pointer events.
         let _ = w.set_ignore_cursor_events(true);
         w
@@ -152,13 +154,16 @@ pub async fn hide_drag_preview(app_handle: tauri::AppHandle) -> Result<(), Strin
 /// payload by `token`) and return true; otherwise return false so the caller
 /// opens a new window. The payload must already be stashed under `token`.
 #[tauri::command]
-pub fn resolve_tab_drop(
+pub async fn resolve_tab_drop(
     app_handle: tauri::AppHandle,
     window: tauri::WebviewWindow,
     token: String,
     x: f64,
     y: f64,
+    pg: u64,
+    state: State<'_, AppState>,
 ) -> Result<bool, String> {
+    let taken = state.host_table.keys().watch_transfer(window.label(), pg, &token)?;
     // Global physical point of the drop, from the source window's content origin.
     let (px, py) = match (window.inner_position(), window.scale_factor()) {
         (Ok(origin), Ok(scale)) => (origin.x as f64 + x * scale, origin.y as f64 + y * scale),
@@ -184,10 +189,10 @@ pub fn resolve_tab_drop(
                 // listener acts only if it IS the target. (Same proven pattern as
                 // `app:close-requested`. A bare emit_to wasn't reaching the JS
                 // listener, and w.emit would let the source steal its own payload.)
-                let _ = app_handle.emit(
-                    "tab-drag:reattach",
-                    serde_json::json!({ "token": token, "target": label }),
-                );
+                let app = app_handle.clone();
+                if !state.host_table.keys().route_pane_transfer(window.label(), pg, &token, &label, move |notice| {
+                    let _ = app.emit("tab-drag:reattach", notice);
+                })? { continue; }
                 let _ = w.set_focus(); // bring the receiving window to the front
                 // Deliberately NOT restore_and_focus: this path only raises the window, and
                 // unminimizing a window the user left minimized would be a behaviour change.
@@ -196,6 +201,7 @@ pub fn resolve_tab_drop(
                 // otherwise a tab dropped into a minimized window reveals a blank one.
                 crate::webview_power::sync(&w);
                 log::info!("resolve_tab_drop: reattaching into {}", label);
+                if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
                 return Ok(true);
             }
         } else {
@@ -216,7 +222,6 @@ pub fn resolve_tab_drop(
 // orphan and opens a new window.
 
 use tauri::{Manager, Emitter};
-use crate::state::GlobalDrag;
 
 /// Pure point-in-rect test. Retained (unit-tested) for any future hit-testing.
 pub fn point_in_rect(px: f64, py: f64, rx: f64, ry: f64, rw: f64, rh: f64) -> bool {
@@ -231,15 +236,14 @@ pub fn begin_global_pane_drag(
     state: State<'_, AppState>,
     window: tauri::Window,
     token: String,
-    payload: serde_json::Value,
+    pg: u64,
 ) -> Result<(), String> {
-    state.detach_payloads.insert(token.clone(), payload);
-    *state.active_global_drag.lock().map_err(|e| e.to_string())? = Some(GlobalDrag {
-        token: token.clone(),
-        source_label: window.label().to_string(),
-    });
-    let _ = app_handle.emit("pane-drag:active", token);
-    Ok(())
+    let ended_app = app_handle.clone();
+    state.host_table.keys().begin_pane_drag(window.label(), pg, &token, move |notice| {
+        let _ = app_handle.emit("pane-drag:active", notice);
+    }, move |token| {
+        let _ = ended_app.emit("pane-drag:ended", token);
+    })
 }
 
 /// A window the cursor was released over claims the active drag. Returns the
@@ -250,22 +254,12 @@ pub fn claim_global_pane_drag(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     token: String,
+    window: tauri::Window,
+    pg: u64,
 ) -> Result<Option<serde_json::Value>, String> {
-    let mut guard = state.active_global_drag.lock().map_err(|e| e.to_string())?;
-    match guard.as_ref() {
-        Some(g) if g.token == token => {
-            let source_label = g.source_label.clone();
-            *guard = None;
-            drop(guard);
-            let payload = state.detach_payloads.remove(&token).map(|(_, v)| v);
-            if let Some(src) = app_handle.get_webview_window(&source_label) {
-                let _ = src.emit("pane-drag:claimed", token.clone());
-            }
-            let _ = app_handle.emit("pane-drag:ended", ());
-            Ok(payload)
-        }
-        _ => Ok(None),
-    }
+    state.host_table.keys().claim_pane_drag(window.label(), pg, &token, move |source, _token| {
+        if let Some(notice) = source { let _ = app_handle.emit("pane-drag:claimed", notice); }
+    })
 }
 
 /// The SOURCE resolves a drag that no window claimed (released over empty desktop)
@@ -273,38 +267,23 @@ pub fn claim_global_pane_drag(
 /// active drag (payload is left stashed for create_detached_window to consume).
 #[tauri::command]
 pub fn resolve_orphan_global_drag(
-    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     window: tauri::Window,
     token: String,
+    pg: u64,
 ) -> Result<bool, String> {
-    let mut guard = state.active_global_drag.lock().map_err(|e| e.to_string())?;
-    match guard.as_ref() {
-        Some(g) if g.token == token && g.source_label == window.label() => {
-            *guard = None;
-            drop(guard);
-            let _ = app_handle.emit("pane-drag:ended", ());
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
+    state.host_table.keys().end_pane_drag(window.label(), pg, &token, true, |_| {})
 }
 
 /// Cancel an in-flight drag (cursor returned inside the source, or Escape).
 #[tauri::command]
 pub fn cancel_global_pane_drag(
-    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     token: String,
+    window: tauri::Window,
+    pg: u64,
 ) -> Result<(), String> {
-    let mut guard = state.active_global_drag.lock().map_err(|e| e.to_string())?;
-    let owns = matches!(guard.as_ref(), Some(g) if g.token == token);
-    if owns {
-        *guard = None;
-    }
-    drop(guard);
-    state.detach_payloads.remove(&token);
-    let _ = app_handle.emit("pane-drag:ended", ());
+    state.host_table.keys().end_pane_drag(window.label(), pg, &token, false, |_| {})?;
     Ok(())
 }
 

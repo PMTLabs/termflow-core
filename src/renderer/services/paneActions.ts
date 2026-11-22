@@ -5,6 +5,7 @@ import { findLeaf, firstLeafId } from '../store/slices/paneTreeOps';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { getCwdSnapshot } from './cwdSnapshot';
+import { capturePaneEffect } from './paneEffect';
 
 /**
  * Shared "new tab / new window / split pane" actions used by the tab, pane and
@@ -52,6 +53,15 @@ export async function openNewWindow(): Promise<void> {
   }
 }
 
+/** Splitting an elevated pane is the user asking for another elevated shell: a UAC prompt they
+ *  cancelled earlier must not silently fail this one. Every user-initiated split (menu, context
+ *  menu, shortcut) calls this before it dispatches; API/MCP splits and session restore do not,
+ *  because the latch exists to stop those from raising prompt after prompt. */
+export function noteUserSplitOf(paneId: string): void {
+  const node = findLeafInAnyTree(store.getState().panes, paneId);
+  if (node?.elevated) terminalService.beginUserElevatedAttempt();
+}
+
 /** Split a specific pane. Direction matches the pane split buttons: 'horizontal'
  *  stacks panes top/bottom, 'vertical' places them side-by-side. `position` says
  *  which side of the original the NEW pane lands on ('before' = top/left,
@@ -65,12 +75,14 @@ export async function splitPaneById(
   const state = store.getState();
   const shellType = state.settings.defaultProfile || 'default';
 
+  const node = findLeafInAnyTree(state.panes, paneId);
+  if (!node?.terminalId) return;
+  const current = capturePaneEffect(node.terminalId, paneId);
   let cwd: string | undefined;
   try {
     // Spec 045 §3.6: search every tab's tree, not just `panes.paneTree` — that
     // mirrors the ACTIVE tab only, so a split requested from a BACKGROUND tab's
     // header found no source pane and silently inherited no cwd.
-    const node = findLeafInAnyTree(state.panes, paneId);
     const srcTerminalId = node?.terminalId;
     const processId = srcTerminalId ? terminalService.getProcessId(srcTerminalId) : undefined;
     if (processId) {
@@ -89,11 +101,14 @@ export async function splitPaneById(
     // the live query yields nothing and the new pane would spawn at the app's
     // launch dir (C:\Windows). The renderer's persisted snapshot (seeded on
     // restore) still holds the last-known folder, so inherit that instead.
+    if (!current()) return;
     if (!cwd && srcTerminalId) cwd = getCwdSnapshot(srcTerminalId);
   } catch (err) {
     console.warn('paneActions: could not read source pane cwd; using default', err);
   }
 
+  if (!current()) return;
+  noteUserSplitOf(paneId);
   store.dispatch(splitPaneWithTab({ paneId, direction, position, shellType, cwd }));
 }
 

@@ -14,7 +14,23 @@
 //! The client depends on a few concrete pieces (not `AppState`) so it is
 //! testable without the Windows `mock_app` crash and avoids an Arc cycle.
 
+// Wired into the launch resolver in plan 060 Task 3 step B.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+#[allow(dead_code)]
+mod bundle_staging;
+#[cfg(target_os = "macos")]
+mod macos_spawn;
+#[cfg(target_os = "macos")]
+pub use macos_spawn::HostPermissionIdentity;
+mod conn;
+mod endpoints;
+mod discovery;
+mod exe_origin;
+pub use endpoints::{current_host_paths, running_generation, HostPaths};
+pub use discovery::{discover_hosts, generation_of_endpoint, generation_of_endpoint_in, HostCandidate, HostRole};
+
 use crate::state::ChannelPayload;
+use conn::{cancelled, ConnState};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,6 +75,79 @@ pub struct PtyHostDeps {
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
+/// Owns one pending-reply entry: dropping it removes `id`, so a request future that is
+/// cancelled, times out or fails to enqueue never leaves its waiter in the map.
+struct PendingReply {
+    id: u64,
+    map: PendingMap,
+}
+
+impl Drop for PendingReply {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(&self.id);
+        }
+    }
+}
+
+/// How long `HoldMcp` / `ReleaseMcp` wait for the host's answer.
+const MCP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The definite answers to `HoldMcp`; an unanswered or unsent one is a [`McpSendError`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpHoldOutcome {
+    /// The connection did not advertise `CAP_MCP_HOLD`; nothing was written.
+    NotCapable,
+    Accepted,
+    Rejected(String),
+}
+
+/// Why a `HoldMcp` has no definite answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSendError {
+    /// The frame was not enqueued: the host cannot have seen it.
+    NotSent,
+    /// The frame was enqueued and no usable answer came: the host may be holding.
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpReleaseOutcome {
+    NotCapable,
+    Released { was_holding: bool },
+}
+
+/// The definite answers to `ClaimMcp`; an unanswered or unsent one is a [`McpSendError`], which
+/// the caller treats as no claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpClaimOutcome {
+    /// The connection did not advertise `CAP_MCP_HOLD`; nothing was written.
+    NotCapable,
+    /// The host's answer: what it is holding, if anything.
+    Held(Option<termflow_pty_protocol::McpHeld>),
+}
+
+/// Permission replies retain the host's responsibility evidence for adopted hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionOutcome<T> {
+    NotCapable,
+    Reply(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionStatus {
+    pub accessibility: termflow_pty_protocol::PermissionState,
+    pub screen_recording: termflow_pty_protocol::PermissionState,
+    pub self_responsible: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequest {
+    pub kind: termflow_pty_protocol::PermissionKind,
+    pub state: termflow_pty_protocol::PermissionState,
+    pub self_responsible: Option<bool>,
+}
+
 /// Map a pty-host session key to the process id our maps are keyed by.
 ///
 /// Returns `None` for an unknown session, and every caller DROPS that frame.
@@ -75,6 +164,11 @@ pub(crate) fn route_inbound(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
     lookup(session_key)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn unix_peer_token(stream: &tokio::net::UnixStream) -> Option<crate::state::permissions::host_identity::AuditToken> {
+    macos_spawn::peer_token(stream)
 }
 
 /// True when the PTY-host sidecar path is active.
@@ -116,8 +210,38 @@ fn host_enabled(is_windows: bool, is_unix: bool, env: Option<&str>) -> bool {
 #[cfg(test)]
 mod enabled_tests;
 
+#[cfg(test)]
+mod raw_session_controls {
+    use super::*;
+    impl PtyHostClient {
+        pub fn close(&self, tab_id: &str) {
+            let _ = self.outbound.send(Frame::Ctrl(Control::Close { tab_id: tab_id.to_string() }));
+        }
+    }
+}
+
+/// An answered listing retains the enqueue number that qualifies its evidence.
+#[derive(Clone, Debug)]
+pub struct SessionListing {
+    pub request_no: u64,
+    pub sessions: Vec<SessionMeta>,
+}
+
+impl std::ops::Deref for SessionListing {
+    type Target = [SessionMeta];
+    fn deref(&self) -> &Self::Target { &self.sessions }
+}
+
+#[derive(Clone)]
+struct SessionBinding {
+    keys: crate::state::HostKeys,
+    channel: crate::elevated_host::HostChannel,
+    epoch: u64,
+}
+
 #[derive(Clone)]
 pub struct PtyHostClient {
+    sessions: Arc<Mutex<SessionBinding>>,
     outbound: UnboundedSender<Frame>,
     pending: PendingMap,
     req_ctr: Arc<AtomicU64>,
@@ -129,6 +253,28 @@ pub struct PtyHostClient {
     /// reattach can use the transactional `AttachAcked` (RP-3). A legacy host
     /// (no record) must only ever receive the fire-and-forget `Attach`.
     attach_acks: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the connected host advertised `CAP_SHUTDOWN_CONTROL`: it
+    /// HOLDS live sessions on a bare disconnect (a crash looks the same on the
+    /// wire) and tears down only on an explicit `Control::Shutdown`. The quit
+    /// path MUST send that frame to such a host, or Exit leaves the user's
+    /// shells running for the host's retention window. A legacy host tears
+    /// down on disconnect and would never ack, so it must not be asked.
+    shutdown_control: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the connected host advertised `CAP_INHERIT_CURSOR`: its bundled ConPTY
+    /// can start a child on the row `SpawnSpec::initial_cursor_row` names. A restored
+    /// terminal needs that for ConPTY's cursor frame to match the renderer's (see
+    /// `state::restore_frame`). False for a legacy host, an elevated host, and one whose
+    /// record says no: the restore then keeps the child on row 1 instead.
+    inherit_cursor: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the connected host's serving process advertised `CAP_MCP_HOLD`, so
+    /// `HoldMcp`/`ReleaseMcp` may be sent to it. A legacy host fails to decode those
+    /// variants and drops the connection, so the senders refuse without this bit.
+    mcp_hold: Arc<std::sync::atomic::AtomicBool>,
+    /// Permission controls are unsafe to send unless this connection advertised them.
+    permissions: Arc<std::sync::atomic::AtomicBool>,
+    ssh_prompt_registration: Arc<std::sync::atomic::AtomicBool>,
+    identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
+    peer_token: Arc<Mutex<Option<crate::state::permissions::host_identity::AuditToken>>>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -139,9 +285,93 @@ pub struct PtyHostClient {
     /// leaves a permanently-dead client installed that nothing will ever null.
     alive: Arc<std::sync::atomic::AtomicBool>,
     lifecycle_token: Arc<String>,
+    /// Who ended the connection and when its stream was really released.
+    conn: Arc<ConnState>,
+    /// Where the host behind this connection runs from; see `exe_in_payload`.
+    exe_origin: Arc<exe_origin::ExeOrigin>,
+    /// Verified spawn identity for this connection; adopted or unmatched peers
+    /// are unknown rather than guessed from a build ID or capability.
+    #[cfg(target_os = "macos")]
+    permission_identity: Arc<Mutex<Option<(u32, HostPermissionIdentity)>>>,
+    #[cfg(test)]
+    before_stdout: ReaderHook,
+    #[cfg(test)]
+    claim_observer: ClaimObserver,
+    #[cfg(test)]
+    release_observer: ReleaseObserver,
+    #[cfg(test)]
+    stdout_observer: StdoutObserver,
 }
 
+#[cfg(test)]
+type ReleaseObserver = Arc<Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>>;
+#[cfg(test)]
+type ReaderHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+#[cfg(test)]
+type ClaimObserver = Arc<Mutex<Option<Arc<dyn Fn(Option<termflow_pty_protocol::McpHeld>) + Send + Sync>>>>;
+#[cfg(test)]
+type StdoutObserver = Arc<Mutex<Option<Arc<dyn Fn(&str, &[u8]) + Send + Sync>>>>;
+
 impl PtyHostClient {
+    #[cfg(test)]
+    pub(crate) fn observe_claim(&self, observer: impl Fn(Option<termflow_pty_protocol::McpHeld>) + Send + Sync + 'static) {
+        *self.claim_observer.lock().unwrap() = Some(Arc::new(observer));
+    }
+
+    /// Called with `was_holding` when an `McpReleaseAck` arrives on the wire, before the waiting
+    /// request is woken: the earliest instant a stop deadline can be measured from.
+    #[cfg(test)]
+    pub(crate) fn observe_release(&self, observer: impl Fn(bool) + Send + Sync + 'static) {
+        *self.release_observer.lock().unwrap() = Some(Arc::new(observer));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_stdout(&self, observer: impl Fn(&str, &[u8]) + Send + Sync + 'static) {
+        *self.stdout_observer.lock().unwrap() = Some(Arc::new(observer));
+    }
+
+    pub(crate) fn bind_sessions(&self, keys: &crate::state::HostKeys, channel: crate::elevated_host::HostChannel, epoch: u64) {
+        *self.sessions.lock().unwrap() = SessionBinding { keys: keys.clone(), channel, epoch };
+        keys.connect(channel, epoch, self.outbound.clone(), self.alive.clone());
+    }
+
+    pub(crate) fn session_epoch(&self, channel: crate::elevated_host::HostChannel) -> Option<u64> {
+        let binding = self.sessions.lock().unwrap();
+        (binding.channel == channel).then_some(binding.epoch)
+    }
+
+    pub(crate) fn write_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
+        keys.admit_input(process, None, |permit| {
+            Ok::<_, String>(crate::pty_manager::input_gate::InputDispatch::Complete(
+                self.write_registered_admitted(keys, permit, channel, key, bytes),
+            ))
+        }).unwrap_or(false)
+    }
+
+    pub(crate) fn write_registered_admitted(&self, keys: &crate::state::HostKeys, permit: &crate::pty_manager::input_gate::InputPermit<'_>, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.channel == channel && permit.admits_host(channel, key, binding.epoch)
+            && keys.with_registered_on(permit.process(), channel, key, binding.epoch, || self.enqueue_stdin(permit, key, bytes)).unwrap_or(false)
+    }
+
+    pub(crate) fn resize_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, cols: u16, rows: u16) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.channel == channel && keys.with_registered_on(process, channel, key, binding.epoch, || self.resize(key, cols, rows)).unwrap_or(false)
+    }
+
+    pub(crate) fn repaint_owned(&self, identity: &crate::state::SessionIdentity, cols: u16, rows: u16) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, || {
+            self.nudge_repaint(&identity.key, cols, rows);
+            true
+        })
+    }
+
+    pub(crate) fn apply_listing_on(&self, keys: &crate::state::HostKeys, channel: crate::elevated_host::HostChannel, listing: &SessionListing, now: std::time::Instant, unregistered: impl Fn(&str) -> bool) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.channel == channel && keys.listing_on(channel, binding.epoch, listing, now, unregistered)
+    }
+
     /// Retention advertised for this connected host. `Unknown` covers legacy,
     /// absent, incomplete, and non-contract records; it never implies
     /// indefinite retention.
@@ -152,8 +382,17 @@ impl PtyHostClient {
     pub fn set_lifecycle(&mut self, lifecycle: HostRetention) {
         self.lifecycle = Arc::new(lifecycle);
     }
-    fn next_req(&self) -> u64 {
-        self.req_ctr.fetch_add(1, Ordering::Relaxed)
+    fn next_req(&self) -> Option<u64> {
+        self.req_ctr.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).ok()
+    }
+
+    /// Identity of the host we spawned and matched to this socket's peer PID.
+    /// `None` means adopted/unverified; callers must not infer a Helper grant.
+    #[cfg(target_os = "macos")]
+    pub fn host_permission_identity(&self) -> Option<HostPermissionIdentity> {
+        self.permission_identity.lock().unwrap_or_else(|e| e.into_inner())
+            .filter(|(pid, _)| Some(*pid) == self.server_pid())
+            .map(|(_, identity)| identity)
     }
 
     /// Whether a hot-swap can be trusted to keep sessions alive (see field doc).
@@ -167,32 +406,201 @@ impl PtyHostClient {
         self.attach_acks.store(v, Ordering::Release);
     }
 
+    /// Mark that the connected host holds on disconnect and needs an explicit
+    /// `Shutdown` to tear down (`CAP_SHUTDOWN_CONTROL`; see field doc).
+    pub fn set_shutdown_control(&self, v: bool) {
+        self.shutdown_control.store(v, Ordering::Release);
+    }
+
+    /// Mark that the connected host can start a child on a requested cursor row
+    /// (`CAP_INHERIT_CURSOR`; see field doc).
+    pub fn set_inherit_cursor(&self, v: bool) {
+        self.inherit_cursor.store(v, Ordering::Release);
+    }
+
+    /// Whether a `Spawn` to this host may carry `initial_cursor_row` (see field doc).
+    pub fn inherit_cursor(&self) -> bool {
+        self.inherit_cursor.load(Ordering::Acquire)
+    }
+
+    /// Mark that the connected host may be sent the MCP-hold frames (`CAP_MCP_HOLD`; see
+    /// field doc). Set only through [`connection_mcp_hold`].
+    pub fn set_mcp_hold(&self, v: bool) {
+        self.mcp_hold.store(v, Ordering::Release);
+    }
+
+    /// Whether this connection may be sent `HoldMcp`/`ReleaseMcp` (see field doc).
+    pub fn mcp_hold(&self) -> bool {
+        self.mcp_hold.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_ssh_prompt_registration(&self, supported: bool) {
+        self.ssh_prompt_registration.store(supported, Ordering::Release);
+    }
+
+    pub(crate) fn ssh_prompt_registration(&self) -> bool {
+        self.ssh_prompt_registration.load(Ordering::Acquire)
+    }
+
+    pub fn set_permissions(&self, v: bool) {
+        self.permissions.store(v, Ordering::Release);
+    }
+
+    pub fn permissions(&self) -> bool {
+        self.permissions.load(Ordering::Acquire)
+    }
+
+    /// The process id serving this connection, asked of the live connection (Windows). `None`
+    /// off Windows, and when the lookup failed.
+    pub fn server_pid(&self) -> Option<u32> {
+        self.exe_origin.server_pid()
+    }
+
+    /// Set the peer PID for inbound connections where GUI acts as server.
+    pub fn set_peer_pid(&self, pid: u32) {
+        if self.server_pid() != Some(pid) {
+            self.identity_cache.clear();
+            *self.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        self.exe_origin.set_server_pid(Some(pid));
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn test_peer_token(&self) -> Option<crate::state::permissions::host_identity::AuditToken> {
+        *self.peer_token.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn host_identity_verdict(&self, pid: u32) -> crate::state::permissions::IdentityVerdict {
+        use crate::state::permissions::{host_identity::verify_token, IdentityVerdict};
+        if !self.is_alive() || self.server_pid() != Some(pid) { return IdentityVerdict::Unverifiable; }
+        let token = *self.peer_token.lock().unwrap_or_else(|e| e.into_inner());
+        let verdict = self.identity_cache.verify(token.filter(|t| t.pid() == pid), verify_token);
+        if self.is_alive() && self.server_pid() == Some(pid) { verdict } else { IdentityVerdict::Unverifiable }
+    }
+
+    /// Whether an intentional exit must announce itself to this host.
+    pub fn shutdown_control(&self) -> bool {
+        self.shutdown_control.load(Ordering::Acquire)
+    }
+
     /// False once the pipe closed (reader task ended). See `alive` field doc.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }
 
-    // --- fire-and-forget (sync-callable from command/API sites) ---
-
-    pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) {
-        let _ = self.outbound.send(Frame::Data(Data::Stdin {
-            tab_id: tab_id.to_string(),
-            bytes: bytes.to_vec(),
-        }));
+    /// Close the connection for real, on purpose: both reader and writer drop
+    /// their half, so the stream is released and the host sees EOF. Dropping the
+    /// client (or `shutdown()`) cannot do that: the two halves share the stream.
+    ///
+    /// Idempotent across clones. `on_disconnect` does NOT fire for this close.
+    /// Requests still waiting are failed and the pending map is emptied.
+    /// Returns whether the stream was released within the bound.
+    pub async fn close_transport(&self) -> bool {
+        log::debug!("[GEN] closing terminal host transport intentionally");
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.conn.begin_close() {
+            self.alive.store(false, Ordering::Release);
+            self.identity_cache.clear();
+            self.conn.cancel();
+        }
+        self.pending.lock().unwrap().clear();
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.disconnect(binding.channel, binding.epoch);
+        self.conn.halves_released(BOUND).await
     }
 
-    pub fn resize(&self, tab_id: &str, cols: u16, rows: u16) {
-        let _ = self.outbound.send(Frame::Ctrl(Control::Resize {
+    /// Record how the host behind this connection came to be, known when the
+    /// connection is made and needing no lookup: whether we started it, and
+    /// whether a host we started runs from the bundled source path (the
+    /// runtime-dir install failed).
+    #[cfg(any(windows, unix))]
+    fn note_bundled_fallback(&self, origin: HostConnectionOrigin, sidecar: &std::path::Path) {
+        self.exe_origin.set_spawned_here(origin == HostConnectionOrigin::SpawnedHere);
+        let runtime_dir = runtime_host_dir();
+        self.exe_origin.set_bundled_fallback(exe_origin::spawned_from_bundled_fallback(
+            origin == HostConnectionOrigin::SpawnedHere,
+            sidecar,
+            runtime_dir.as_deref(),
+            cfg!(windows),
+        ));
+    }
+
+    /// Whether this app started the host behind this connection from its own
+    /// resolved host binary, so it belongs to the running build by construction.
+    pub fn spawned_here(&self) -> bool {
+        self.exe_origin.spawned_here()
+    }
+
+    /// The generation of a host this app did not start, as far as it can be
+    /// shown (see `ExeOrigin::generation`). `None` when it cannot.
+    pub fn host_generation(&self) -> Option<String> {
+        self.exe_origin.generation(runtime_host_dir().as_deref())
+    }
+
+    /// Record the build id the host advertised, from the discovery record read
+    /// before connecting.
+    pub fn set_advertised_build_id(&self, build_id: Option<String>) {
+        self.exe_origin.set_advertised_build_id(build_id);
+    }
+
+    /// Say that this connection's host was started here, for a connection with
+    /// no real process behind it.
+    #[cfg(test)]
+    pub(crate) fn inject_spawned_here(&self, spawned: bool) {
+        self.exe_origin.set_spawned_here(spawned);
+    }
+
+    /// Say what the OS would report as this host's image path, for a connection
+    /// with no real process behind it.
+    #[cfg(test)]
+    pub(crate) fn inject_exe_image(&self, image: Option<std::path::PathBuf>) {
+        self.exe_origin.inject_image_lookup(image);
+    }
+
+    /// Decide `exe_in_payload`'s answer outright.
+    #[cfg(test)]
+    pub(crate) fn inject_exe_verdict(&self, verdict: Option<bool>) {
+        self.exe_origin.inject_verdict(verdict);
+    }
+
+    /// Whether the host behind this connection runs from inside the Velopack
+    /// install root, where an update swap kills it. `None` means it could not be
+    /// determined, and callers must treat that as unsafe. A host this app spawned
+    /// from the bundled source path is inside the payload on every platform;
+    /// other hosts are classified on Windows only (elsewhere: `Some(false)`).
+    pub fn exe_in_payload(&self) -> Option<bool> {
+        let runtime_dir = runtime_host_dir();
+        self.exe_origin.in_payload(
+            exe_origin::velopack_root().as_deref(),
+            runtime_dir.as_deref().and_then(std::path::Path::parent),
+        )
+    }
+
+    // --- fire-and-forget (sync-callable from command/API sites) ---
+
+    fn enqueue_stdin(&self, _permit: &crate::pty_manager::input_gate::InputPermit<'_>, tab_id: &str, bytes: &[u8]) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
+            tab_id: tab_id.to_string(),
+            bytes: bytes.to_vec(),
+        })).is_ok()
+    }
+
+    // Wire-level fixtures deliberately exercise disconnect/FIFO without a GUI owner. No
+    // production raw-stdin compatibility entry point: production needs an admission permit.
+    #[cfg(test)]
+    pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
+            tab_id: tab_id.to_string(),
+            bytes: bytes.to_vec(),
+        })).is_ok()
+    }
+
+    pub fn resize(&self, tab_id: &str, cols: u16, rows: u16) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Ctrl(Control::Resize {
             tab_id: tab_id.to_string(),
             cols,
             rows,
-        }));
-    }
-
-    pub fn close(&self, tab_id: &str) {
-        let _ = self.outbound.send(Frame::Ctrl(Control::Close {
-            tab_id: tab_id.to_string(),
-        }));
+        })).is_ok()
     }
 
     /// Force a repaint of a host-owned program by nudging the size and
@@ -205,7 +613,7 @@ impl PtyHostClient {
     }
 
     pub fn attach(&self, tab_id: &str, from_offset: u64) {
-        let req = self.next_req();
+        let Some(req) = self.next_req() else { return };
         let _ = self.outbound.send(Frame::Ctrl(Control::Attach {
             req,
             tab_id: tab_id.to_string(),
@@ -219,30 +627,48 @@ impl PtyHostClient {
     /// the host confirmed the session as re-wired and alive (`None` = legacy
     /// host / no confirmation possible — treated as attached, as before).
     pub async fn attach_confirmed(&self, tab_id: &str, from_offset: u64) -> Option<bool> {
+        self.attach_confirmed_inner(tab_id, from_offset, None).await.ok().flatten()
+    }
+
+    pub(crate) async fn attach_owned(&self, identity: &crate::state::SessionIdentity, from_offset: u64) -> Result<Option<bool>, String> {
+        self.attach_confirmed_inner(&identity.key, from_offset, Some(identity)).await
+    }
+
+    async fn attach_confirmed_inner(&self, tab_id: &str, from_offset: u64, identity: Option<&crate::state::SessionIdentity>) -> Result<Option<bool>, String> {
+        let binding = self.sessions.lock().unwrap().clone();
         if !self.attach_acks.load(Ordering::Acquire) {
-            self.attach(tab_id, from_offset);
-            return None;
+            let req = self.next_req().ok_or("terminal host request identity exhausted")?;
+            let enqueue = || self.is_alive() && self.outbound.send(Frame::Ctrl(Control::Attach {
+                req, tab_id: tab_id.into(), from_offset,
+            })).is_ok();
+            let enqueued = if let Some(identity) = identity { binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue) }
+            else { enqueue() };
+            if !enqueued { return Err("host-ownership-pending: attach was not enqueued; retry".into()); }
+            return Ok(None);
         }
         let tab = tab_id.to_string();
         match self
-            .request(move |req| Control::AttachAcked {
+            .request_authorized(std::time::Duration::from_secs(10), move |req| Control::AttachAcked {
                 req,
                 tab_id: tab,
                 from_offset,
+            }, |enqueue| match identity {
+                Some(identity) => binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue),
+                None => enqueue(),
             })
-            .await
+            .await?
         {
             Some(Response::AttachAck { alive, tail_offset, .. }) => {
                 log::info!(
                     "[HOTSWAP] AttachAck for {tab_id}: alive={alive} tail_offset={tail_offset}"
                 );
-                Some(alive)
+                Ok(Some(alive))
             }
             _ => {
                 // Ack-capable host didn't answer in time — the attach itself may
                 // still have landed; log and treat like legacy.
                 log::warn!("[HOTSWAP] no AttachAck for {tab_id} (timeout); assuming attached");
-                None
+                Ok(None)
             }
         }
     }
@@ -262,33 +688,133 @@ impl PtyHostClient {
         timeout: std::time::Duration,
         make: impl FnOnce(u64) -> Control,
     ) -> Option<Response> {
-        let req = self.next_req();
+        self.request_authorized(timeout, make, |enqueue| enqueue()).await.ok().flatten()
+    }
+
+    async fn request_authorized(
+        &self, timeout: std::time::Duration, make: impl FnOnce(u64) -> Control,
+        authorize: impl FnOnce(&mut dyn FnMut() -> bool) -> bool,
+    ) -> Result<Option<Response>, String> {
+        let req = self.next_req().ok_or("terminal host request identity exhausted")?;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
-        if self.outbound.send(Frame::Ctrl(make(req))).is_err() {
-            self.pending.lock().unwrap().remove(&req);
-            return None;
+        // The lease removes the entry on every way out, including this future being dropped
+        // while it waits: a cancelled request leaves no waiter behind.
+        let _lease = PendingReply { id: req, map: self.pending.clone() };
+        let frame = Frame::Ctrl(make(req));
+        let mut frame = Some(frame);
+        // `alive` is cleared before the pending map is drained, so a request that
+        // slipped in after the drain sees it here instead of waiting out `timeout`.
+        if !authorize(&mut || self.is_alive() && self.outbound.send(frame.take().unwrap()).is_ok()) {
+            return Err("host-ownership-pending: terminal host request was not enqueued; retry".into());
         }
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(resp)) => Some(resp),
-            _ => {
-                self.pending.lock().unwrap().remove(&req);
-                None
+            Ok(Ok(resp)) => Ok(Some(resp)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Hand the MCP port to this host. Only a connection that advertised `CAP_MCP_HOLD` is sent the
+    /// frame (a legacy host drops the connection on an unknown variant), so without the bit this
+    /// writes nothing. A reply that never comes is `Ambiguous`, not a refusal: the frame may
+    /// already have installed the hold, and only the caller knows what to undo.
+    pub async fn hold_mcp(
+        &self, token: &str, spec: termflow_pty_protocol::McpHoldSpec,
+    ) -> Result<McpHoldOutcome, McpSendError> {
+        if !self.mcp_hold() {
+            return Ok(McpHoldOutcome::NotCapable);
+        }
+        let token = token.to_string();
+        let reply = self
+            .request_authorized(MCP_REQUEST_TIMEOUT, move |req| Control::HoldMcp { req, token, spec }, |enqueue| enqueue())
+            .await
+            .map_err(|_| McpSendError::NotSent)?;
+        match reply {
+            Some(Response::McpHoldAck { accepted: true, .. }) => Ok(McpHoldOutcome::Accepted),
+            Some(Response::McpHoldAck { accepted: false, reason, .. }) => {
+                Ok(McpHoldOutcome::Rejected(reason.unwrap_or_default()))
             }
+            _ => Err(McpSendError::Ambiguous),
+        }
+    }
+
+    /// Announce that this GUI is adopting the host and will take the MCP port back. The host's
+    /// answer is what it is holding. Same capability gate as `hold_mcp`: without the bit nothing is
+    /// written. A reply that never comes is `Ambiguous`, which the caller treats as no claim.
+    pub async fn claim_mcp(&self, token: &str) -> Result<McpClaimOutcome, McpSendError> {
+        if !self.mcp_hold() {
+            return Ok(McpClaimOutcome::NotCapable);
+        }
+        let token = token.to_string();
+        let reply = self
+            .request_authorized(MCP_REQUEST_TIMEOUT, move |req| Control::ClaimMcp { req, token }, |enqueue| enqueue())
+            .await
+            .map_err(|_| McpSendError::NotSent)?;
+        match reply {
+            Some(Response::McpClaimAck { held, .. }) => Ok(McpClaimOutcome::Held(held)),
+            _ => Err(McpSendError::Ambiguous),
+        }
+    }
+
+    /// Ask the host to stop holding the port it was handed under `token`.
+    pub async fn release_mcp(&self, token: &str) -> Result<McpReleaseOutcome, String> {
+        if !self.mcp_hold() {
+            return Ok(McpReleaseOutcome::NotCapable);
+        }
+        let token = token.to_string();
+        match self.request_within(MCP_REQUEST_TIMEOUT, move |req| Control::ReleaseMcp { req, token }).await {
+            Some(Response::McpReleaseAck { was_holding, .. }) => Ok(McpReleaseOutcome::Released { was_holding }),
+            _ => Err("pty-host: no McpReleaseAck".to_string()),
+        }
+    }
+
+    /// Query the host without ever sending a new control to a legacy connection.
+    pub async fn permission_status(&self) -> Result<PermissionOutcome<PermissionStatus>, String> {
+        if !self.permissions() { return Ok(PermissionOutcome::NotCapable); }
+        let token = self.lifecycle_token.to_string();
+        match self.request_within(std::time::Duration::from_secs(35), move |req| Control::PermissionStatus { req, token }).await {
+            Some(Response::PermissionStatusReply { accessibility, screen_recording, self_responsible, .. }) =>
+                Ok(PermissionOutcome::Reply(PermissionStatus { accessibility, screen_recording, self_responsible })),
+            _ => Err("pty-host: no PermissionStatusReply".into()),
+        }
+    }
+
+    pub async fn request_permission(&self, kind: termflow_pty_protocol::PermissionKind) -> Result<PermissionOutcome<PermissionRequest>, String> {
+        if !self.permissions() { return Ok(PermissionOutcome::NotCapable); }
+        let token = self.lifecycle_token.to_string();
+        match self.request_within(std::time::Duration::from_secs(35), move |req| Control::RequestPermission { req, token, kind }).await {
+            Some(Response::PermissionRequested { kind: reply_kind, state, self_responsible, .. }) if reply_kind == kind =>
+                Ok(PermissionOutcome::Reply(PermissionRequest { kind: reply_kind, state, self_responsible })),
+            _ => Err("pty-host: no matching PermissionRequested".into()),
         }
     }
 
     /// Spawn a session; returns the child PID on success.
     pub async fn spawn_session(&self, tab_id: &str, spec: &SpawnSpec) -> Result<u32, String> {
+        self.spawn_session_inner(tab_id, spec, None).await
+    }
+
+    pub(crate) async fn spawn_owned(&self, identity: &crate::state::SessionIdentity, spec: &SpawnSpec) -> Result<u32, String> {
+        self.spawn_session_inner(&identity.key, spec, Some(identity)).await
+    }
+
+    async fn spawn_session_inner(&self, tab_id: &str, spec: &SpawnSpec, identity: Option<&crate::state::SessionIdentity>) -> Result<u32, String> {
+        if spec.env.iter().any(|(key, _)| key == termflow_pty_protocol::ssh_prompt::HOST_REGISTRATION_ENV) {
+            crate::pty_manager::ssh_shell::require_host_registration(true, self.ssh_prompt_registration())?;
+        }
         let tab = tab_id.to_string();
         let spec = spec.clone();
+        let binding = self.sessions.lock().unwrap().clone();
         match self
-            .request(move |req| Control::Spawn {
+            .request_authorized(std::time::Duration::from_secs(10), move |req| Control::Spawn {
                 req,
                 tab_id: tab,
                 spec,
+            }, |enqueue| match identity {
+                Some(identity) => binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue),
+                None => enqueue(),
             })
-            .await
+            .await?
         {
             Some(Response::Spawned { pid, .. }) => Ok(pid),
             Some(Response::SpawnFailed { error, .. }) => Err(error),
@@ -300,17 +826,47 @@ impl PtyHostClient {
     /// must never treat that like an authoritative empty list, or a stale
     /// recovery pass would tear down live panes on a transport failure.
     pub async fn list_sessions(&self) -> Option<Vec<SessionMeta>> {
-        let token = self.lifecycle_token.to_string();
-        match self
-            .request(move |req| Control::ListSessions {
-                req,
-                token: Some(token),
-            })
-            .await
-        {
-            Some(Response::SessionList { sessions, .. }) => Some(sessions),
-            _ => None,
+        self.list_sessions_within(std::time::Duration::from_secs(10)).await
+    }
+
+    /// `list_sessions` with an explicit deadline. A request that times out is
+    /// removed from the pending map, so asking again and again of a host that never
+    /// answers does not accumulate entries there; a late reply is discarded.
+    pub async fn list_sessions_within(&self, timeout: std::time::Duration) -> Option<Vec<SessionMeta>> {
+        self.list_sessions_numbered_within(timeout).await.map(|listing| listing.sessions)
+    }
+
+    pub async fn list_sessions_numbered(&self) -> Option<SessionListing> {
+        self.list_sessions_numbered_within(std::time::Duration::from_secs(10)).await
+    }
+
+    pub async fn list_sessions_numbered_within(&self, timeout: std::time::Duration) -> Option<SessionListing> {
+        let req = self.next_req()?;
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(req, tx);
+        let binding = self.sessions.lock().unwrap().clone();
+        let request_no = binding.keys.enqueue_listing_on(binding.channel, binding.epoch, || {
+            self.is_alive() && self.outbound.send(Frame::Ctrl(Control::ListSessions {
+                req, token: Some(self.lifecycle_token.to_string()),
+            })).is_ok()
+        });
+        let Some(request_no) = request_no else {
+            self.pending.lock().unwrap().remove(&req);
+            return None;
+        };
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Response::SessionList { sessions, .. })) => Some(SessionListing { request_no, sessions }),
+            _ => {
+                self.pending.lock().unwrap().remove(&req);
+                None
+            }
         }
+    }
+
+    /// Requests sent and not yet answered.
+    #[cfg(test)]
+    pub(crate) fn pending_requests(&self) -> usize {
+        self.pending.lock().unwrap().len()
     }
 
     /// Arm the hot-swap hold; returns the epoch-ms deadline on ack.
@@ -367,10 +923,53 @@ impl PtyHostClient {
         }
         false
     }
+
+    /// Tell the host this GUI is exiting ON PURPOSE, so the disconnect that
+    /// follows tears every session down instead of being held as a crash.
+    /// Returns whether the host acknowledged — or `true` when the host does
+    /// not distinguish the two (no `CAP_SHUTDOWN_CONTROL`): for it the
+    /// disconnect itself is the teardown, and there is nothing to send.
+    ///
+    /// Same shape as `disarm`: the ack matters because an unacknowledged
+    /// Shutdown is indistinguishable from one the host never received, and
+    /// exiting on that leaves shells held for the retention window. Bounded
+    /// per attempt because the user is waiting for the app to close; the host
+    /// only LATCHES on this frame (the kills run after the pipe closes), so a
+    /// healthy host answers in milliseconds.
+    pub async fn shutdown(&self) -> bool {
+        const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+        const ATTEMPTS: usize = 2;
+
+        if !self.shutdown_control() {
+            return true;
+        }
+        log::info!("[HOTSWAP] announcing exit to the host (Shutdown)");
+        let token = self.lifecycle_token.to_string();
+        for attempt in 1..=ATTEMPTS {
+            let token = token.clone();
+            if let Some(Response::ShutdownAck { .. }) = self
+                .request_within(ATTEMPT_TIMEOUT, move |req| Control::Shutdown { req, token })
+                .await
+            {
+                return true;
+            }
+            log::warn!("[HOTSWAP] shutdown attempt {attempt}/{ATTEMPTS} got no ShutdownAck");
+        }
+        false
+    }
+
+    pub fn lifecycle_token(&self) -> &str {
+        &self.lifecycle_token
+    }
 }
 
 /// Build a client around already-connected pipe halves. Split out so tests can
 /// drive it over an in-memory duplex without a real named pipe.
+///
+/// The connection ends exactly one way, decided by a compare-exchange from
+/// `Live`: `close_transport` (intentional, silent) or a transport failure — the
+/// reader's EOF/error or the writer's write error — which fires `on_disconnect`.
+/// Either way both tasks drop their half, which is what closes the stream.
 #[cfg(any(windows, unix))]
 pub fn wire_client<R, W>(rd: R, wr: W, deps: PtyHostDeps) -> PtyHostClient
 where
@@ -383,38 +982,118 @@ where
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let req_ctr = Arc::new(AtomicU64::new(1));
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let alive_r = alive.clone();
     let lifecycle_token = Arc::new(deps.lifecycle_token.clone());
+    let conn = ConnState::new();
+    let sessions = Arc::new(Mutex::new(SessionBinding {
+        keys: crate::state::HostKeys::default(), channel: crate::elevated_host::HostChannel::Primary, epoch: 0,
+    }));
+    // Standalone lifecycle clients also own an exact binding before any request.
+    sessions.lock().unwrap().keys.connect(crate::elevated_host::HostChannel::Primary, 0, outbound.clone(), alive.clone());
+    let sessions_r = sessions.clone();
+    #[cfg(test)]
+    let before_stdout: ReaderHook = Arc::default();
+    #[cfg(test)]
+    let before_stdout_r = before_stdout.clone();
+    #[cfg(test)]
+    let claim_observer: ClaimObserver = Arc::default();
+    #[cfg(test)]
+    let claim_observer_r = claim_observer.clone();
+    #[cfg(test)]
+    let release_observer: ReleaseObserver = Arc::default();
+    #[cfg(test)]
+    let release_observer_r = release_observer.clone();
+    #[cfg(test)]
+    let stdout_observer: StdoutObserver = Arc::default();
+    #[cfg(test)]
+    let stdout_observer_r = stdout_observer.clone();
+    let identity_cache = Arc::new(crate::state::permissions::host_identity::IdentityCache::default());
+    let end = Arc::new(ConnLoss {
+        identity_cache: identity_cache.clone(),
+        conn: conn.clone(),
+        alive: alive.clone(),
+        pending: pending.clone(),
+        sessions: sessions.clone(),
+        on_disconnect: deps.on_disconnect.clone(),
+    });
 
     // Writer task.
+    let mut cancel_w = conn.cancel_rx();
+    let half_w = conn.half_guard();
+    let end_w = end.clone();
     tokio::spawn(async move {
         let mut wr = wr;
-        while let Some(f) = out_rx.recv().await {
-            if write_frame(&mut wr, &f).await.is_err() {
+        let mut failed = false;
+        loop {
+            let next = tokio::select! {
+                _ = cancelled(&mut cancel_w) => break,
+                f = out_rx.recv() => f,
+            };
+            let Some(f) = next else { break };
+            let wrote = tokio::select! {
+                _ = cancelled(&mut cancel_w) => break,
+                r = write_frame(&mut wr, &f) => r,
+            };
+            if wrote.is_err() {
+                failed = true;
                 break;
             }
+        }
+        drop(wr);
+        drop(half_w);
+        if failed {
+            // A dead write side is a dead connection: stop the reader too and
+            // surface the loss, exactly as a reader EOF would.
+            end_w.lost();
         }
     });
 
     // Reader task.
     let pending_r = pending.clone();
+    let mut cancel_r = conn.cancel_rx();
+    let half_r = conn.half_guard();
     tokio::spawn(async move {
         let mut rd = rd;
+        let mut lost = false;
         loop {
-            match read_frame(&mut rd).await {
+            let next = tokio::select! {
+                _ = cancelled(&mut cancel_r) => break,
+                f = read_frame(&mut rd) => f,
+            };
+            match next {
                 Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
+                    #[cfg(test)]
+                    {
+                        let observer = stdout_observer_r.lock().unwrap().clone();
+                        if let Some(observer) = observer { observer(&tab_id,&bytes); }
+                    }
                     // Ring bookkeeping stays in the HOST's id space — it is the
                     // host's own offset, and reattach replays from it.
-                    deps.stream_offsets
-                        .insert(tab_id.clone(), offset + bytes.len() as u64);
+                    let binding = sessions_r.lock().unwrap().clone();
                     match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
                         Some(id) => {
-                            let _ = deps.output_tx.send(ChannelPayload { id, data: bytes });
-                            deps.output_produced.fetch_add(1, Ordering::Relaxed);
+                            #[cfg(test)]
+                            {
+                                let hook = before_stdout_r.lock().unwrap().clone();
+                                if let Some(hook) = hook { hook(); }
+                            }
+                            binding.keys.publish_frame(binding.channel, &tab_id, binding.epoch, &id, || {
+                                deps.stream_offsets.insert(tab_id.clone(), offset + bytes.len() as u64);
+                                let _ = deps.output_tx.send(ChannelPayload { id: id.clone(), data: bytes });
+                                deps.output_produced.fetch_add(1, Ordering::Relaxed);
+                            });
                         }
                         None => log::warn!(
                             "pty-host: dropping Stdout for unknown session {tab_id}"
                         ),
+                    }
+                }
+                Ok(Some(Frame::Data(Data::SshPrompt { tab_id, nonce, sequence, stdin_writes }))) => {
+                    if let Some(id) = route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                        let binding = sessions_r.lock().unwrap().clone();
+                        let proof = crate::pty_manager::ssh_shell::PromptProof::Hosted {
+                            channel: binding.channel, key: &tab_id, epoch: binding.epoch, stdin_writes,
+                        };
+                        let _ = binding.keys.observe_shell_prompt(&id, &nonce, sequence, proof);
                     }
                 }
                 Ok(Some(Frame::Data(Data::Gap { tab_id, .. }))) => {
@@ -427,36 +1106,105 @@ where
                     // An exit for an unknown session still has cleanup value, but
                     // there is no process-keyed state to clean, so drop it rather
                     // than inventing an id.
-                    match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                    let process = route_inbound(&tab_id, |k| (deps.resolve_process)(k));
+                    let binding = sessions_r.lock().unwrap().clone();
+                    binding.keys.observe_exit(binding.channel, binding.epoch, &tab_id);
+                    match process {
                         Some(id) => (deps.on_exit)(id, tab_id, exit_cwd),
                         None => log::warn!("pty-host: dropping Exit for unknown session {tab_id}"),
                     }
                 }
                 Ok(Some(Frame::Resp(resp))) => {
+                    #[cfg(test)]
+                    if let Response::McpClaimAck { held, .. } = &resp {
+                        let observer = claim_observer_r.lock().unwrap().clone();
+                        if let Some(observer) = observer { observer(held.clone()); }
+                    }
+                    #[cfg(test)]
+                    if let Response::McpReleaseAck { was_holding, .. } = &resp {
+                        let observer = release_observer_r.lock().unwrap().clone();
+                        if let Some(observer) = observer { observer(*was_holding); }
+                    }
                     let req = resp_req(&resp);
                     if let Some(tx) = pending_r.lock().unwrap().remove(&req) {
                         let _ = tx.send(resp);
                     }
                 }
                 Ok(Some(_)) => {} // GUI never receives Ctrl / Stdin
-                Ok(None) | Err(_) => break, // pipe closed
+                Ok(None) | Err(_) => {
+                    lost = true; // pipe closed
+                    break;
+                }
             }
         }
-        // Pipe closed: mark the client dead FIRST (so a concurrent
-        // ensure_pty_host can refuse to publish it), then surface the loss.
-        alive_r.store(false, Ordering::Release);
-        (deps.on_disconnect)();
+        drop(rd);
+        drop(half_r);
+        if lost {
+            end.lost();
+        }
     });
 
     PtyHostClient {
+        sessions,
         outbound,
         pending,
         req_ctr,
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        shutdown_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ssh_prompt_registration: Arc::default(),
+        identity_cache,
+        peer_token: Arc::default(),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
+        conn,
+        exe_origin: Arc::default(),
+        #[cfg(target_os = "macos")]
+        permission_identity: Arc::default(),
+        #[cfg(test)]
+        before_stdout,
+        #[cfg(test)]
+        claim_observer,
+        #[cfg(test)]
+        release_observer,
+        #[cfg(test)]
+        stdout_observer,
+    }
+}
+
+/// What to do when the transport fails (as opposed to being closed on purpose).
+/// Shared by the reader and the writer; only the one that wins the `Live -> Lost`
+/// compare-exchange acts, so `on_disconnect` fires at most once.
+#[cfg(any(windows, unix))]
+struct ConnLoss {
+    identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
+    conn: Arc<ConnState>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    pending: PendingMap,
+    sessions: Arc<Mutex<SessionBinding>>,
+    on_disconnect: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(any(windows, unix))]
+impl ConnLoss {
+    fn lost(&self) {
+        if !self.conn.begin_lost() {
+            return; // closed on purpose, or already lost
+        }
+        // Mark the client dead FIRST (so a concurrent ensure_pty_host can refuse
+        // to publish it), stop the other task, fail waiting requests, and only
+        // then surface the loss.
+        self.alive.store(false, Ordering::Release);
+        self.identity_cache.clear();
+        self.conn.cancel();
+        self.pending.lock().unwrap().clear();
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.disconnect(binding.channel, binding.epoch);
+        (self.on_disconnect)();
     }
 }
 
@@ -546,16 +1294,18 @@ fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
             last_alive = sys
                 .process(target)
                 .map(|p| {
-                    p.name().to_string_lossy().starts_with("termflow-pty-ho")
-                        || p.exe()
-                            .and_then(|e| e.file_name())
-                            .map(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
-                            .unwrap_or(false)
+                    host_image_matches(p.name(), p.exe())
                 })
                 .unwrap_or(false);
         }
         last_alive
     }
+}
+
+fn host_image_matches(name: &std::ffi::OsStr, exe: Option<&std::path::Path>) -> bool {
+    name.to_string_lossy().starts_with("termflow-pty-ho")
+        || exe.and_then(|p| p.file_name())
+            .is_some_and(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
 }
 
 /// Connect to the sidecar's pipe, spawning it (detached, breaking away from any
@@ -605,7 +1355,9 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
+            let paths = current_host_paths();
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                paths.record.as_deref(), paths.log.as_deref())?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -622,12 +1374,29 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
-    let (rd, wr) = tokio::io::split(conn);
-    let client = wire_client(rd, wr, deps);
+    let client = wire_pipe_client(conn, deps);
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
+    client.note_bundled_fallback(origin, sidecar);
     Ok((client, origin))
+}
+
+/// Wire a client over an opened pipe and record which process serves it. Every
+/// Windows connection goes through here, so a host adopted without being started
+/// (an older one left running) still has its origin found. Asked of the live
+/// connection, not a record: a record-less legacy host still has a pipe.
+#[cfg(windows)]
+pub(crate) fn wire_pipe_client(
+    conn: tokio::net::windows::named_pipe::NamedPipeClient,
+    deps: PtyHostDeps,
+) -> PtyHostClient {
+    use std::os::windows::io::AsRawHandle;
+    let server_pid = exe_origin::server_pid_of_pipe(conn.as_raw_handle());
+    let (rd, wr) = tokio::io::split(conn);
+    let client = wire_client(rd, wr, deps);
+    client.exe_origin.set_server_pid(server_pid);
+    client
 }
 
 /// Spawn the sidecar detached from the GUI's lifetime. Returns whether it broke
@@ -640,6 +1409,8 @@ fn spawn_sidecar_detached(
     build_id: Option<&str>,
     pipe: &str,
     token: &str,
+    record: Option<&std::path::Path>,
+    log_path: Option<&std::path::Path>,
 ) -> std::io::Result<bool> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -661,14 +1432,12 @@ fn spawn_sidecar_detached(
     // CWD inside the app payload — Velopack treats a process whose CWD is inside
     // the swapped `current\` tree as an update blocker it may kill (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
-    let record = record_path();
     // Capture the sidecar's diagnostics. These previously went to Stdio::null(),
     // which made the host completely undiagnosable from the app side — every
     // warning it prints (failed job breakaway, serve errors, a failed CTRL+C
     // restore) vanished. Point them at a per-channel log file in the same
     // update-stable dir instead; truncated on each spawn, so it stays small.
     // Only lifecycle/error lines are written here — never session I/O.
-    let log_path = runtime_host_dir().map(|d| d.join("host.log"));
     let base = move || {
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
@@ -677,7 +1446,7 @@ fn spawn_sidecar_detached(
         if let Some(build_id) = build_id {
             c.env("TERMFLOW_PTY_BUILD_ID", build_id);
         }
-        match log_path.as_ref().and_then(|p| std::fs::File::create(p).ok()) {
+        match log_path.and_then(|p| std::fs::File::create(p).ok()) {
             Some(f) => {
                 c.stdout(f.try_clone().expect("clone log file handle"));
                 c.stderr(f);
@@ -688,7 +1457,7 @@ fn spawn_sidecar_detached(
             }
         }
         // RP-2: tell the host where to advertise itself (discovery record).
-        if let Some(ref rp) = record {
+        if let Some(rp) = record {
             c.env("TERMFLOW_PTY_RECORD", rp);
         }
         if let Some(ref wd) = workdir {
@@ -720,6 +1489,24 @@ fn spawn_sidecar_detached(
     }
 }
 
+/// Capture kernel evidence before splitting any outbound host socket.
+#[cfg(unix)]
+pub(crate) fn wire_unix_host_client(conn: tokio::net::UnixStream, deps: PtyHostDeps) -> PtyHostClient {
+    #[cfg(target_os = "macos")]
+    let (peer_pid, peer_token) = (macos_spawn::peer_pid(&conn), macos_spawn::peer_token(&conn));
+    #[cfg(target_os = "linux")]
+    let peer_pid = conn.peer_cred().ok().and_then(|cred| cred.pid()).and_then(|pid| u32::try_from(pid).ok());
+    let (rd, wr) = tokio::io::split(conn);
+    let client = wire_client(rd, wr, deps);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    client.exe_origin.set_server_pid(peer_pid);
+    #[cfg(target_os = "macos")]
+    {
+        *client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;
+    }
+    client
+}
+
 /// Connect to the sidecar's Unix socket, spawning it (detached into its own
 /// session via `setsid`) if it isn't already running. Mirrors the Windows path:
 /// grace-window try-connect (never duplicating a live advertised host) → spawn
@@ -736,7 +1523,12 @@ pub async fn connect_or_spawn(
     use std::time::Duration;
     use tokio::net::UnixStream;
 
+    #[cfg(not(target_os = "macos"))]
     let mut survives = true;
+    #[cfg(target_os = "macos")]
+    let survives = true;
+    #[cfg(target_os = "macos")]
+    let mut spawned = None;
     let outcome = open_with_grace(
         || UnixStream::connect(pipe),
         live_host_probe(record_pid),
@@ -766,7 +1558,17 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
+            let paths = current_host_paths();
+            #[cfg(target_os = "macos")]
+            {
+                spawned = Some(macos_spawn::spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                    paths.record.as_deref(), paths.log.as_deref())?);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                    paths.record.as_deref(), paths.log.as_deref())?;
+            }
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -783,11 +1585,17 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
-    let (rd, wr) = tokio::io::split(conn);
-    let client = wire_client(rd, wr, deps);
+    let client = wire_unix_host_client(conn, deps);
+    #[cfg(target_os = "macos")]
+    {
+        let peer_pid = client.server_pid();
+        let permission_identity = macos_spawn::identity_for_peer(spawned, peer_pid);
+        *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = peer_pid.zip(permission_identity);
+    }
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
+    client.note_bundled_fallback(origin, sidecar);
     Ok((client, origin))
 }
 
@@ -797,12 +1605,14 @@ pub async fn connect_or_spawn(
 /// implies a successful `setsid`, so survival is trusted (and the sidecar
 /// re-verifies via `assert_survivable` and refuses to arm if it somehow isn't a
 /// session leader).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
     build_id: Option<&str>,
     pipe: &str,
     token: &str,
+    record: Option<&std::path::Path>,
+    log_path: Option<&std::path::Path>,
 ) -> std::io::Result<bool> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -811,17 +1621,22 @@ fn spawn_sidecar_detached(
     // CWD inside the app payload — a Velopack swap of the payload must not
     // disrupt the running host (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
+    if log_path.is_some() {
+        endpoints::ensure_socket_parent(pipe)?;
+    }
     let mut c = Command::new(sidecar);
     c.env("TERMFLOW_PTY_PIPE", pipe)
         .env("TERMFLOW_PTY_TOKEN", token)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::null());
+    match log_path.and_then(|p| std::fs::File::create(p).ok()) {
+        Some(f) => { c.stdout(f.try_clone()?); c.stderr(f); }
+        None => { c.stdout(Stdio::null()); c.stderr(Stdio::null()); }
+    }
     if let Some(build_id) = build_id {
         c.env("TERMFLOW_PTY_BUILD_ID", build_id);
     }
     // RP-2: tell the host where to advertise itself (discovery record).
-    if let Some(rp) = record_path() {
+    if let Some(rp) = record {
         c.env("TERMFLOW_PTY_RECORD", rp);
     }
     if let Some(ref wd) = workdir {
@@ -864,15 +1679,9 @@ pub async fn connect_or_spawn(
 /// Windows named-pipe name for an identity. Pure, so the naming invariant is
 /// testable without touching the environment. `id.key()` is `"rel"` for the
 /// default identity, so today's name is reproduced byte for byte.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn pipe_for(user: &str, id: &crate::profile::ProfileIdentity) -> String {
-    format!(r"\\.\pipe\termflow-pty-host.{user}.{}", id.key())
-}
-
-/// Unix socket path for an identity. Same reasoning as `pipe_for`.
-#[cfg(unix)]
-fn socket_for(runtime_dir: &str, id: &crate::profile::ProfileIdentity) -> String {
-    format!("{runtime_dir}/termflow-pty-host.{}.sock", id.key())
+    endpoints::qualified_pipe_for(user, id, None)
 }
 
 /// Per-user, per-identity endpoint so two users — or two profiles — on one
@@ -881,17 +1690,7 @@ fn socket_for(runtime_dir: &str, id: &crate::profile::ProfileIdentity) -> String
 /// `TERMFLOW_PTY_PIPE`, so both agree by construction (the sidecar creates the
 /// socket's parent dir on bind).
 pub fn resolve_pipe() -> String {
-    #[cfg(windows)]
-    {
-        let user = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "user".to_string());
-        pipe_for(&user, crate::profile::current())
-    }
-    #[cfg(unix)]
-    {
-        socket_for(&unix_runtime_dir(), crate::profile::current())
-    }
+    current_host_paths().endpoint
 }
 
 /// Per-user runtime directory for the Unix socket, mirroring the sidecar's
@@ -1044,6 +1843,28 @@ mod disarm_tests;
 #[cfg(test)]
 mod runtime_dir_tests;
 
+#[cfg(test)]
+mod discovery_tests;
+
+#[cfg(test)]
+pub(crate) mod conn_tests;
+#[cfg(test)]
+mod counter_tests;
+#[cfg(test)]
+mod sink_tests;
+
+#[cfg(test)]
+mod exe_origin_tests;
+
+#[cfg(test)]
+mod real_host_tests;
+#[cfg(test)]
+#[path = "pty_host_client/real_process_tests.rs"]
+pub(crate) mod real_process;
+
+#[cfg(test)]
+pub(crate) mod test_dirs;
+
 /// Where the running host advertises itself (RP-2 discovery). Lives in the
 /// update-stable runtime dir (per-user + per-identity, matching the pipe name's
 /// scope) so it survives updates alongside the host itself. Absent file ⇒
@@ -1052,7 +1873,7 @@ mod runtime_dir_tests;
 /// The sidecar never computes this path — the GUI passes it as
 /// `TERMFLOW_PTY_RECORD`, so scoping it here scopes the writer too.
 pub fn record_path() -> Option<std::path::PathBuf> {
-    runtime_host_dir().map(|d| d.join("host-record.json"))
+    current_host_paths().record
 }
 
 /// SHA-256 of a file's bytes.
@@ -1074,6 +1895,96 @@ fn hex16(digest: &[u8; 32]) -> String {
     s
 }
 
+/// Files of the modern-ConPTY pair (plan 049) staged under `<dir>/conpty/`.
+#[cfg(windows)]
+const CONPTY_FILES: [&str; 2] = [
+    termflow_pty_protocol::conpty::DLL,
+    termflow_pty_protocol::conpty::HOST,
+];
+#[cfg(not(windows))]
+const CONPTY_FILES: [&str; 0] = [];
+
+/// Where the shipped ConPTY pair lives for this app (Windows only).
+fn bundled_conpty_source() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        if termflow_pty_protocol::conpty::disabled() {
+            return None;
+        }
+        let exe = std::env::current_exe().ok()?;
+        return termflow_pty_protocol::conpty::bundled_source(exe.parent()?);
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// Digest keying the install dir: the host alone, or — when a ConPTY pair ships —
+/// host + `conpty.dll` + `OpenConsole.exe`, so a ConPTY bump gets a fresh dir.
+fn install_key(
+    host: &[u8; 32],
+    conpty_src: Option<&std::path::Path>,
+) -> std::io::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let Some(dir) = conpty_src else { return Ok(*host) };
+    let mut h = Sha256::new();
+    h.update(host);
+    for f in CONPTY_FILES {
+        h.update(sha256_file(&dir.join(f))?);
+    }
+    Ok(h.finalize().into())
+}
+
+/// True when `<dir>/conpty/` holds exactly the pair from `src_dir`.
+fn conpty_staged_intact(dir: &std::path::Path, src_dir: &std::path::Path) -> bool {
+    CONPTY_FILES.iter().all(|f| {
+        match (sha256_file(&src_dir.join(f)), sha256_file(&dir.join("conpty").join(f))) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    })
+}
+
+/// Stage the ConPTY pair into `<dir>/conpty/` as a unit: copy into a private
+/// `conpty.staging-*` sibling, verify every hash, then publish with ONE directory
+/// rename, so a reader never sees half a pair. The published directory is never
+/// deleted in place: a running host may have `conpty.dll` mapped, and a racing
+/// stager may just have published it. A damaged leftover is renamed aside (which
+/// fails harmlessly while it is in use); the loader independently refuses any
+/// `conpty/` that is not exactly the pinned pair, so a failure here degrades to
+/// the bundled pair or inbox ConPTY rather than loading something untrusted.
+fn stage_conpty_into(dir: &std::path::Path, src_dir: &std::path::Path) -> std::io::Result<()> {
+    if conpty_staged_intact(dir, src_dir) {
+        return Ok(());
+    }
+    let staging = dir.join(format!("conpty.staging-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&staging)?;
+    let result = (|| {
+        for f in CONPTY_FILES {
+            std::fs::copy(src_dir.join(f), staging.join(f))?;
+            if sha256_file(&src_dir.join(f))? != sha256_file(&staging.join(f))? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pty-host: staged ConPTY file hash did not match source",
+                ));
+            }
+        }
+        let final_dir = dir.join("conpty");
+        if final_dir.exists() && !conpty_staged_intact(dir, src_dir) {
+            let stale = dir.join(format!("conpty.stale-{}", uuid::Uuid::new_v4()));
+            std::fs::rename(&final_dir, &stale)?;
+            let _ = std::fs::remove_dir_all(&stale);
+        }
+        match std::fs::rename(&staging, &final_dir) {
+            Ok(()) => Ok(()),
+            // Lost a race: another instance published first. Fine if it is the pair.
+            Err(_) if conpty_staged_intact(dir, src_dir) => Ok(()),
+            Err(e) => Err(e),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&staging); // no-op after a successful rename
+    result
+}
+
 /// Install the host binary into `base/<hash>/<name>`, idempotently and
 /// atomically, verifying the copy's hash matches the source. Returns the
 /// installed path. Split out (base as a param) so it is unit-testable without
@@ -1082,8 +1993,16 @@ fn install_host_into(
     src: &std::path::Path,
     base: &std::path::Path,
 ) -> std::io::Result<std::path::PathBuf> {
+    install_host_with_conpty(src, base, bundled_conpty_source().as_deref())
+}
+
+fn install_host_with_conpty(
+    src: &std::path::Path,
+    base: &std::path::Path,
+    conpty_src: Option<&std::path::Path>,
+) -> std::io::Result<std::path::PathBuf> {
     let digest = sha256_file(src)?;
-    let dir = base.join(hex16(&digest));
+    let dir = base.join(hex16(&install_key(&digest, conpty_src)?));
     let name = host_binary_name();
     let dest = dir.join(name);
 
@@ -1091,6 +2010,11 @@ fn install_host_into(
     if dest.exists() {
         if let Ok(d) = sha256_file(&dest) {
             if d == digest {
+                if let Some(c) = conpty_src {
+                    if let Err(e) = stage_conpty_into(&dir, c) {
+                        log::warn!("pty-host: could not stage ConPTY ({e}); the host will use the bundled pair or inbox ConPTY");
+                    }
+                }
                 return Ok(dest);
             }
         }
@@ -1116,6 +2040,14 @@ fn install_host_into(
             "pty-host: installed copy hash did not match source",
         ));
     }
+    // Stage the ConPTY pair BEFORE the host becomes visible: the host's presence
+    // is the idempotence marker, so a crash here re-stages next launch. A failure
+    // is non-fatal — the host falls back to inbox ConPTY.
+    if let Some(c) = conpty_src {
+        if let Err(e) = stage_conpty_into(&dir, c) {
+            log::warn!("pty-host: could not stage ConPTY ({e}); the host will use the bundled pair or inbox ConPTY");
+        }
+    }
     // TODO(RP-9/signing): in release, Authenticode/codesign-verify `dest` here
     // before it is ever executed. In dev the bundled host is unsigned.
     std::fs::rename(&tmp, &dest)?;
@@ -1138,13 +2070,32 @@ pub fn resolve_host_path() -> Option<std::path::PathBuf> {
 pub struct HostLaunch {
     pub path: std::path::PathBuf,
     pub build_id: Option<String>,
+    /// Install-directory identity includes the host and the staged ConPTY pair.
+    /// Bundled fallback has no stable generation.
+    pub generation: Option<String>,
 }
 
 pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
-    let path = match runtime_host_dir() {
-        Some(base) => match install_host_into(&src, &base) {
-            Ok(dest) => dest,
+    #[cfg(target_os = "macos")]
+    let launch = resolve_macos_launch(src, runtime_host_dir().as_deref())?;
+    #[cfg(not(target_os = "macos"))]
+    let launch = resolve_launch_from(src, runtime_host_dir().as_deref());
+    endpoints::pin_current_paths(launch.generation.as_deref());
+    endpoints::pin_current_generation(launch.generation.as_deref());
+    Some(launch)
+}
+
+#[cfg(any(not(target_os = "macos"), debug_assertions, test))]
+fn resolve_launch_from(src: std::path::PathBuf, base: Option<&std::path::Path>) -> HostLaunch {
+    let mut generation = None;
+    let path = match base {
+        Some(base) => match install_host_into(&src, base) {
+            Ok(dest) => {
+                generation = dest.parent().and_then(|p| p.file_name())
+                    .map(|g| g.to_string_lossy().into_owned());
+                dest
+            }
             Err(e) => {
                 log::warn!(
                     "pty-host: could not install host into runtime dir ({e}); \
@@ -1165,7 +2116,55 @@ pub fn resolve_host_launch() -> Option<HostLaunch> {
         );
         e
     }).ok();
-    Some(HostLaunch { path, build_id })
+    HostLaunch { path, build_id, generation }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_launch(src: std::path::PathBuf, base: Option<&std::path::Path>) -> Option<HostLaunch> {
+    let bundle = src.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        .filter(|p| p.file_name() == Some(std::ffi::OsStr::new("TermFlow Host.app")));
+    match bundle {
+        Some(bundle) => resolve_bundle_launch(&src, bundle, base, bundle_staging::validate_source, bundle_staging::install_host_bundle_into),
+        None => {
+            #[cfg(debug_assertions)]
+            {
+                log::warn!("[HOTSWAP] debug bare host override: bundle validation skipped");
+                Some(resolve_launch_from(src, base))
+            }
+            #[cfg(not(debug_assertions))]
+            { None }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_bundle_launch(
+    src: &std::path::Path,
+    bundle: &std::path::Path,
+    base: Option<&std::path::Path>,
+    validate: impl Fn(&std::path::Path) -> std::io::Result<String>,
+    install: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<bundle_staging::StagedHost>,
+) -> Option<HostLaunch> {
+    // Never fall back to a source which has not itself passed the full check.
+    let build_id = match validate(bundle) {
+        Ok(id) => id,
+        Err(e) => { log::warn!("[HOTSWAP] helper rejected: {e}"); return None; }
+    };
+    if let Some(base) = base {
+        match install(bundle, base) {
+            Ok(staged) => return Some(HostLaunch { path: staged.exe, build_id: Some(staged.build_id), generation: Some(staged.generation) }),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                log::warn!("[HOTSWAP] helper validation failed: {e}");
+                return None;
+            }
+            Err(e) => log::warn!("[HOTSWAP] staging I/O failed ({e}); validating bundled fallback"),
+        }
+    }
+    // The source may have changed during staging; verify again before using it.
+    let current_id = validate(bundle).ok()?;
+    if current_id != build_id { return None; }
+    log::warn!("[HOTSWAP] running bundled helper; host cannot survive payload replacement");
+    Some(HostLaunch { path: src.to_path_buf(), build_id: Some(current_id), generation: None })
 }
 
 fn hex_full(digest: &[u8; 32]) -> String {
@@ -1230,6 +2229,29 @@ pub enum HostRetention {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostBuildDisposition { Current, Stale { observed: String, expected: String }, Unknown }
 
+/// The "close these terminals" warning for a host this connection ADOPTED.
+/// A host spawned here is this build's own sidecar, so there is nothing to
+/// warn about — judging it by the pre-spawn record (absent) said "no build
+/// identity" on every fresh start.
+pub fn adopted_host_build_warning(
+    origin: HostConnectionOrigin,
+    record: Option<&termflow_pty_protocol::HostRecord>,
+    expected: Option<&str>,
+) -> Option<String> {
+    if origin == HostConnectionOrigin::SpawnedHere {
+        return None;
+    }
+    match host_build_disposition(record, expected) {
+        HostBuildDisposition::Current => None,
+        HostBuildDisposition::Stale { observed, expected } => Some(format!(
+            "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
+        )),
+        HostBuildDisposition::Unknown => Some(
+            "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow".to_string(),
+        ),
+    }
+}
+
 pub fn host_build_disposition(record: Option<&termflow_pty_protocol::HostRecord>, expected: Option<&str>) -> HostBuildDisposition {
     match (record.and_then(|r| r.build_id.as_deref()), expected) {
         (_, None) => HostBuildDisposition::Unknown,
@@ -1256,6 +2278,135 @@ fn advertised_retention(rec: &termflow_pty_protocol::HostRecord) -> HostRetentio
         },
         _ => HostRetention::Unknown,
     }
+}
+
+/// Whether a host's discovery record advertises capability `bit`. No record (a legacy host, or
+/// none) is a "no": a frame it was never built to decode must not be sent to it.
+pub fn host_advertises(record: Option<&termflow_pty_protocol::HostRecord>, bit: u32) -> bool {
+    record.is_some_and(|r| r.capabilities & bit != 0)
+}
+
+/// [`host_advertises`] for a record that must belong to the process serving the connection: the
+/// connection reports a server pid and the record repeats it. A readable record of a host that is
+/// gone (its replacement could not publish its own) names another pid and says nothing about this
+/// host; a connection whose server pid is unknown cannot vouch for any record.
+pub fn host_advertises_served_by(
+    record: Option<&termflow_pty_protocol::HostRecord>,
+    server_pid: Option<u32>,
+    bit: u32,
+) -> bool {
+    record.is_some_and(|r| server_pid == Some(r.pid)) && host_advertises(record, bit)
+}
+
+/// The discovery record the host writes before it serves, read now.
+pub(crate) fn read_advertised_record() -> Option<termflow_pty_protocol::HostRecord> {
+    record_path().and_then(|p| termflow_pty_protocol::read_record(&p).ok().flatten())
+}
+
+/// [`host_advertises_served_by`] for a host THIS connection just launched. The plan was made from
+/// the record read BEFORE the launch, which for a fresh host is no record at all (or a dead
+/// host's); the host writes its own record before it serves, so by the time the connection is up
+/// the file normally holds the answer, and `server_pid` says whether it does.
+pub fn spawned_host_advertises(server_pid: Option<u32>, bit: u32) -> bool {
+    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)
+}
+
+/// An ADOPTED host's verdict for a capability bit: the selected record's (`planned`), unless the
+/// connection shows the record names a different process than the one serving it (both pids known
+/// and different). An unknown pid on either side leaves the record's verdict as it was. Every
+/// adoption asks it: the primary connect (through [`connected_host_advertises`]) and the frozen
+/// connect.
+pub fn adopted_host_advertises(planned: bool, record_pid: Option<u32>, server_pid: Option<u32>) -> bool {
+    planned && !matches!((record_pid, server_pid), (Some(record), Some(server)) if record != server)
+}
+
+/// Whether the host a connection ended up on advertises a capability bit.
+///
+/// A host THIS process launched is judged by the record that names the process serving the
+/// connection and by nothing else (`spawned`, called only then; see [`spawned_host_advertises`]).
+/// The plan's flags came from the record read BEFORE the launch; when a live host died between that
+/// read and the launch, that record is the DEAD host's, and its positive bit must not carry over to
+/// a replacement that may not honour it. An ADOPTED host keeps `planned` (see
+/// [`adopted_host_advertises`]).
+pub fn connected_host_advertises(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    spawned: impl FnOnce() -> bool,
+) -> bool {
+    match origin {
+        HostConnectionOrigin::SpawnedHere => spawned(),
+        HostConnectionOrigin::Adopted => planned,
+    }
+}
+
+/// The one installer of a connection's `CAP_MCP_HOLD` bit, used by both connection sites
+/// (`connect_current`, `connect_frozen`). `planned` is the plan's flag (the record read before
+/// connecting); `candidate_pid` the pid that record advertised; `server_pid` the process the
+/// connection reports; `spawned_record` re-reads the record, called only for a host launched
+/// here. A host without the bit is never sent an MCP frame, and no other setter form exists.
+pub fn connection_mcp_hold(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    candidate_pid: Option<u32>,
+    server_pid: Option<u32>,
+    spawned_record: impl FnOnce() -> Option<termflow_pty_protocol::HostRecord>,
+) -> bool {
+    connection_capability(origin, planned, candidate_pid, server_pid, termflow_pty_protocol::CAP_MCP_HOLD, spawned_record)
+}
+
+/// Resolve a connection capability using the selected record for adoption and the
+/// serving process's freshly advertised record for a spawn.
+pub fn connection_capability(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    candidate_pid: Option<u32>,
+    server_pid: Option<u32>,
+    capability: u32,
+    spawned_record: impl FnOnce() -> Option<termflow_pty_protocol::HostRecord>,
+) -> bool {
+    connected_host_advertises(
+        origin,
+        adopted_host_advertises(planned, candidate_pid, server_pid),
+        || host_advertises_served_by(spawned_record().as_ref(), server_pid, capability),
+    )
+}
+
+/// Whether a host's discovery record advertises `CAP_INHERIT_CURSOR`. No record (a legacy
+/// host, or none) is a "no": it cannot be asked for a row it was never built to honour.
+pub fn host_inherits_cursor(record: Option<&termflow_pty_protocol::HostRecord>) -> bool {
+    host_advertises(record, termflow_pty_protocol::CAP_INHERIT_CURSOR)
+}
+
+/// [`host_inherits_cursor`] for a record that must belong to the process serving the
+/// connection (see [`host_advertises_served_by`]).
+pub fn host_inherits_cursor_served_by(
+    record: Option<&termflow_pty_protocol::HostRecord>,
+    server_pid: Option<u32>,
+) -> bool {
+    host_advertises_served_by(record, server_pid, termflow_pty_protocol::CAP_INHERIT_CURSOR)
+}
+
+/// [`host_inherits_cursor_served_by`] for a host THIS connection just launched (see
+/// [`spawned_host_advertises`]).
+pub fn spawned_host_inherits_cursor(server_pid: Option<u32>) -> bool {
+    spawned_host_advertises(server_pid, termflow_pty_protocol::CAP_INHERIT_CURSOR)
+}
+
+/// An ADOPTED host's cursor verdict (see [`adopted_host_advertises`]). Every adoption asks it: the
+/// primary connect (through [`connected_host_inherits_cursor`]) and the frozen connect.
+pub fn adopted_host_inherits_cursor(planned: bool, record_pid: Option<u32>, server_pid: Option<u32>) -> bool {
+    adopted_host_advertises(planned, record_pid, server_pid)
+}
+
+/// Whether the host a connection ended up on can be asked for a cursor row (see
+/// [`connected_host_advertises`]): a host THIS process launched is judged by its own record
+/// (`spawned`, called only then), an ADOPTED host keeps `planned`.
+pub fn connected_host_inherits_cursor(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    spawned: impl FnOnce() -> bool,
+) -> bool {
+    connected_host_advertises(origin, planned, spawned)
 }
 
 /// Decide how to connect from an already-read discovery record.
@@ -1288,11 +2439,30 @@ pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> Con
 
 /// Locate the *bundled* sidecar binary (the source to install from), in
 /// priority order:
-/// 1. `TERMFLOW_PTY_HOST_BIN` explicit override.
+/// 1. `TERMFLOW_PTY_HOST_BIN` explicit override — **debug builds only**.
 /// 2. Next to the app executable (release / staged).
 /// 3. Dev build locations under `pty-host/target/{release,debug}` resolved
 ///    both relative to the exe (`src-tauri/target/debug/…`) and to the cwd —
 ///    so `bun run dev` finds it with no env var once the sidecar is built.
+///
+/// The override is gated to `cfg!(debug_assertions)` because this resolver is
+/// shared with `elevated_host::launch` (plan 045): a release build must never
+/// let a same-user, persistently-set env var (e.g. `HKCU\Environment`) pick
+/// which binary gets run, since for the elevated caller that binary is about
+/// to be silently UAC-elevated to High integrity — the UAC dialog gives the
+/// user no way to notice a substitution. A debug build's own `cfg!` gate is
+/// the whole mitigation; there is no runtime check that could substitute for
+/// it here without also breaking the dev workflow the override exists for.
+/// Check the release helper without staging, pinning endpoints, or starting a host.
+/// Debug builds remain unresolved at cold boot, since they may use bare overrides.
+#[cfg(target_os = "macos")]
+pub(crate) fn release_helper_unavailable() -> bool {
+    if cfg!(debug_assertions) { return false; }
+    let Some(exe) = resolve_bundled_host_path() else { return true; };
+    let Some(bundle) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else { return true; };
+    bundle_staging::validate_source(bundle).is_err()
+}
+
 pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) {
         "termflow-pty-host.exe"
@@ -1300,12 +2470,23 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
         "termflow-pty-host"
     };
 
-    // 1. Explicit override.
-    if let Ok(p) = std::env::var("TERMFLOW_PTY_HOST_BIN") {
-        let pb = std::path::PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
+    // 1. Explicit override, debug builds only — see the doc comment above.
+    if cfg!(debug_assertions) {
+        if let Ok(p) = std::env::var("TERMFLOW_PTY_HOST_BIN") {
+            let pb = std::path::PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    let helper = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| {
+        dir.join("..").join("Helpers").join("TermFlow Host.app").join("Contents/MacOS/termflow-pty-host")
+    }));
+    #[cfg(target_os = "macos")]
+    if !cfg!(debug_assertions) {
+        return select_macos_host(helper, false, Vec::new());
     }
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -1341,17 +2522,37 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        select_macos_host(helper, true, candidates)
+    }
+    #[cfg(not(target_os = "macos"))]
     candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn select_macos_host(helper: Option<std::path::PathBuf>, debug: bool, candidates: Vec<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    helper.filter(|p| p.exists()).or_else(|| {
+        if debug { candidates.into_iter().find(|p| p.exists()) } else { None }
+    })
 }
 
 #[cfg(test)]
 mod plan_tests;
 
 #[cfg(test)]
+mod mcp_hold_tests;
+#[cfg(test)]
+mod permission_tests;
+
+#[cfg(test)]
 mod install_tests;
 
 #[cfg(test)]
 mod grace_tests;
+
+#[cfg(test)]
+mod resolve_bundled_host_tests;
 
 fn resp_req(r: &Response) -> u64 {
     match r {
@@ -1360,7 +2561,13 @@ fn resp_req(r: &Response) -> u64 {
         | Response::SessionList { req, .. }
         | Response::ArmAck { req, .. }
         | Response::DisarmAck { req }
-        | Response::AttachAck { req, .. } => *req,
+        | Response::ShutdownAck { req }
+        | Response::AttachAck { req, .. }
+        | Response::McpHoldAck { req, .. }
+        | Response::McpClaimAck { req, .. }
+        | Response::McpReleaseAck { req, .. }
+        | Response::PermissionStatusReply { req, .. }
+        | Response::PermissionRequested { req, .. } => *req,
     }
 }
 
@@ -1391,6 +2598,20 @@ mod tests {
             resolve_process: Arc::new(|k: &str| Some(k.to_string())),
         };
         (deps, rx, produced)
+    }
+
+    /// The MCP-hold replies are demultiplexed by `req` like every other reply.
+    /// Windows-only: this module is `cfg(all(test, windows))`.
+    #[test]
+    fn resp_req_correlates_mcp_replies() {
+        assert_eq!(
+            resp_req(&Response::McpHoldAck { req: 41, accepted: false, reason: Some("no".into()) }),
+            41
+        );
+        assert_eq!(resp_req(&Response::McpClaimAck { req: 42, held: None }), 42);
+        assert_eq!(resp_req(&Response::McpReleaseAck { req: 43, was_holding: true }), 43);
+        // An existing variant still correlates (the arms were extended, not replaced).
+        assert_eq!(resp_req(&Response::DisarmAck { req: 44 }), 44);
     }
 
     /// Design 014 §A3: the host speaks its own id space and every inbound frame
@@ -1438,7 +2659,13 @@ mod tests {
 
         let (deps, mut rx, produced) = deps();
         let offsets = deps.stream_offsets.clone();
-        let _client = wire_client(crd, cwr, deps);
+        let client = wire_client(crd, cwr, deps);
+        let keys = crate::state::HostKeys::default();
+        let channel = crate::elevated_host::HostChannel::Primary;
+        client.bind_sessions(&keys, channel, 1);
+        let (stage, _) = keys.stage(channel, "t1", crate::state::StageMode::Spawn).unwrap();
+        assert!(keys.publish(&stage, "t1", 1));
+        assert!(keys.complete(&stage, "t1"));
 
         // Server pushes a Stdout frame to the client.
         write_frame(
@@ -1543,6 +2770,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            initial_cursor_row: None,
         };
         let pid = client.spawn_session("t1", &spec).await.unwrap();
         assert_eq!(pid, 4321);
