@@ -41,7 +41,7 @@ test('SshPaneShell disconnected_never_renders_live_slots; terminal DOM identity 
   const props = { terminal: <div className="terminal-pane-content" data-terminal="stable" />, browser: <button>Live file</button>, status: <span>Live metrics</span>, browserCollapsed: false, onBrowserCollapsedChange: jest.fn(), onSecret: jest.fn(async () => {}), onTrust: jest.fn(async () => {}), onCancel: jest.fn() };
   act(() => root.render(<SshPaneShell {...props} view={view('connected')} />)); const terminal = container.querySelector('[data-terminal]'); expect(container.textContent).toContain('Live file');
   act(() => root.render(<SshPaneShell {...props} view={view('disconnected')} />)); expect(container.querySelector('[data-terminal]')).toBe(terminal);
-  expect(container.textContent).not.toContain('Live file'); expect(container.textContent).not.toContain('Live metrics'); expect(container.querySelector('.ssh-status')!.textContent).toBe('—');
+  expect(container.textContent).not.toContain('Live file'); expect(container.textContent).toContain('Live metrics'); expect(container.querySelector('.ssh-status-text')!.textContent).toBe('—');
 });
 test('inline prompts do not steal or restore sibling focus and refusals render once', () => {
   const sibling = document.createElement('button'); document.body.append(sibling); sibling.focus();

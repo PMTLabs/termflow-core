@@ -85,6 +85,11 @@ const BINDING: Readonly<Record<string, string>> = {
   cancelTerminalLaunch: 'ssh_terminal_cancel_launch',
   terminalLaunchState: 'ssh_terminal_launch_state',
   onSshLaunchState: 'ssh-launch:state',
+  sshMetricsWatch: 'ssh_metrics_watch',
+  sshMetricsUnwatch: 'ssh_metrics_unwatch',
+  sshMetricsResume: 'ssh_metrics_resume',
+  onSshMetricsSample: 'ssh-metrics:sample',
+  onSshMetricsControl: 'ssh-metrics:control',
 };
 
 // 070-rebase: PENDING-066 / PENDING-069 contracts (ledger 123). NOT asserted yet. After each sibling
@@ -92,11 +97,6 @@ const BINDING: Readonly<Record<string, string>> = {
 // (and its CSS/event into the pins below), then delete it from here. A row still listed here after
 // its owner merged is itself a ledger defect.
 const PENDING_AFTER_REBASE: ReadonlyArray<readonly [member: string, name: string, owner: string]> = [
-  ['sshMetricsWatch', 'ssh_metrics_watch', '069'],
-  ['sshMetricsUnwatch', 'ssh_metrics_unwatch', '069'],
-  ['sshMetricsResume', 'ssh_metrics_resume', '069'],
-  ['onSshMetricsSample', 'ssh-metrics:sample', '069'],
-  ['onSshMetricsControl', 'ssh-metrics:control', '069'],
 ];
 void PENDING_AFTER_REBASE;
 
@@ -119,11 +119,12 @@ const LANDED_EVENTS: readonly string[] = [
   'ssh-fs:cwd',
   'ssh-fs:edit-state',
   'ssh-launch:state',
+  'ssh-metrics:sample',
+  'ssh-metrics:control',
   'ssh-session:state',
   'ssh-store:changed',
   'ssh-test:state',
 ];
-// 070-rebase: 'ssh-metrics:sample' and 'ssh-metrics:control' (069).
 
 /** Custom properties defined in SSH-owned files (Settings folder colours, 065). */
 const LEDGER_SSH_CSS_DEFINED: readonly string[] = [
@@ -131,7 +132,7 @@ const LEDGER_SSH_CSS_DEFINED: readonly string[] = [
 ];
 /** Every custom property read with var() from an SSH-owned file. */
 const LEDGER_SSH_CSS_READ: readonly string[] = [
-  '--accent-color', '--bg-hover', '--bg-primary', '--bg-secondary', '--border-color', '--error-color',
+  '--accent-color', '--bg-hover', '--bg-primary', '--bg-secondary', '--border-color', '--error-color', '--focus-border',
   '--ssh-amber', '--ssh-green', '--ssh-grey', '--ssh-orange', '--ssh-sky', '--ssh-violet',
   '--tab-active-foreground', '--tab-foreground', '--text-primary', '--text-secondary',
 ];
@@ -139,7 +140,7 @@ const LEDGER_SSH_CSS_READ: readonly string[] = [
  * Theme fallbacks: read with an inline fallback value and defined nowhere in src/renderer. Allowed
  * only if every SSH read carries the fallback, so the property can never resolve to nothing.
  */
-const THEME_FALLBACKS: readonly string[] = ['--error-color'];
+const THEME_FALLBACKS: readonly string[] = ['--error-color', '--focus-border'];
 /** Existing Canvas properties the SSH node layout must keep (plan 070 section 4.3, last two rows). */
 const CANVAS_AUDITED: readonly string[] = [
   '--canvas-raster-r', '--canvas-raster-inv', '--node-host-w', '--node-host-h', '--node-surface-scale', '--node-surface-shift',
@@ -517,6 +518,10 @@ describe('sshContractInventory', () => {
       const start = m.index! + m[0].lastIndexOf(m[1]);
       const lineEnd = browser.text.indexOf('\n', start);
       const line = browser.text.slice(start, lineEnd < 0 ? undefined : lineEnd);
+      if (['onSshMetricsSample', 'onSshMetricsControl'].includes(m[1])) {
+        expect(line.trim()).toMatch(/= async \(\) => \(\) => \{\};$/);
+        continue;
+      }
       expect(`${m[1]}: ${/\bthrow\b/.test(line) ? 'rejects' : 'DOES NOT REJECT (one-line stub)'}`).toBe(`${m[1]}: rejects`);
     }
     const browserRef = /\bssh\s*=\s*([A-Za-z_$][\w$]*)/.exec(browser.text);
@@ -544,7 +549,7 @@ describe('sshContractInventory', () => {
     // Consumers: a production renderer file outside the bridge/type layer that CALLS the member
     // (`.name(`) and references the SSH bridge (window.electronAPI or a type that carries it).
     // This is syntax, not dataflow: generic names (get, move) are proven by their behavioural tests.
-    const carriesBridge = /\b(electronAPI|SshAPI|SshStoreApi|SshFileApi|SshBridgeApi|SshRowScope)\b/;
+    const carriesBridge = /\b(electronAPI|SshAPI|SshMetricsAPI|SshStoreApi|SshFileApi|SshBridgeApi|SshRowScope)\b/;
     const consumerFiles = renderer.filter(f =>
       !f.rel.startsWith('src/renderer/api/') && !f.rel.startsWith('src/renderer/types/') && carriesBridge.test(f.text)
       && !new RegExp(`\\binterface\\s+${nestedType}\\b`).test(f.text) && !/\binterface\s+Ssh(?:File|Store)Api\b/.test(f.text));

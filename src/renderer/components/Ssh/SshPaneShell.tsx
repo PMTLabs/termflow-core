@@ -148,7 +148,12 @@ export function SshPaneShell(props: SshPaneShellProps) {
       </aside>
       <div className="ssh-terminal-host">{props.terminal}</div>
     </div>
-    {/* 069-rebase: SshMetricsStatusBar plugs into the `status` slot; the row height is fixed in CSS. */}
-    <div className="ssh-status" aria-label="SSH status">{live ? props.status : '—'}</div>
+    {/* D66: the ONE bottom row. The shell's truthful marker on the left ("—" whenever not live),
+        and the `status` slot (069's SshMetricsStatusBar, which owns its own unavailable/ended states,
+        D57) on the right. The row height is fixed in CSS. */}
+    <div className="ssh-status" aria-label="SSH status">
+      {!live && <span className="ssh-status-text">—</span>}
+      {props.status}
+    </div>
   </section>;
 }

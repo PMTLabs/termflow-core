@@ -5,5 +5,5 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .fixture-panes > [data-source="tm-local"] { width: 610.53125px; height: 390.40625px; }
 /* Local pane border box that yields the expanded SSH FitAddon host box (the SSH pane loses its
    36 px strip, 36 px P068-7 chrome row, 25 px status row and browser column). */
-.fixture-panes > [data-source="tm-matched"] { width: 540.53125px; height: 333.40625px; }
-.fixture-panes[data-portrait] > [data-source="tm-matched"] { width: 292.125px; height: 618.40625px; }
+.fixture-panes > [data-source="tm-matched"] { width: 540.53125px; height: 332.40625px; }
+.fixture-panes[data-portrait] > [data-source="tm-matched"] { width: 292.125px; height: 617.40625px; }

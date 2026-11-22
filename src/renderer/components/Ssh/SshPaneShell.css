@@ -14,9 +14,14 @@
 .ssh-browser.offline > :not(.ssh-browser-toggle) { opacity:.55; }
 .ssh-terminal-host { display:flex; flex:1; min-width:0; min-height:0; }
 .ssh-terminal-host > .terminal-pane-content { flex:1; min-width:0; min-height:0; }
-/* One fixed row (24px + its 1px border, as before): never wraps or grows with its contents.
-   canvasSshGeometry.ts SSH_CSS_STATUS_H and sshCanvasGeometry.test.ts pin this value. */
-.ssh-status { flex:none; box-sizing:border-box; height:25px; overflow:hidden; white-space:nowrap; border-top:1px solid var(--border-color); }
+/* D66: the ONE bottom row of an SSH pane and node, shared by the shell's status text (left) and
+   069's SshMetricsStatusBar (right). One fixed height, border included, = SSH_METRICS_BAR_HEIGHT_PX
+   (sshPaneLayout.ts); canvasSshGeometry.ts SSH_CSS_STATUS_H and sshCanvasGeometry.test.ts pin it.
+   Never wraps or grows with its contents. */
+.ssh-status { flex:none; box-sizing:border-box; height:26px; display:flex; align-items:stretch; min-width:0; overflow:hidden; white-space:nowrap; border-top:1px solid var(--border-color); }
+.ssh-status > .ssh-status-text { flex:none; display:flex; align-items:center; padding:0 8px; }
+/* The bar fills the rest of the row; the row owns the height and the border, so they never stack. */
+.ssh-status > .ssh-metrics-status-bar { flex:1 1 auto; height:auto; min-width:0; border-top:none; }
 .ssh-prompt { padding:12px; background:var(--bg-secondary); color:var(--text-primary); }
 .ssh-prompt h3, .ssh-prompt p { margin:4px 0 8px; }
 .ssh-prompt label { display:block; margin:8px 0; }

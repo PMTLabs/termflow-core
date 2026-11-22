@@ -34,7 +34,7 @@ const FALLBACK = { w: 1600, h: 680 };
 // Unequal on purpose: a terminal box, a browser column and a status row that cannot be confused.
 const TERMINAL = { w: 1001.53125, h: 603.40625 };
 const BROWSER_W = 260;   // 068's expanded column, border included
-const STATUS_H = 25;     // the fixed status row, border included
+const STATUS_H = 26;     // the fixed status row, border included
 
 let container: HTMLDivElement;
 let root: Root;
@@ -125,7 +125,7 @@ describe('SSH envelope capture and entry', () => {
     // Positive first: a valid fractional source is captured and cached.
     const first = measureSshSurfaceBox(id, TERMINAL, false);
     expect(first.source).toBe('measured');
-    expect(first.envelope).toEqual({ w: 1261.53125, h: 628.40625 + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H });
+    expect(first.envelope).toEqual({ w: 1261.53125, h: TERMINAL.h + STATUS_H + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H });
     expect(_sshBoxCount()).toBe(1);
 
     // After relocation the parent is our own replica; a zero source is no better. Neither

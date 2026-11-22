@@ -22,6 +22,8 @@ jest.mock('../../Ssh/ssh066Contract', () => ({
 
 /* eslint-disable import/first */
 import React, { act } from 'react';
+import { sshMetricsArmed, sshMetricsSampled } from '../../../store/slices/sshSessionSlice';
+import type { SshMetrics } from '../../../types/ssh';
 import { dismissAllToasts } from '../../../store/slices/uiSlice';
 import { terminalService } from '../../../services/TerminalService';
 import { SshPaneShell } from '../../Ssh/SshPaneShell';
@@ -98,7 +100,7 @@ describe('host-key trust on the Canvas surface', () => {
     expect(terminalService.writeToTerminal).not.toHaveBeenCalled();
     expect(bridge.writeToTerminal).not.toHaveBeenCalled();
     // While not connected, the Canvas status row is "—" and the browser is dimmed and disabled.
-    expect(node.querySelector('.ssh-status')!.textContent).toBe('—');
+    expect(node.querySelector('.ssh-status-text')!.textContent).toBe('—');
     expect(node.querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
   });
 });
@@ -140,7 +142,7 @@ describe('file replies across a disconnect', () => {
     expect(buttons(canvasNode(A), 'New folder')[0].disabled).toBe(true);
     expect(canvasNode(A).querySelector<HTMLInputElement>('input[aria-label="Remote path"]')!.disabled).toBe(true);
     expect(canvasNode(A).querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
-    expect(canvasNode(A).querySelector('.ssh-status')!.textContent).toBe('—');
+    expect(canvasNode(A).querySelector('.ssh-status-text')!.textContent).toBe('—');
     expect(canvasNode(A).textContent).toContain('Remote files unavailable');
 
     // Reconnect on generation 2 (both the app channel and the launch seam).
@@ -207,7 +209,7 @@ describe('metrics status row', () => {
     // connected app channel (the remote ssh exited while the local shell lives).
     for (const [state, ended] of [['connected', true], ['connecting', false], ['needs-secret', false], ['needs-hostkey', false], ['disconnected', false], ['error', false]] as const) {
       await h.render(shell(state, ended));
-      expect(h.container.querySelector('.ssh-status')!.textContent).toBe('—');
+      expect(h.container.querySelector('.ssh-status-text')!.textContent).toBe('—');
       expect(h.container.querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
       // Not just dimmed: the live browser slot is replaced, including on an ended launch.
       expect(h.container.textContent).not.toContain('Live files');
@@ -222,14 +224,34 @@ describe('metrics status row', () => {
     observe({ terminalId: A, state: 'connected', generation: 1, revision: 1 });
     await h.render(<SshScene ids={[A]} canvas spies={nodeSpies()} />);
     expect(canvasNode(A).querySelector('.ssh-browser')!.classList.contains('offline')).toBe(false);
+    const node = canvasNode(A);
+    expect(node.querySelectorAll('.ssh-status')).toHaveLength(1);
+    expect(node.querySelectorAll('.ssh-metrics-status-bar')).toHaveLength(1);
+    const bar = node.querySelector('.ssh-status > .ssh-metrics-status-bar')!;
+    const na = { available: false as const, reason: 'Not sampled' };
+    const metrics: SshMetrics = { host: na, cpu: na, ram: na, netUp: { available: true, bytesPerSecond: 3200 },
+      netDown: na, uptime: na, users: na, nfs: na, partitions: na };
+    const now = { wall: Date.now(), mono: performance.now() };
+    const sampleFloor = now.wall - 1;
+    const consumerId = 'canvas-test';
+    const sample = () => store.dispatch(sshMetricsSampled({ now, consumerId,
+      sample: { terminalId: A, sampledAt: now.wall, metrics } }));
+    act(() => {
+      store.dispatch(sshMetricsArmed({ terminalId: A,
+        receipt: { generation: 1, sampleFloor, pauseSeq: 0, pausedReason: null },
+        fence: { ...now, consumerId, generation: 1, sampleFloor, trustWall: true } }));
+      sample();
+    });
+    expect(bar.textContent).toContain('Network upload: 3.2KB/s');
     observe({ terminalId: A, state: 'disconnected', generation: 1, revision: 2 });
-    await act(async () => { await flush(); });
-    expect(canvasNode(A).querySelector('.ssh-status')!.textContent).toBe('—');
-    expect(canvasNode(A).querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
+    await act(async () => { sample(); await flush(); });
+    expect(bar.textContent).toContain('Disconnected');
+    expect(bar.querySelector('.ssh-metrics-state')!.classList.contains('is-live')).toBe(false);
+    expect(bar.textContent).not.toContain('3.2KB/s');
+    expect(bar.querySelector('[data-metric=netUp]')!.textContent).toBe('Network upload: —');
+    act(() => { bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
+    expect(buttons(document, 'Copy all metrics')[0].disabled).toBe(true);
+    expect(node.querySelector('.ssh-status-text')!.textContent).toBe('—');
+    expect(node.querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
   });
-
-  // 069-rebase: deliver a valid live sample first, disconnect, then a stale pre-disconnect sample
-  // through 069's sshMetricsWatch receipt `{sampleFloor,generation,pauseSeq,pausedReason}`; assert
-  // the bar AND Copy all stay unavailable. 069 is not merged here, so its APIs are not invented.
-  test.todo('sshMetricsCanvas_disconnectThenLateSample_staysUnavailable: late 069 sample after disconnect');
 });

@@ -151,7 +151,7 @@ async function withGrid(tagged: boolean, run: (grid: {
     unobserve() {}
   };
 
-  const bar = () => element.querySelector('.terminal-pane > [aria-label="Remote host metrics"]');
+  const bar = () => element.querySelector('.terminal-pane .ssh-status > [aria-label="Remote host metrics"]');
   const strip = () => element.querySelector('.terminal-pane > .ssh-launch-notice > .ssh-launch-strip');
   const height = () => HOST_HEIGHT - (strip() ? STRIP_HEIGHT : 0) - (bar() ? BAR_HEIGHT : 0);
   const rows = () => measuredRows(height());

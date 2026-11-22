@@ -30,7 +30,6 @@ import { isHostSessionContended } from '../../services/hostSessionContention';
 import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
 import { addToast } from '../../store/slices/uiSlice';
-import { SshMetricsStatusBar } from '../Ssh/SshMetricsStatusBar';
 import { useSshMetricsWatch } from '../Ssh/useSshMetrics';
 import { OwnedSshLaunchNotice } from '../Ssh/OwnedSshLaunchNotice';
 import { SshLaunchStrip } from '../Ssh/SshLaunchNotice';
@@ -1092,8 +1091,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             onDismiss={handleDismissBanner}
           />
         )}
-        {terminalId && sshConnectionId && <SshMetricsStatusBar key={JSON.stringify([terminalId, sshConnectionId])}
-          terminalId={terminalId} isTabActive={isTabActive} />}
+        {/* D66: 069's SshMetricsStatusBar renders inside the SSH shell's one bottom row
+            (SshTerminalComposition), on this pane and on Canvas alike; the watch stays here. */}
       </div>
       {contextMenu && (
         <PaneContextMenu

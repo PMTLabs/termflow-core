@@ -6,6 +6,7 @@ import { findLeafByTerminalId } from '../../store/slices/paneTreeOps';
 import { useSurfaceHost } from '../../services/surfaceHosts';
 import type { SshPromptReceipt, SshSessionView } from '../../types/ssh';
 import { SshBrowserPaneShell } from './SshBrowserPaneShell';
+import { SshMetricsStatusBar } from './SshMetricsStatusBar';
 import { readSshPaneTag, type SshBrowserTagPatch, type SshPaneTag } from './ssh066Contract';
 import { publishSshCanvasVisible, publishSshPresentation, useSshCanvasVisible, useSshPresentation } from './sshPresentations';
 import { useSshFileBrowser } from './useSshFileBrowser';
@@ -94,9 +95,20 @@ function SshPaneOwner({ terminalId, sshTag, isTabActive, children }: {
   const actions = useSshShellActions(terminalId, view);
   return <SshBrowserPaneShell terminalId={terminalId} sshTag={sshTag} surfaceActive={isTabActive && !canvasOwns}
     onPatchTag={onPatchTag} browserController={browser} interactive={!canvasOwns} view={view} terminal={children}
+    status={<SshStatusBar terminalId={terminalId} connectionId={sshTag.connectionId} active={isTabActive && !canvasOwns} />}
     // 066's SshLaunchNotice (TerminalPane) owns this terminal's host-key and secret prompts.
     sessionPrompts={false}
     onSecret={actions.onSecret} onTrust={actions.onTrust} onCancel={actions.onCancel} />;
+}
+
+/**
+ * D66: 069's metrics bar, rendered inside the shell's ONE bottom row on both surfaces (the same
+ * component and key as 069's pane mount, which this replaces). It only reads the store; the
+ * metrics watch stays retained by TerminalPane (`useSshMetricsWatch`). `active`: the surface is
+ * the visible one, so its menu dismisses when it is not.
+ */
+function SshStatusBar({ terminalId, connectionId, active }: { terminalId: string; connectionId: string; active: boolean }) {
+  return <SshMetricsStatusBar key={JSON.stringify([terminalId, connectionId])} terminalId={terminalId} isTabActive={active} />;
 }
 
 /** How long the owner keeps its controller active after the last visible surface goes away. */
@@ -137,6 +149,7 @@ export function SshCanvasPresentation({ terminalId, sshTag, visible = true, brow
   return <SshBrowserPaneShell terminalId={terminalId} sshTag={sshTag} surfaceActive={visible}
     onPatchTag={presentation?.onPatchTag ?? NOOP_PATCH} browserController={presentation?.browser ?? null}
     view={view} browserWidth={browserWidth} terminal={terminal}
+    status={<SshStatusBar terminalId={terminalId} connectionId={sshTag.connectionId} active={visible} />}
     // D51: 066's SshLaunchNotice, portalled into this node's terminal slot, owns the host-key and
     // secret prompts and Reconnect here too (Canvas.css overlays it), exactly as in the pane.
     sessionPrompts={false}

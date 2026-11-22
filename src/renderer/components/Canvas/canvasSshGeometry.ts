@@ -16,6 +16,8 @@
  * moves the difference into that one terminal's slot width; nothing else may change the slot.
  */
 
+import { SSH_METRICS_BAR_HEIGHT_PX } from '../Ssh/sshPaneLayout';
+
 export interface Box { w: number; h: number }
 
 /** Canvas-only and ephemeral: keyed by terminalId, cleared with `clearHostBoxes`, never persisted. */
@@ -47,14 +49,15 @@ export interface SshSurfaceBox {
  *
  *   .ssh-browser            { flex:0 1 260px; width:260px; max-width:40%; box-sizing:border-box }
  *   .ssh-browser.collapsed  { width:30px; max-width:min(30px, 40%) }
- *   .ssh-status             { box-sizing:border-box; height:25px }
+ *   .ssh-status             { box-sizing:border-box; height:26px }   (= SSH_METRICS_BAR_HEIGHT_PX, D66)
  *   .ssh-launch-strip       { box-sizing:border-box; height:36px }   (Ssh/SshLaunchNotice.css)
  *   .ssh-pane-chrome        { flex:none; box-sizing:border-box; height:36px }   (= SSH_PANE_CHROME_H)
  */
 export const SSH_CSS_BROWSER_W = 260;
 export const SSH_CSS_RAIL_W = 30;
 export const SSH_CSS_BROWSER_MAX_FRACTION = 0.4;
-export const SSH_CSS_STATUS_H = 25;
+/** D66: the one bottom row (shell status + 069 metrics bar), `.ssh-status` in SshPaneShell.css. */
+export const SSH_CSS_STATUS_H = SSH_METRICS_BAR_HEIGHT_PX;
 export const SSH_CSS_LAUNCH_STRIP_H = 36;
 /** Mirrors `SSH_PANE_CHROME_H` (kept out of this pure module to avoid importing the component). */
 export const SSH_CSS_CHROME_H = 36;

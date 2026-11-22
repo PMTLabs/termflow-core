@@ -186,7 +186,7 @@ test('sshCanvasLayout_usesDeclaredCssAllocations', async ({ page }) => {
   const rail = await scene(true);
   await checkEntry('baseline collapsed', rail);
   for (const { label, collapsed, css, delta } of [
-    { label: 'status', collapsed: false, css: '.ssh-status { height: 31px }', delta: 6 },
+    { label: 'status', collapsed: false, css: '.ssh-status { height: 32px }', delta: 6 },
     { label: 'browser', collapsed: false, css: '.ssh-browser:not(.collapsed) { width: 240px; flex-basis: 240px }', delta: -20 },
     { label: 'rail', collapsed: true, css: '.ssh-browser.collapsed { width: 42px; flex-basis: 42px; max-width: min(42px, 40%) }', delta: 12 },
   ]) await test.step(label, async () => {
