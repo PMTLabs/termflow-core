@@ -27,8 +27,8 @@ async function screenshot(page: Page, info: TestInfo, name: string) {
   await info.attach(name, { path, contentType: 'image/png' });
 }
 
-async function start(page: Page, shape = 'wide') {
-  await page.goto(new URL(`?shape=${shape}`, process.env.SSH_CANVAS_URL).href);
+async function start(page: Page, shape = 'wide', overflow = false) {
+  await page.goto(new URL(`?shape=${shape}${overflow ? '&overflow' : ''}`, process.env.SSH_CANVAS_URL).href);
   await expect(page.locator('[data-source="tm-ssh"] .ssh-file-rows').getByText('fixture.txt')).toBeVisible();
   await expect(page.locator('[data-source="tm-ssh"] .ssh-status')).toBeVisible();
   for (const id of [SSH, LOCAL, MATCHED]) {
@@ -78,6 +78,132 @@ async function enter(page: Page) {
   for (const id of [SSH, LOCAL, MATCHED]) await expect.poll(async () => (await sample(page, id)).registered).toBe(true);
   await settle(page);
 }
+
+const readViewport = (page: Page) => page.evaluate(() => {
+  const { x, y, z } = window.__sshCanvas.camera();
+  return { x, y, z };
+});
+
+test('sshCanvas_browserWheelReachesScroller_withoutViewportChange', async ({ page }) => {
+  await start(page, 'wide', true);
+  await enter(page);
+  const ssh = node(page);
+  const browser = ssh.locator('.ssh-browser');
+  const scroll = () => browser.evaluate(el => ({ top: el.scrollTop, height: el.clientHeight, total: el.scrollHeight }));
+  const wheel = async (delta: number) => {
+    await page.mouse.wheel(0, delta);
+    await settle(page);
+  };
+  const reset = async () => {
+    await page.evaluate(() => window.__sshCanvas.viewport({ x: 0, y: 0, z: 1 }));
+    await settle(page);
+  };
+  for (const mode of ['zoom', 'scroll'] as const) await test.step(mode, async () => {
+    await reset();
+    await page.evaluate(mode => window.__sshCanvas.wheelMode(mode), mode);
+    await ssh.locator('.ssh-terminal-host').hover();
+    const controlBefore = await readViewport(page);
+    await wheel(80);
+    const controlAfter = await readViewport(page);
+    console.log(JSON.stringify({ mode, controlBefore, controlAfter }));
+    const axis = mode === 'zoom' ? 'z' : 'y';
+    expect(controlAfter[axis]).not.toBe(controlBefore[axis]);
+
+    await reset();
+    await ssh.locator('.ssh-file-rows').getByRole('button', { name: 'fixture-1.txt', exact: true }).hover();
+    const before = await scroll();
+    const viewport = await readViewport(page);
+    expect(viewport.z).toBe(1);
+    expect(before.top).toBe(0);
+    expect(before.total).toBeGreaterThan(before.height);
+    const terminals = await samplePair(page);
+    await wheel(80);
+    const down = await scroll();
+    const afterDown = await readViewport(page);
+    console.log(JSON.stringify({ mode, before, down, viewport, afterDown }));
+    expect(afterDown).toEqual(viewport);
+    expect(down.top).toBeGreaterThan(before.top);
+    const checkTerminals = async () => {
+      const after = await samplePair(page);
+      unchanged(after.ssh, terminals.ssh);
+      unchanged(after.local, terminals.local);
+    };
+    await checkTerminals();
+    await wheel(-80);
+    const up = await scroll();
+    const afterUp = await readViewport(page);
+    console.log(JSON.stringify({ mode, up, afterUp }));
+    expect(afterUp).toEqual(viewport);
+    expect(up.top).toBeLessThan(down.top);
+    await checkTerminals();
+    await browser.evaluate(el => { el.scrollTop = 0; });
+    await wheel(-80);
+    console.log(JSON.stringify({ mode, edge: await scroll(), edgeViewport: await readViewport(page) }));
+  });
+});
+
+const allocationBoxes = (scope: Locator) => scope.evaluate(root => {
+  const size = (selector: string, axis: 'width' | 'height') =>
+    parseFloat(getComputedStyle(root.querySelector(selector)!)[axis]);
+  return {
+    browser: size('.ssh-browser', 'width'), status: size('.ssh-status', 'height'),
+    chrome: size('.ssh-pane-chrome', 'height'), terminal: {
+      width: size('.terminal-display', 'width'), height: size('.terminal-display', 'height'),
+    },
+  };
+});
+
+test('sshCanvasLayout_usesDeclaredCssAllocations', async ({ page }) => {
+  const pane = page.locator('[data-source="tm-ssh"]');
+  const scene = async (collapsed: boolean, css?: string) => {
+    await start(page);
+    if (collapsed) await collapse(page, true, await sample(page));
+    if (css) await page.addStyleTag({ content: css });
+    await settle(page);
+    return allocationBoxes(pane);
+  };
+  const checkEntry = async (label: string, source: Awaited<ReturnType<typeof scene>>) => {
+    const baseline = await sample(page);
+    await page.evaluate(id => window.__sshCanvas.watchFits(id), SSH);
+    await enter(page);
+    const canvas = await allocationBoxes(node(page));
+    const current = await sample(page);
+    const fits = await page.evaluate(() => window.__sshCanvas.fitCalls());
+    const resizes = await page.evaluate(() => window.__sshCanvas.resizeCalls());
+    const evidence = JSON.stringify({ label, pane: source, canvas, fits, resizes, sends: current.resizes.slice(baseline.resizes.length) });
+    console.log(evidence);
+    test.info().annotations.push({ type: 'entry fit', description: evidence });
+    expect(canvas.terminal).toEqual(source.terminal);
+    expect(canvas.browser).toBe(source.browser);
+    // Plan 070 §4.1 B: the relocation fit RUNS and finds nothing to do. Liveness: it must run at all
+    // (else the box equality above is never exercised by xterm); safety: it never resizes xterm.
+    expect(fits, `${label}: entry fit calls`).toBeGreaterThan(0);
+    expect(resizes, `${label}: entry Terminal.resize calls`).toBe(0);
+    unchanged(current, baseline);
+  };
+  const expanded = await scene(false);
+  await checkEntry('baseline expanded', expanded);
+  const rail = await scene(true);
+  await checkEntry('baseline collapsed', rail);
+  for (const { label, collapsed, css, delta } of [
+    { label: 'status', collapsed: false, css: '.ssh-status { height: 31px }', delta: 6 },
+    { label: 'browser', collapsed: false, css: '.ssh-browser:not(.collapsed) { width: 240px; flex-basis: 240px }', delta: -20 },
+    { label: 'rail', collapsed: true, css: '.ssh-browser.collapsed { width: 42px; flex-basis: 42px; max-width: min(42px, 40%) }', delta: 12 },
+  ]) await test.step(label, async () => {
+    const baseline = collapsed ? rail : expanded;
+    const source = await scene(collapsed, css);
+    expect(source).toEqual({
+      browser: baseline.browser + (label === 'status' ? 0 : delta),
+      status: baseline.status + (label === 'status' ? delta : 0),
+      chrome: baseline.chrome,
+      terminal: {
+        width: baseline.terminal.width - (label === 'status' ? 0 : delta),
+        height: baseline.terminal.height - (label === 'status' ? delta : 0),
+      },
+    });
+    await checkEntry(label, source);
+  });
+});
 
 const samplePair = (page: Page) => page.evaluate(() => ({
   ssh: window.__sshCanvas.read('tm-ssh'),

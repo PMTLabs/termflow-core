@@ -15,7 +15,7 @@ import { leaveCanvasTab, openCanvasTab, isCanvasTabActive } from '../../../src/r
 import { __getSurfaceHostForTest as registryHost } from '../../../src/renderer/services/surfaceHosts';
 import { addTabTree, patchSshPaneTag } from '../../../src/renderer/store/slices/panesSlice';
 import { addTab } from '../../../src/renderer/store/slices/tabsSlice';
-import { setDefaultProfile, setShellProfiles } from '../../../src/renderer/store/slices/settingsSlice';
+import { setCanvasWheelMode, setDefaultProfile, setShellProfiles } from '../../../src/renderer/store/slices/settingsSlice';
 import { hydrateCanvas, setNodeGeom, setOverlayNode, setViewport } from '../../../src/renderer/store/slices/canvasSlice';
 import { sshLaunchObserved, sshOwnersChanged, sshSessionObserved } from '../../../src/renderer/store/slices/sshSessionSlice';
 import type { LaunchSnapshot, SshSessionView } from '../../../src/renderer/types/ssh';
@@ -31,6 +31,7 @@ const matched = 'tm-matched';
 const tab = 'tb-layout';
 const tag = sshTag({ browserPath: '/home/layout' });
 const processId = (id: string) => 'pc-' + id;
+const listing = new URLSearchParams(location.search).has('overflow') ? 100 : 1;
 const resizeLog: { processId: string; cols: number; rows: number }[] = [];
 const bus = sshTwoWindowBridge({ revision: 1, view: { revision: 1, folders: [], connections: [], loadError: null } },
   (id, connectionId) => id === ssh && connectionId === tag.connectionId);
@@ -40,7 +41,10 @@ window.electronAPI = {
     ...bus.B.api.ssh,
     fsList: async ({ path, expectedGeneration }) => ({
       path, sessionGeneration: expectedGeneration,
-      entries: [{ name: 'fixture.txt', path: path + '/fixture.txt', kind: 'file', size: '12' }],
+      entries: Array.from({ length: listing }, (_, i) => {
+        const name = i ? `fixture-${i}.txt` : 'fixture.txt';
+        return { name, path: `${path}/${name}`, kind: 'file', size: '12' };
+      }),
     }),
     fsEditList: async () => [],
     onFsEditState: async () => () => {},
@@ -48,6 +52,7 @@ window.electronAPI = {
   },
   resizeTerminal: async (pid: string, cols: number, rows: number) => { resizeLog.push({ processId: pid, cols, rows }); },
   getTerminalOutput: async () => '',
+  setConfigValue: async () => {},
 } as typeof window.electronAPI;
 
 let callbackId = 0;
@@ -162,10 +167,27 @@ function read(id: string) {
   };
 }
 
+let fitCalls = 0;
+let resizeCalls = 0;
 const hooks = {
   enter: () => flushSync(openCanvasTab),
   leave: () => flushSync(leaveCanvasTab),
   viewport: (vp: Viewport) => flushSync(() => store.dispatch(setViewport(vp))),
+  wheelMode: (mode: 'zoom' | 'scroll') => flushSync(() => store.dispatch(setCanvasWheelMode(mode))),
+  watchFits: (id: string) => {
+    const entry = terminalCache.get(id)!;
+    const addon = entry.fitAddon;
+    const fit = addon.fit.bind(addon);
+    fitCalls = 0;
+    addon.fit = () => { fitCalls++; fit(); };
+    // `FitAddon.fit` calls `Terminal.resize` only when the proposal differs: a real resize.
+    const terminal = entry.terminal;
+    const resize = terminal.resize.bind(terminal);
+    resizeCalls = 0;
+    terminal.resize = (cols: number, rows: number) => { resizeCalls++; resize(cols, rows); };
+  },
+  fitCalls: () => fitCalls,
+  resizeCalls: () => resizeCalls,
   overlay: (id: string | null) => flushSync(() => store.dispatch(setOverlayNode(id))),
   collapse: (value: boolean) => flushSync(() => store.dispatch(patchSshPaneTag({ terminalId: ssh, patch: { browserCollapsed: value } }))),
   localWidth: (width: number | null) => {
