@@ -88,11 +88,17 @@ export function sshTwoWindowBridge(initial: SshReply, isTagged: (id: string, con
         case 'register_page': return { status: 'Registered', wi: 2, pg: 41 };
         case 'pane_op': {
           const { op } = args!.request as PaneRequest;
-          if (op.kind === 'enter') for (const pane of op.panes) paneLeaves.set(paneKey(pane.pi), pane.leaf);
+          if (op.kind === 'enter' || op.kind === 'adopt') {
+            for (const pane of op.kind === 'enter' ? op.panes : op.pairs) paneLeaves.set(paneKey(pane.pi), pane.leaf);
+          }
           if (op.kind === 'close') {
-            const leaf = paneLeaves.get(paneKey(op.pi));
+            const key = paneKey(op.pi);
+            const leaf = paneLeaves.get(key);
             if (leaf) {
+              paneLeaves.delete(key);
               processes.delete(leaf);
+              sessions.delete(leaf);
+              snapshots.delete(leaf);
               for (let i = serverEdges.length - 1; i >= 0; i--) {
                 if (serverEdges[i].from === leaf || serverEdges[i].to === leaf) serverEdges.splice(i, 1);
               }
