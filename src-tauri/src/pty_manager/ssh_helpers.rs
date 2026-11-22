@@ -75,6 +75,31 @@ fn denied() -> io::Error {
     )
 }
 
+const DATA_PATH_CODE: &str = "SshDataPathUnusable";
+const PATH_MODE: &str = "a folder in its path can be changed by other users";
+const PATH_NOT_DIR: &str = "a folder in its path is not a folder";
+const PATH_PRIVATE: &str = "TermFlow's SSH helper folder has unsafe permissions";
+const PATH_OTHER: &str = "TermFlow couldn't open its SSH helper folder";
+
+fn root_error(path: &Path, error: io::Error, reason: &str) -> io::Error {
+    log::warn!("SSH helper root rejected at {}: {reason} ({error})", path.display());
+    io::Error::new(error.kind(), format!("{DATA_PATH_CODE}: {reason}"))
+}
+
+fn path_error(path: &Path, error: io::Error, permission_reason: &str) -> io::Error {
+    let not_dir = error.kind() == io::ErrorKind::NotADirectory;
+    #[cfg(unix)]
+    let not_dir = not_dir || error.raw_os_error() == Some(libc::ELOOP);
+    let reason = if not_dir {
+        PATH_NOT_DIR
+    } else if error.kind() == io::ErrorKind::PermissionDenied {
+        permission_reason
+    } else {
+        PATH_OTHER
+    };
+    root_error(path, error, reason)
+}
+
 fn component(name: &str) -> io::Result<()> {
     if name.is_empty()
         || name.len() > 128
@@ -150,8 +175,8 @@ struct Manifest {
     sha256: String,
 }
 
-/// `app_data` must come from Tauri's per-user app-data resolver. All path components are
-/// opened without following links and pinned for this root's lifetime. Existing unsafe
+/// `app_data` must come from Tauri's per-user app-data resolver. All components
+/// of the resolved path are opened without following links. Existing unsafe
 /// permissions are rejected, never silently repaired.
 #[derive(Clone)]
 pub struct HelperRoot {
@@ -161,21 +186,36 @@ pub struct HelperRoot {
 impl HelperRoot {
     pub fn for_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> io::Result<Self> {
         use tauri::Manager;
-        let app_data = app.path().app_data_dir().map_err(io::Error::other)?;
+        let app_data = app.path().app_data_dir().map_err(|error| {
+            root_error(Path::new("<app data>"), io::Error::other(error), PATH_OTHER)
+        })?;
         Self::open_app_data(&app_data)
     }
 
     pub fn open_app_data(app_data: &Path) -> io::Result<Self> {
+        #[cfg(unix)]
+        let resolved = platform::resolve_app_data(app_data)?;
+        #[cfg(unix)]
+        let app_data = resolved.as_ref();
+        #[cfg(unix)]
         let parent = platform::Dir::open_tree(app_data)?;
-        let dir = parent.child(FEATURE, true)?;
-        dir.verify_private()?;
+        #[cfg(windows)]
+        let parent = platform::Dir::open_tree(app_data)
+            .map_err(|error| path_error(app_data, error, PATH_MODE))?;
+        let feature = parent.path().join(FEATURE);
+        let dir = parent.child(FEATURE, true)
+            .map_err(|error| path_error(&feature, error, PATH_PRIVATE))?;
+        dir.verify_private().map_err(|error| root_error(&feature, error, PATH_PRIVATE))?;
+        let lock = feature.join(ROOT_LOCK);
         match dir.publish_file(ROOT_LOCK, FEATURE.as_bytes()) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(path_error(&lock, e, PATH_PRIVATE)),
         }
-        if dir.read_file(ROOT_LOCK)? != FEATURE.as_bytes() {
-            return Err(denied());
+        if dir.read_file(ROOT_LOCK).map_err(|error| path_error(&lock, error, PATH_PRIVATE))?
+            != FEATURE.as_bytes()
+        {
+            return Err(root_error(&lock, denied(), PATH_PRIVATE));
         }
         Ok(Self { dir: Arc::new(dir) })
     }

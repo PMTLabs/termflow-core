@@ -42,7 +42,10 @@ pub(super) trait LaunchPort: InputBackend {
 
 impl<R: Runtime> LaunchPort for AppState<R> {
     fn helper_root(&self) -> Result<HelperRoot, LaunchError> {
-        HelperRoot::for_app(&self.app_handle).map_err(|_| Code::UnsupportedContext.into())
+        HelperRoot::for_app(&self.app_handle).map_err(|error| {
+            log::warn!("SSH launch helper root unavailable: {error}");
+            Code::UnsupportedContext.into()
+        })
     }
     fn open_ssh(&self) -> Result<String, LaunchError> {
         let path = native_ssh()?;

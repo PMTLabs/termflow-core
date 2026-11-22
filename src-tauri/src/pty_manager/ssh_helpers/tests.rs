@@ -8,7 +8,7 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         // Canonicalize only the test runner's temp parent (e.g. macOS /var -> /private/var).
-        // Production never canonicalizes away an untrusted link component.
+        // Production canonicalizes app-data links only after checking their trust.
         let parent = fs::canonicalize(std::env::temp_dir()).unwrap();
         let path = parent.join(format!("tf-ssh-helpers-test-{}", Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
@@ -23,6 +23,75 @@ impl Drop for Fixture {
         remove_test_tree(&self.0).expect("remove test-owned fixture only");
     }
 }
+#[cfg(unix)]
+#[test]
+fn trusted_app_data_link_with_missing_tail_is_resolved() {
+    let f = Fixture::new();
+    let real = f.0.join("real");
+    fs::create_dir(&real).unwrap();
+    let link = f.0.join("link");
+    directory_link(&real, &link);
+
+    let root = HelperRoot::open_app_data(&link.join("appdata/nested")).unwrap();
+    assert_eq!(root.path(), real.join("appdata/nested").join(FEATURE));
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_walk_rejects_link_planted_after_resolution() {
+    let f = Fixture::new();
+    let real = f.0.join("real");
+    fs::create_dir(&real).unwrap();
+    let link = f.0.join("link");
+    directory_link(&real, &link);
+    let app_data = link.join("appdata");
+    let resolved = platform::resolve_app_data(&app_data).unwrap();
+    directory_link(&f.0, &real.join("appdata"));
+    let error = platform::Dir::open_tree(&resolved).err().unwrap();
+    assert_eq!(error.to_string(), format!("{DATA_PATH_CODE}: {PATH_NOT_DIR}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_path_rejects_foreign_writable_ancestor() {
+    let f = Fixture::new();
+    let real = f.0.join("real");
+    fs::create_dir(&real).unwrap();
+    let link = f.0.join("link");
+    directory_link(&real, &link);
+    unsafe_permissions(&real);
+    let error = HelperRoot::open_app_data(&link.join("appdata")).err().unwrap();
+    assert_eq!(error.to_string(), format!("{DATA_PATH_CODE}: {PATH_MODE}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn app_data_link_rejects_foreign_writable_containing_directory() {
+    let f = Fixture::new();
+    let writable = f.0.join("writable");
+    fs::create_dir(&writable).unwrap();
+    unsafe_permissions(&writable);
+    let real = f.0.join("real");
+    fs::create_dir(&real).unwrap();
+    let link = writable.join("link");
+    directory_link(&real, &link);
+    let error = HelperRoot::open_app_data(&link.join("appdata")).err().unwrap();
+    assert_eq!(
+        error.to_string(),
+        "SshDataPathUnusable: a folder in its path is a link TermFlow can't trust"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn app_data_file_component_reports_not_a_folder() {
+    let f = Fixture::new();
+    let file = f.0.join("file");
+    fs::write(&file, b"not a folder").unwrap();
+    let error = HelperRoot::open_app_data(&file).err().unwrap();
+    assert_eq!(error.to_string(), format!("{DATA_PATH_CODE}: {PATH_NOT_DIR}"));
+}
+
 fn owner() -> ProcessIdentity {
     ProcessIdentity::capture(std::process::id()).unwrap()
 }
@@ -215,11 +284,11 @@ fn helper_root_rejects_links_reparse_and_foreign_permissions() {
     fs::create_dir(&other).unwrap();
     let linked_parent = f.0.join("linked-parent");
     directory_link(&other, &linked_parent);
-    assert!(HelperRoot::open_app_data(&linked_parent.join("nested")).is_err());
-    assert!(
-        !other.join("nested").exists(),
-        "followed an ancestor link before rejection"
-    );
+    #[cfg(windows)]
+    {
+        assert!(HelperRoot::open_app_data(&linked_parent.join("nested")).is_err());
+        assert!(!other.join("nested").exists(), "followed a reparse point");
+    }
     remove_directory_link(&linked_parent);
     let linked_root_parent = f.0.join("linked-root-parent");
     fs::create_dir(&linked_root_parent).unwrap();

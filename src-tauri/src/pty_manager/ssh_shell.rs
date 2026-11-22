@@ -105,7 +105,7 @@ impl PreparedShell {
         spec: &mut termflow_pty_protocol::SpawnSpec, hosted: bool, connection_id: &str,
     ) -> Result<Self, String> {
         use super::ssh_helpers::HelperRoot;
-        let root = HelperRoot::for_app(app).map_err(adapter_error)?;
+        let root = HelperRoot::for_app(app).map_err(|error| error.to_string())?;
         Self::register_in(&root, keys, process, cg, spec, hosted, connection_id, |key| std::env::var(key).ok())
     }
 

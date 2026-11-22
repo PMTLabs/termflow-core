@@ -1,4 +1,4 @@
-import { getPaneStartupStatus } from '../paneStartupStatus';
+import { getPaneStartupStatus, paneStartupFailureCode } from '../paneStartupStatus';
 
 describe('getPaneStartupStatus', () => {
   it('returns null once a processId is set (TerminalDisplay takes over)', () => {
@@ -13,6 +13,17 @@ describe('getPaneStartupStatus', () => {
     expect(status).not.toBeNull();
     expect(status?.text).toBe('Starting new shell…');
     expect(status?.failed).toBe(false);
+  });
+
+  it('carries and renders the SSH data path refusal reason', () => {
+    const reason = 'a folder in its path is not a folder';
+    const failure = paneStartupFailureCode(`SshDataPathUnusable: ${reason}`);
+    expect(failure).toEqual({ code: 'SshDataPathUnusable', reason });
+    expect(getPaneStartupStatus(undefined, failure)).toEqual({
+      text: `TermFlow's data folder path can't be used for SSH helpers: ${reason}.`,
+      failed: true,
+    });
+    expect(paneStartupFailureCode(`wrapper: SshDataPathUnusable: ${reason}`)).toBe(true);
   });
 
   it('shows a non-blank failure status when startup failed', () => {
