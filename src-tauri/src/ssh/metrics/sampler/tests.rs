@@ -3,10 +3,11 @@ use crate::ssh::{
     session::{LaunchState, SessionState},
     tests::{hop, wait_state, Fixture, Server},
 };
-use russh::{server, ChannelId};
+use russh::{server, Channel, ChannelMsg};
 use serde_json::{json, Value};
 use std::{collections::VecDeque, fmt::Write, sync::atomic::{AtomicUsize, Ordering::SeqCst}};
-use tokio::time::{sleep, timeout};
+use tokio::{io::AsyncWriteExt, time::{sleep, timeout}};
+use tokio_util::sync::CancellationToken;
 
 mod reader;
 mod scheduler;
@@ -62,9 +63,14 @@ enum Reply {
     Flood { stdout: usize, stderr: usize },
 }
 
+struct ExecStart {
+    at: Instant,
+    stopped: CancellationToken,
+}
+
 #[derive(Default)]
 struct Wire {
-    starts: Mutex<Vec<Instant>>,
+    starts: Mutex<Vec<ExecStart>>,
     changed: Notify,
     replies: Mutex<VecDeque<Reply>>,
     closed: Arc<crate::ssh::tests::Counters>,
@@ -77,7 +83,7 @@ impl Wire {
     async fn started(&self, count: usize) -> Instant {
         timeout(WAIT, async {
             loop {
-                if let Some(at) = self.starts.lock().get(count - 1).copied() {
+                if let Some(at) = self.starts.lock().get(count - 1).map(|start| start.at) {
                     return at;
                 }
                 self.changed.notified().await;
@@ -85,16 +91,18 @@ impl Wire {
         }).await.expect("real collector exec request")
     }
 
-    fn reply(&self, ch: ChannelId, command: &[u8], session: &mut server::Session, host: &str) -> Result<(), russh::Error> {
+    fn reply(&self, channel: Channel<server::Msg>, command: &[u8], session: &mut server::Session, host: &str) -> Result<(), russh::Error> {
         let command = std::str::from_utf8(command).unwrap();
         let (prefix, suffix) = command.rsplit_once(" || /bin/sh -c 'exit 125'").unwrap();
         assert!(suffix.is_empty());
         let (_, nonce) = prefix.rsplit_once(' ').unwrap();
         assert_eq!(command, super::super::encode(nonce, super::super::COLLECT).unwrap());
+        let ch = channel.id();
+        let stopped = CancellationToken::new();
         let index = {
             let mut starts = self.starts.lock();
             let index = starts.len() as u64;
-            starts.push(Instant::now());
+            starts.push(ExecStart { at: Instant::now(), stopped: stopped.clone() });
             index
         };
         self.changed.notify_one();
@@ -107,6 +115,67 @@ impl Wire {
             _ => 0,
         };
         let valid = frame(nonce, host, index, nfs);
+        let flood = match reply {
+            Reply::Flood { stdout, stderr } => Some((stdout, stderr)),
+            _ => None,
+        };
+        let active = self.pumps.clone();
+        if flood.is_some() {
+            active.fetch_add(1, SeqCst);
+        }
+        tokio::spawn(async move {
+            let (mut reader, writer) = channel.split();
+            let close = async {
+                while let Some(message) = reader.wait().await {
+                    if matches!(message, ChannelMsg::Close) {
+                        return true;
+                    }
+                }
+                false // Losing the transport is not an observed exec close.
+            };
+            tokio::pin!(close);
+            let observed = if let Some((mut stdout, mut stderr)) = flood {
+                let send = async {
+                    let mut out = writer.make_writer_ext(None);
+                    let mut err = writer.make_writer_ext(Some(1));
+                    let out_chunk = [b'o'; 8191];
+                    let err_chunk = [b'e'; 8191];
+                    while stdout != 0 || stderr != 0 {
+                        // Give the transport a read opportunity between bursts.
+                        // Sleep rather than using an interval that catches up after stalls.
+                        sleep(Duration::from_millis(1)).await;
+                        for (left, writer, chunk) in [
+                            (&mut stdout, &mut out, &out_chunk),
+                            (&mut stderr, &mut err, &err_chunk),
+                        ] {
+                            let size = (*left).min(chunk.len());
+                            if size != 0 {
+                                if writer.write_all(&chunk[..size]).await.is_err() {
+                                    return;
+                                }
+                                *left -= size;
+                            }
+                        }
+                    }
+                    // No EOF or exit: an unbounded reader must not return successfully.
+                };
+                let observed = tokio::select! {
+                    biased;
+                    observed = &mut close => Some(observed),
+                    () = send => None,
+                };
+                active.fetch_sub(1, SeqCst);
+                match observed {
+                    Some(observed) => observed,
+                    None => close.await,
+                }
+            } else {
+                close.await
+            };
+            if observed {
+                stopped.cancel();
+            }
+        });
         match &reply {
             Reply::Hang => return Ok(()),
             Reply::WatchdogWithChild { ping, pong, .. } => {
@@ -131,36 +200,7 @@ impl Wire {
                 });
                 return Ok(());
             }
-            Reply::Flood { stdout, stderr } => {
-                let (stdout, stderr) = (*stdout, *stderr);
-                let handle = session.handle();
-                let counters = self.closed.clone();
-                let closed = counters.closed_channels.load(SeqCst);
-                let active = self.pumps.clone();
-                active.fetch_add(1, SeqCst);
-                tokio::spawn(async move {
-                    let pipe = |mut bytes: usize, stderr| {
-                        let handle = handle.clone();
-                        let counters = counters.clone();
-                        async move {
-                            while bytes != 0 && counters.closed_channels.load(SeqCst) == closed {
-                                let chunk = bytes.min(8191);
-                                let result = if stderr {
-                                    handle.extended_data(ch, 1, vec![b'e'; chunk]).await
-                                } else {
-                                    handle.data(ch, vec![b'o'; chunk]).await
-                                };
-                                if result.is_err() { break; }
-                                bytes -= chunk;
-                            }
-                        }
-                    };
-                    tokio::join!(pipe(stdout, false), pipe(stderr, true));
-                    active.fetch_sub(1, SeqCst);
-                    // No exit or close: returning early requires the real incremental caps.
-                });
-                return Ok(());
-            }
+            Reply::Flood { .. } => return Ok(()),
             Reply::BadBytes(bytes) => {
                 // An otherwise valid envelope. Lossy decoding or stripping
                 // the bad preamble would incorrectly admit this sample.

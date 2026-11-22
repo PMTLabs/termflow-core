@@ -16,12 +16,9 @@ async fn exec(lease: &SshSession, opts: ExecOpts) -> (ExecOutcome, String) {
     (lease.exec_with_cleanup(&command, opts).await, nonce)
 }
 
-async fn wait_close(wire: &Wire, after: usize) {
-    timeout(WAIT, async {
-        while wire.closed.closed_channels.load(SeqCst) <= after || wire.pumps.load(SeqCst) != 0 {
-            sleep(Duration::from_millis(2)).await;
-        }
-    }).await.expect("server observed exec close and stopped streaming");
+async fn wait_close(wire: &Wire, index: usize) {
+    let stopped = wire.starts.lock()[index].stopped.clone();
+    timeout(WAIT, stopped.cancelled()).await.expect("server observed exec close and stopped streaming");
 }
 
 async fn realpath(sftp: &crate::ssh::session::SftpLease) {
@@ -128,7 +125,6 @@ async fn production_exec_reader_bounds_both_streams() {
     }
     let (result, _) = exec(&lease, ExecOpts { deadline: Duration::from_millis(300), ..options() }).await;
     assert_eq!(result.result, Err(SessionError::TimedOut)); // Complete frame and exit, but no CLOSE.
-    let close_before_cancel = wire.closed.closed_channels.load(SeqCst);
     let cancel = CancellationToken::new();
     let runner = {
         let (lease, token) = (lease.clone(), cancel.clone());
@@ -139,7 +135,7 @@ async fn production_exec_reader_bounds_both_streams() {
     let (result, _) = timeout(WAIT, runner).await.unwrap().unwrap();
     assert_eq!(result.result, Err(SessionError::Cancelled));
     assert_eq!(result.cleanup_failure, None);
-    wait_close(&wire, close_before_cancel).await;
+    wait_close(&wire, 8).await;
     let (ok, nonce) = exec(&lease, options()).await;
     assert!(matches!(classify(&ok, &nonce), Reading::Sample(_)));
     assert_eq!(wire.pumps.load(SeqCst), 0);

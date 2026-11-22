@@ -298,6 +298,7 @@ async fn ssh_terminal_ended_with_local_shell_alive_stops_metrics() {
     let execs = starts.clone();
     let mut server = Server::new(1, "alice");
     server.exec_fixture = Some(Arc::new(move |channel, _, session| {
+        let channel = channel.id();
         execs.fetch_add(1, SeqCst);
         session.channel_success(channel)?;
         session.exit_status_request(channel, 7)?;

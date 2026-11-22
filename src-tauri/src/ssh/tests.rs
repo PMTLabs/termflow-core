@@ -38,7 +38,7 @@ pub struct Counters {
     /// Terminal (pty-req) channels: only a real OpenSSH client in a PTY asks.
     pub ptys: AtomicUsize,
 }
-type ExecFixture = dyn Fn(ChannelId, &[u8], &mut Session) -> Result<(), russh::Error> + Send + Sync;
+type ExecFixture = dyn Fn(Channel<Msg>, &[u8], &mut Session) -> Result<(), russh::Error> + Send + Sync;
 
 #[derive(Clone)]
 pub struct Server {
@@ -78,7 +78,9 @@ impl Server {
             hostname_channels: HashSet::new(),
         }
     }
-    pub(super) fn start(self, stream: BoxStream) {
+    pub(super) fn start(mut self, stream: BoxStream) {
+        // Channel IDs are local to each SSH connection, unlike fixture counters.
+        self.channels = Arc::default();
         self.counters.handshakes.fetch_add(1, Ordering::SeqCst);
         let config = server::Config {
             keys: vec![self.host.clone()],
@@ -205,7 +207,8 @@ impl server::Handler for Server {
             return Ok(());
         }
         if let Some(fixture) = &self.exec_fixture {
-            return fixture(ch, data, session);
+            let channel = self.channels.lock().remove(&ch).unwrap();
+            return fixture(channel, data, session);
         }
         session.channel_success(ch)?;
         if data == b"hang" {

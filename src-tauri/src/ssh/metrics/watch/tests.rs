@@ -64,6 +64,7 @@ fn server(host: &'static str) -> (Server, Arc<Wire>) {
     let wire = Arc::new(Wire { counters: server.counters.clone(), ..Wire::default() });
     let copy = wire.clone();
     server.exec_fixture = Some(Arc::new(move |channel, command, session| {
+        let channel = channel.id();
         let command = std::str::from_utf8(command).unwrap();
         let (cmd, _) = command.rsplit_once(" || /bin/sh -c 'exit 125'").unwrap();
         let (_, nonce) = cmd.rsplit_once(' ').unwrap();
