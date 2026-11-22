@@ -26,6 +26,7 @@ impl Drop for Fixture {
 #[cfg(unix)]
 #[test]
 fn trusted_app_data_link_with_missing_tail_is_resolved() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let real = f.0.join("real");
     fs::create_dir(&real).unwrap();
@@ -39,6 +40,7 @@ fn trusted_app_data_link_with_missing_tail_is_resolved() {
 #[cfg(unix)]
 #[test]
 fn strict_walk_rejects_link_planted_after_resolution() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let real = f.0.join("real");
     fs::create_dir(&real).unwrap();
@@ -54,6 +56,7 @@ fn strict_walk_rejects_link_planted_after_resolution() {
 #[cfg(unix)]
 #[test]
 fn canonical_path_rejects_foreign_writable_ancestor() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let real = f.0.join("real");
     fs::create_dir(&real).unwrap();
@@ -67,6 +70,7 @@ fn canonical_path_rejects_foreign_writable_ancestor() {
 #[cfg(unix)]
 #[test]
 fn app_data_link_rejects_foreign_writable_containing_directory() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let writable = f.0.join("writable");
     fs::create_dir(&writable).unwrap();
