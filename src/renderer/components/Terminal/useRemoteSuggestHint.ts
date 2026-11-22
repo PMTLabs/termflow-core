@@ -26,6 +26,7 @@ export function useRemoteSuggestHint(
   engineGeneration: number,
 ): { show: boolean; dismiss: () => void } {
   const suggestEnabled = useSelector((s: RootState) => s.settings.commandSuggestions);
+  const launchEnded = useSelector((s: RootState) => s.sshLaunch?.byTerminal[terminalId]?.stage === 'ended');
   const [sshForeground, setSshForeground] = useState(() => agentSchemeTracker.isSshForeground(terminalId));
   const [mark, setMark] = useState<PromptMarkState | null>(null);
   const [dismissed, setDismissed] = useState(() => isRemoteHintDismissed(terminalId));
@@ -54,7 +55,7 @@ export function useRemoteSuggestHint(
   }, [terminalId]);
 
   return {
-    show: shouldShowRemoteHint({ sshForeground, mark, suggestEnabled: !!suggestEnabled, dismissed }),
+    show: !launchEnded && shouldShowRemoteHint({ sshForeground, mark, suggestEnabled: !!suggestEnabled, dismissed }),
     dismiss,
   };
 }

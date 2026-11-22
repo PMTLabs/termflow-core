@@ -14,6 +14,8 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
+import { sshLaunchReducer, sshLaunchObserved, sshOwnersChanged } from '../../../store/slices/sshSessionSlice';
+import type { LaunchSnapshot } from '../../../types/ssh';
 import type { PromptMarkState, TerminalEngine } from '@termflow/terminal-core';
 import { resetRemoteHintDismissals } from '../remoteSuggestHint';
 
@@ -64,7 +66,7 @@ const Probe: React.FC<{ id: string; engine: FakeEngine | null; generation: numbe
 };
 
 const makeStore = (commandSuggestions: boolean) =>
-  configureStore({ reducer: { settings: (s: { commandSuggestions: boolean } = { commandSuggestions }) => s } });
+  configureStore({ reducer: { settings: (s: { commandSuggestions: boolean } = { commandSuggestions }) => s, sshLaunch: sshLaunchReducer } });
 
 let container: HTMLDivElement;
 let root: Root;
@@ -95,6 +97,28 @@ afterEach(() => {
 });
 
 describe('useRemoteSuggestHint', () => {
+  it('hides on saved launch end even if the foreground poll is stale, then shows on reconnect', () => {
+    const store = makeStore(true);
+    const engine = new FakeEngine();
+    store.dispatch(sshOwnersChanged({ 'tm-1': 'saved', 'tm-2': 'other' }));
+    const observe = (stage: LaunchSnapshot['stage'], sessionGeneration: number, launchSeq: number, terminalId = 'tm-1') =>
+      act(() => { store.dispatch(sshLaunchObserved({
+        terminalId, connectionId: terminalId === 'tm-1' ? 'saved' : 'other', stage, launchSeq, revision: launchSeq,
+        attempt: { sessionGeneration, processIncarnation: 'pc', ownerIncarnation: 'owner' },
+      })); });
+    act(() => { root.render(<Provider store={store}><Probe id="tm-1" engine={engine} generation={1} /></Provider>); });
+    act(() => { engine.mark({ seen: true, kind: 'local' }); setSsh('tm-1', true); });
+    observe('running', 1, 1);
+    expect(shown('tm-1')).toBe(true);
+    // Another terminal's ended launch must not hide this terminal's chip.
+    observe('ended', 1, 2, 'tm-2');
+    expect(shown('tm-1')).toBe(true);
+    observe('ended', 1, 2);
+    expect(shown('tm-1')).toBe(false);
+    observe('running', 2, 1);
+    expect(shown('tm-1')).toBe(true);
+  });
+
   it('shows for a hooked local shell with ssh in front, and hides when the host sends a mark', () => {
     const engine = new FakeEngine();
     render(<Probe id="tm-1" engine={engine} generation={1} />);

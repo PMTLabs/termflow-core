@@ -28,7 +28,8 @@ pub(crate) fn new_nonce() -> String {
 }
 
 const WSL_REFUSAL: &str = "SSH connections launch in a native shell; WSL default profile not supported yet";
-const HOST_REFUSAL: &str = "SSH readiness adapter: this pty-host does not support SSH prompt registration; restart or update the terminal host";
+// The terminal-create commands carry string errors; this refusal is a wire code.
+const HOST_REFUSAL: &str = "PtyHostOutdated";
 
 pub(crate) fn validate_create(
     connection_id: Option<&str>, executable: Option<&str>, args: Option<&[String]>,
@@ -78,6 +79,20 @@ fn adapter_error(error: std::io::Error) -> String {
 
 pub(crate) fn require_host_registration(opted_in: bool, capable: bool) -> Result<(), String> {
     if opted_in && !capable { Err(HOST_REFUSAL.into()) } else { Ok(()) }
+}
+
+/// Adds context to a host spawn error, except the host refusal: the renderer matches that code
+/// exactly, so a prefix would turn its actionable copy back into "Failed to start shell".
+pub(crate) fn spawn_error(context: &str, error: String) -> String {
+    if error == HOST_REFUSAL { error } else { format!("{context}: {error}") }
+}
+
+#[cfg(test)]
+#[test]
+fn spawn_error_keeps_the_host_refusal_code_exact() {
+    let refusal = require_host_registration(true, false).unwrap_err();
+    assert_eq!(spawn_error("SSH readiness host spawn failed", refusal), "PtyHostOutdated");
+    assert_eq!(spawn_error("elevated spawn failed", "boom".into()), "elevated spawn failed: boom");
 }
 
 /// Retire unused helpers automatically; once a spawn might have reached a

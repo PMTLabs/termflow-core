@@ -28,7 +28,7 @@ export function SshSecretPrompt({ view, onSubmit, onCancel }: SecretPromptProps)
       <div className="ssh-prompt-body">
         <h3>{view.secretKind === 'passphrase' ? 'Unlock SSH key' : 'SSH password'}</h3>
         <p>{target ? `${target.hop === 'jump' ? 'Jump host' : 'Target'}: ${target.user}@${target.host}:${target.port}` : 'SSH authentication'}</p>
-        <p>{view.secretKind === 'passphrase' ? 'The app unlocks the key locally. The passphrase is not sent to the server or typed into the terminal.' : 'The app channel signs in separately. This credential is never typed into the terminal.'}</p>
+        <p>{view.secretKind === 'passphrase' ? 'The app unlocks the key for its own connection. ssh in the terminal will ask for the passphrase again; the app never types it there.' : 'The app channel signs in separately. This credential is never typed into the terminal.'}</p>
         {warning && <p role="status">{reason}</p>}
         {fieldError && <p id={errorId} role="alert" className="ssh-prompt-error">{fieldError}</p>}
         <label>{view.secretKind === 'passphrase' ? 'Passphrase' : 'Password'}<input type="password" autoComplete="off" aria-invalid={fieldError ? true : undefined} aria-describedby={fieldError ? errorId : undefined} value={secret} readOnly={pending} onChange={e => setSecret(e.target.value)} /></label>

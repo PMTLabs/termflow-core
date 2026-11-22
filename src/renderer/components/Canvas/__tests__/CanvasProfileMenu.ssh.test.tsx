@@ -135,8 +135,10 @@ test('bookmark_event_updates_both_open_menus', () => {
   act(() => { replaceSaved([saved('two', { bookmarked: true })]); });
   for (const menu of [dropdown(), canvasMenu()]) {
     expect(menu.textContent).not.toContain('one.example');
-    expect(button('two', menu)).toBeTruthy();
-    expect(button('All SSH Connections…', menu)).toBeTruthy();
+    for (const label of ['two', 'All SSH Connections…']) {
+      expect(button(label, menu).textContent).toContain('⌁');
+      expect(button(label, menu).textContent).not.toContain('↗');
+    }
   }
   expect(launch).not.toHaveBeenCalled();
 });

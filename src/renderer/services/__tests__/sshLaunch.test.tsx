@@ -224,7 +224,7 @@ test('missing_saved_connection_remains_unavailable_without_creating_a_shell', as
   store.dispatch(addTabTree({ tabId: 'tb-unavailable', tree: pane('ssh', { ...sentinel, connectionId: 'missing' }) }));
   store.dispatch(addTab({ id: 'tb-unavailable', title: 'Unavailable', shellType: defaultShell.id, icon: '' }));
   await act(async () => { render(); await flush(); });
-  expect(element.textContent).toContain('This saved SSH connection is unavailable.');
+  expect(element.textContent).toContain('This saved SSH connection was deleted. Pick another from SSH Connections.');
   expectPaneTags(Object.values(store.getState().panes.treesByTabId), {
     'tm-ssh': { ...sentinel, connectionId: 'missing' },
   });

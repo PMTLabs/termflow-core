@@ -19,6 +19,16 @@ const stageCopy: Record<LaunchSnapshot['stage'], string> = {
   error: 'SSH launch failed.',
 };
 
+export function sshLaunchEndReason(error?: LaunchSnapshot['error']): string | undefined {
+  switch (error?.code) {
+    case 'SshExitedBeforeConnecting': return 'SSH exited before connecting. Check the terminal output above for the reason.';
+    case 'TransportClosed': return 'The local terminal connection closed. Reconnect to try again.';
+    // No reason code (an ordinary ssh exit carries no status yet, backlog 023): point at the terminal.
+    case undefined: return 'The reason, if any, is in the terminal output above. Reconnect to try again.';
+    default: return error?.message;
+  }
+}
+
 export interface SshLaunchNoticeProps {
   snapshot?: LaunchSnapshot;
   view?: SshSessionView;
@@ -50,7 +60,7 @@ export function SshLaunchNotice(props: SshLaunchNoticeProps) {
     ? (sessionReason ? { message: sessionReason, code: sessionCode } : snapshot.error)
     : snapshot?.error?.message ? snapshot.error
       : stage === 'blocked' || stage === 'error' ? { message: sessionReason, code: sessionCode } : undefined;
-  const reason = shown?.message;
+  const reason = stage === 'ended' ? sshLaunchEndReason(snapshot?.error) : shown?.message;
   const cancel = () => { if (snapshot) props.onCancel(snapshot.attempt); };
   const reconnect = stage === 'ended' || ((stage === 'typed' || stage === 'running') && currentView?.state === 'disconnected');
   return <section className="ssh-launch-notice" aria-label="SSH launch">
