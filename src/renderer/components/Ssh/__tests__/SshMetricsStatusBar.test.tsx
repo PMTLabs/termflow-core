@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import panes, { focusPane, movePaneWithinTab, selectSshHiddenMetrics, setActiveTabId, setPaneTree, setSshHiddenMetrics } from '../../../store/slices/panesSlice';
-import sshSession, { sshLaunchReducer as sshLaunch, sshLaunchObserved, sshMetricsArmed, sshMetricsDisarmed, sshMetricsSampled, sshOwnersChanged, sshSessionObserved } from '../../../store/slices/sshSessionSlice';
+import sshSession, { sshAttachmentResolved, sshLaunchReducer as sshLaunch, sshLaunchObserved, sshMetricsArmed, sshMetricsDisarmed, sshMetricsSampled, sshOwnersChanged, sshSessionObserved } from '../../../store/slices/sshSessionSlice';
 import ssh from '../../../store/slices/sshSlice';
 import ui from '../../../store/slices/uiSlice';
 import { taggedTree } from '../../../__testFixtures__/sshPaneCensus';
@@ -228,4 +228,44 @@ test('F3 resumes via the verified lease, starts with a fresh baseline, and never
   await act(flush);
   expect(resume).toHaveBeenCalledTimes(2);
   expect(bar().textContent).not.toContain(reason);
+});
+
+const RESTORED = 'n/a (Not available for a session restored from before TermFlow restarted)';
+const visibleValues = () => [...bar().querySelectorAll<HTMLElement>('.ssh-metrics-value')];
+test('restored_reattached_pane_reports_metrics_unavailable_not_disconnected', () => {
+  const h = setup();
+  act(() => h.dispatch(sshAttachmentResolved({ terminalId: A, connectionId: 'saved', reattachedProcessId: 'pc-old' })));
+  h.render(<SshMetricsStatusBar terminalId={A} />);
+  const state = bar().querySelector<HTMLElement>('.ssh-metrics-state')!;
+  expect(state.textContent).toBe('○ Metrics unavailable');
+  expect(state.title).toBe('Metrics unavailable — Not available for a session restored from before TermFlow restarted');
+  const shown = visibleValues().map(v => v.dataset.metric as typeof SSH_METRIC_KEYS[number]);
+  expect(shown.length).toBeGreaterThan(1);
+  expect(visibleValues().map(v => [v.dataset.metric, v.textContent, v.title])).toEqual(shown.map(k => [k,
+    k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved · n/a` : `${SSH_METRIC_LABELS[k]}: n/a`,
+    k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved (configured) · ${RESTORED}` : `${SSH_METRIC_LABELS[k]}: ${RESTORED}`]));
+  expect(bar().textContent).not.toMatch(/…|—|Collecting first sample|Disconnected/);
+  open();
+  expect(row('Copy all metrics').disabled).toBe(true);
+  expect(row('Reconnect')).toBeUndefined();
+  expect(row('Resume metrics')).toBeUndefined();
+});
+
+test('fresh_unconnected_pane_without_reattach_keeps_disconnected_dashes', () => {
+  const h = setup(); h.render(<SshMetricsStatusBar terminalId={A} />);
+  expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('○ Disconnected');
+  expect(bar().textContent).toContain('RAM: —');
+  expect(bar().textContent).not.toContain('n/a');
+});
+
+test('restored_pane_resumes_normal_flow_once_an_app_session_is_observed', () => {
+  const h = setup();
+  act(() => h.dispatch(sshAttachmentResolved({ terminalId: A, connectionId: 'saved', reattachedProcessId: 'pc-old' })));
+  h.render(<SshMetricsStatusBar terminalId={A} />);
+  expect(bar().textContent).toContain('Metrics unavailable');
+  act(() => h.session('connected', 1, A));
+  expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('○ Collecting first sample');
+  expect(bar().textContent).toContain('RAM: …');
+  act(() => h.publish(sample(44, A)));
+  expect(bar().textContent).toContain('3.2KB/s');
 });

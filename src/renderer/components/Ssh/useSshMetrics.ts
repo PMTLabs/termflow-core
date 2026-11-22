@@ -43,6 +43,14 @@ export function useSshMetrics(terminalId: string) {
   const launch = useSelector((s: RootState) => selectSshLaunch(s, terminalId));
   const session = observed?.connectionId === connectionId ? observed : undefined;
   const ended = launch?.stage === 'ended' && launch.sessionGeneration === session?.generation;
+  // D57: a reattached shell whose SSH session predates this renderer has no app session.
+  // Same predicate as OwnedSshLaunchNotice's restored strip: the attachment is recorded for
+  // this connection and nothing newer (session or launch) has been observed since.
+  const reattached = useSelector((s: RootState) => {
+    const pane = s.sshSession.byTerminal[terminalId];
+    return !!pane?.reattachedProcessId && pane.connectionId === connectionId;
+  });
+  const restored = reattached && !session && !launch;
   const sample = useSelector((s: RootState) => selectSshMetricsSample(s.sshSession, terminalId));
   const paused = useSelector((s: RootState) => selectSshMetricsPause(s.sshSession, terminalId));
   const unavailable = useSelector((s: RootState) => selectSshMetricsUnavailable(s.sshSession, terminalId));
@@ -88,5 +96,5 @@ export function useSshMetrics(terminalId: string) {
     if (!result.ok) dispatch(addToast({ type: 'error', message: result.error.message }));
   }
 
-  return { identity, hidden, sample: !ended && session?.state === 'connected' ? sample : undefined, session, ended, paused, unavailable, delayed, setPreference, copy, resume, reconnect };
+  return { identity, hidden, sample: !ended && session?.state === 'connected' ? sample : undefined, session, ended, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect };
 }

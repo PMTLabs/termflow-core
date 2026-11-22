@@ -10,16 +10,18 @@ const SESSION_LABELS = {
   connecting: 'Connecting', 'needs-secret': 'Waiting for credentials', 'needs-hostkey': 'Waiting for host key approval',
   connected: 'Connected', disconnected: 'Disconnected', error: 'SSH error',
 };
+// Matches the D57 restored-session strip, which owns the "Open a new SSH tab" action.
+const RESTORED_REASON = 'Not available for a session restored from before TermFlow restarted';
 
 export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { terminalId: string; isTabActive?: boolean }) {
-  const { identity, hidden, sample, session, ended, paused, unavailable, delayed, setPreference, copy, resume, reconnect } =
+  const { identity, hidden, sample, session, ended, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect } =
     useSshMetrics(terminalId);
   const [menu, setMenu] = useState<{ x: number; y: number; terminalId: string } | null>(null);
   const bar = useRef<HTMLDivElement>(null);
   const connected = !ended && session?.state === 'connected';
   const canResume = connected && paused !== null;
   const canReconnect = ended || canResume || session?.state === 'disconnected' || session?.state === 'error';
-  const status = !connected ? (ended ? 'SSH session ended' : session ? SESSION_LABELS[session.state] : 'Disconnected')
+  const status = !connected ? (ended ? 'SSH session ended' : session ? SESSION_LABELS[session.state] : restored ? 'Metrics unavailable' : 'Disconnected')
     : paused ?? (unavailable ? 'Metrics unavailable' : sample ? 'Connected' : delayed ? 'Metrics delayed' : 'Collecting first sample');
   const waiting = connected && !canResume && !delayed && !unavailable;
   const visible = SSH_METRIC_KEYS.filter(key => !hidden.includes(key));
@@ -68,12 +70,13 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
       }}>
       {!!visible.length && <>
         <span className={`ssh-metrics-state${sample ? ' is-live' : ''}`}
-          title={[status, connected ? unavailable : session?.reason].filter(Boolean).join(' — ')}>
+          title={[status, connected ? unavailable : restored ? RESTORED_REASON : session?.reason].filter(Boolean).join(' — ')}>
           <span aria-hidden="true">{sample ? '●' : '○'}</span> {status}
         </span>
         {visible.map(key => {
           const value = sample ? formatSshMetric(sample.metrics, key)
             : unavailable && connected && !canResume ? { text: 'n/a', detail: `n/a (${unavailable})` }
+            : restored ? { text: 'n/a', detail: `n/a (${RESTORED_REASON})` }
             : { text: waiting ? '…' : '—', detail: status };
           const label = SSH_METRIC_LABELS[key];
           const identityOnly = key === 'host' && !sample;
