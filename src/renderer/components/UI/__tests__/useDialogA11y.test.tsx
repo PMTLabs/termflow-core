@@ -5,7 +5,7 @@
  * helpers that hold the real logic of the dialog-a11y primitive. The hook
  * itself is thin glue over these helpers.
  */
-import { isTypingTarget, getFocusable, matchMnemonic } from '../useDialogA11y';
+import { isTypingTarget, getFocusable, matchMnemonic, recoverStrandedFocus } from '../useDialogA11y';
 import { splitMnemonic } from '../Mnemonic';
 
 describe('isTypingTarget', () => {
@@ -109,5 +109,60 @@ describe('splitMnemonic', () => {
     expect(splitMnemonic('Done', 'x')).toBeNull();
     expect(splitMnemonic('Done', 'do')).toBeNull();
     expect(splitMnemonic('Done', '')).toBeNull();
+  });
+});
+
+// P068-1: a failed Apply in the SSH Permissions dialog disabled the focused field while pending.
+// Focus fell to <body>, outside the container's key handlers, so Escape no longer closed the modal.
+describe('recoverStrandedFocus', () => {
+  const mount = (html: string, tabindex = true) => {
+    const dialog = document.createElement('div');
+    if (tabindex) dialog.setAttribute('tabindex', '-1');
+    dialog.innerHTML = html;
+    document.body.appendChild(dialog);
+    return dialog;
+  };
+  afterEach(() => { document.body.innerHTML = ''; });
+
+  it('moves focus from <body> back to the container after the focused field is disabled', () => {
+    const dialog = mount('<input id="uid" /><button id="apply">Apply</button>');
+    const uid = dialog.querySelector<HTMLInputElement>('#uid')!;
+    uid.focus();
+    expect(document.activeElement).toBe(uid);
+    // A browser drops focus to <body> when `pending` disables the focused field; jsdom keeps it,
+    // so model the browser: blur, then disable.
+    uid.blur();
+    uid.disabled = true;
+    expect(document.activeElement).toBe(document.body);
+
+    expect(recoverStrandedFocus(dialog)).toBe(dialog);
+    expect(document.activeElement).toBe(dialog);
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it('falls back to the first focusable control when the container is not focusable', () => {
+    const dialog = mount('<input id="a" disabled /><button id="b">ok</button>', false);
+    expect(recoverStrandedFocus(dialog)?.id).toBe('b');
+    expect(document.activeElement?.id).toBe('b');
+  });
+
+  it('never steals focus from an element that is focused, inside or outside the dialog', () => {
+    const outside = document.createElement('input');
+    document.body.appendChild(outside);
+    const dialog = mount('<button id="in">in</button>');
+    outside.focus();
+    expect(recoverStrandedFocus(dialog)).toBeNull();
+    expect(document.activeElement).toBe(outside);
+    dialog.querySelector<HTMLButtonElement>('#in')!.focus();
+    expect(recoverStrandedFocus(dialog)).toBeNull();
+    expect(document.activeElement?.id).toBe('in');
+  });
+
+  it('does nothing for a detached or missing container', () => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('tabindex', '-1');
+    expect(recoverStrandedFocus(dialog)).toBeNull();
+    expect(recoverStrandedFocus(null)).toBeNull();
+    expect(document.activeElement).toBe(document.body);
   });
 });

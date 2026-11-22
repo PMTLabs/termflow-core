@@ -18,6 +18,7 @@ const cases = [
   ['fsOpen', request, 'ssh_fs_open'],
   ['fsOpenWith', request, 'ssh_fs_open_with'],
   ['fsInsertPath', request, 'ssh_fs_insert_path'],
+  ['fsEditDismiss', { ...target, editId: 'edit-1' }, 'ssh_fs_edit_dismiss'],
   ['fsEditStop', { ...target, editId: 'edit-1' }, 'ssh_fs_edit_stop'],
   ['fsEditList', { ...target, path: '.' }, 'ssh_fs_edit_list'],
 ] as const;

@@ -1,8 +1,9 @@
 .ssh-pane-shell { position:relative; display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; color:var(--text-primary); background:var(--bg-primary); }
-/* Notices OVERLAY the reserved layout: a session state change (connecting, a reason, an edit
-   warning) must never add a row and resize the terminal grid (SIGWINCH on every reconnect). */
-.ssh-pane-chrome { position:absolute; top:0; left:0; right:0; z-index:5; max-height:100%; overflow:auto; }
-.ssh-pane-chrome:empty { display:none; }
+/* Keep in sync with SSH_PANE_CHROME_H. Plan 070 must add it to its frozen Canvas envelope. */
+.ssh-pane-chrome { position:relative; z-index:5; display:flex; align-items:center; gap:6px; padding:0 6px; flex:none; height:36px; box-sizing:border-box; }
+.ssh-pane-chrome > [role="status"] { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ssh-pane-chrome > button { flex:none; white-space:nowrap; }
+.ssh-pane-popover { position:absolute; z-index:5; top:100%; left:0; width:min(100%, 520px); max-height:min(50vh, 360px); box-sizing:border-box; overflow:auto; padding:8px; background:var(--bg-secondary); border:1px solid var(--border-color); overflow-wrap:anywhere; }
 .ssh-pane-body { display:flex; flex:1; min-width:0; min-height:0; }
 .ssh-browser { flex:0 1 260px; width:260px; max-width:40%; min-width:0; box-sizing:border-box; overflow:auto; border-right:1px solid var(--border-color); }
 .ssh-browser.collapsed { flex:0 1 30px; width:30px; max-width:min(30px, 40%); overflow:hidden; }

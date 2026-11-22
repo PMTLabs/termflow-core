@@ -30,6 +30,7 @@ export function createSshBridge(invoke: Invoke, listen: Listen): SshBridgeApi & 
     fsOpen: input => invoke('ssh_fs_open', { ...input }),
     fsOpenWith: input => invoke('ssh_fs_open_with', { ...input }),
     fsInsertPath: input => invoke('ssh_fs_insert_path', { ...input }),
+    fsEditDismiss: input => invoke('ssh_fs_edit_dismiss', { ...input }),
     fsEditStop: input => invoke('ssh_fs_edit_stop', { ...input }),
     fsEditList: input => invoke('ssh_fs_edit_list', { ...input }),
     onFsEditState: listener => listen<EditNotice>('ssh-fs:edit-state', event => listener(event.payload)),
@@ -47,6 +48,6 @@ export const browserSshBridge: SshBridgeApi & SshLaunchApi = {
   fsCreate: desktopFilesOnly, fsRename: desktopFilesOnly, fsDelete: desktopFilesOnly,
   fsChmod: desktopFilesOnly, fsChown: desktopFilesOnly, fsDownload: desktopFilesOnly,
   fsOpen: desktopFilesOnly, fsOpenWith: desktopFilesOnly, fsInsertPath: desktopFilesOnly,
-  fsEditStop: desktopFilesOnly, fsEditList: desktopFilesOnly,
+  fsEditDismiss: desktopFilesOnly, fsEditStop: desktopFilesOnly, fsEditList: desktopFilesOnly,
   onFsEditState: desktopFilesOnly, onFsCwd: desktopFilesOnly,
 };

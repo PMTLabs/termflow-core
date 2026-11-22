@@ -564,3 +564,19 @@ async fn stale_generation_between_recursive_mutations_stops() {
     assert_eq!(fs::read(b.path("dir/second")).unwrap(), b"B");
     f.registry.shutdown().await;
 }
+
+// P068-2: the renderer prefixes FsError.path itself, so an unchanged failure's message is the
+// detail alone: no repeated path, no internal operation name ("list on …", "create on …").
+#[test]
+fn unchanged_message_is_the_detail_without_operation_or_path() {
+    let err = super::error("list", "/tmp/x", FsCode::NotFound, FsOutcome::Unchanged, "Remote path not found.");
+    assert_eq!(err.message, "Remote path not found.");
+    assert_eq!(err.path, "/tmp/x");
+    assert_eq!(err.operation, "list");
+    let denied = super::error("chown", "/tmp/x", FsCode::PermissionDenied, FsOutcome::Unchanged, "ignored");
+    assert_eq!(denied.message, "Permission denied. Nothing was changed.");
+    for outcome in [FsOutcome::Partial, FsOutcome::Unknown] {
+        let other = super::error("rename", "/tmp/x", FsCode::Io, outcome, "Detail.");
+        assert!(!other.message.contains("/tmp/x") && !other.message.contains("rename"), "{}", other.message);
+    }
+}

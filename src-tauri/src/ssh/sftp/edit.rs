@@ -318,6 +318,27 @@ impl EditRegistry {
         Ok(EditStop { retained: local_path.is_some(), local_path })
     }
 
+    pub(crate) fn dismiss_retained(&self, terminal: &str, path: &str, id: Uuid) -> Result<(), FsError> {
+        const OP: &str = "editDismiss";
+        validate(OP, path, true)?;
+        let failure = || error(OP, path, FsCode::Io, FsOutcome::Unchanged,
+            "Could not dismiss the retained edit.");
+        let mut retained = self.retained.lock().unwrap();
+        let notice = retained.get(&id)
+            .filter(|notice| notice.terminal_id == terminal && notice.path == path)
+            .ok_or_else(failure)?;
+        let dir = notice.local_path.as_deref().and_then(Path::parent).ok_or_else(failure)?;
+        ensure_real_dir(dir).map_err(|_| failure())?;
+        // Recovery only reads job.json. Never remove or move the editor copy or its directory.
+        match fs::remove_file(dir.join(RECORD)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure()),
+        }
+        retained.remove(&id);
+        Ok(())
+    }
+
     fn check_open(&self, path: &str) -> Result<(), FsError> {
         if self.shutdown.is_cancelled() {
             return Err(error(OP, path, FsCode::Cancelled, FsOutcome::Unchanged, "Edit registry is shutting down."));

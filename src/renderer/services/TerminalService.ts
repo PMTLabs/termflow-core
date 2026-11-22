@@ -8,6 +8,7 @@ import { reattachPromptGate } from './reattachGate';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
 import { isAdminUacCancelled } from './adminUacCancelled';
+import { sshAttachmentResolved } from '../store/slices/sshSessionSlice';
 import { clearZoom } from '../store/slices/zoomSlice';
 import { reassertOwnerAfterSpawn } from './paneOwnership';
 import { reassertLabelAfterSpawn } from './terminalLabelSync';
@@ -417,6 +418,7 @@ export class TerminalServiceClass {
       // reattach seed is present even for a hookless shell and is staged before
       // create resolves. Claim it here before publishing the process to any mount.
       let freshSsh = false;
+      let reattached = admission.status !== 'Create' && admission.status !== 'Inert';
       if (sshLaunchConnectionId && attemptPi && admission.status === 'Create') {
         try {
           const seed = await this.api().takeReattachPromptHook?.(processId);
@@ -424,6 +426,7 @@ export class TerminalServiceClass {
           if (seed) {
             this.stashPromptGate(terminalId, reattachPromptGate(seed.promptHook, seed.atPrompt));
             this.markReattachedSession(terminalId);
+            reattached = true;
           }
           freshSsh = seed === null;
         } catch {
@@ -432,6 +435,11 @@ export class TerminalServiceClass {
         }
       }
       if (attemptPi) protocol.setRestoreResolved(attemptPi);
+      if (sshLaunchConnectionId) {
+        (window as any).__REDUX_STORE__?.dispatch(sshAttachmentResolved({
+          terminalId, connectionId: sshLaunchConnectionId, reattachedProcessId: reattached ? processId : undefined,
+        }));
+      }
       this.bindCreated(terminalId, processId, owningTabId);
 
       if (freshSsh && sshLaunchConnectionId && attemptPi) {

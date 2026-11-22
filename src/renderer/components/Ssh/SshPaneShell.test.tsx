@@ -54,8 +54,10 @@ test('inline prompts do not steal or restore sibling focus and refusals render o
     expect(document.activeElement).toBe(sibling);
   }
   act(() => root.render(<SshPaneShell {...props} view={{ ...view('error'), reason: 'Refused', hostKey: { ...view('error').hostKey!, changed: true } }} />));
+  expect(container.querySelector('.ssh-prompt')).toBeNull();
+  act(() => container.querySelector<HTMLButtonElement>('[aria-label="SSH notice details"]')!.click());
   expect(container.querySelectorAll('.ssh-prompt')).toHaveLength(1);
-  expect(container.textContent!.split('SSH host key refused')).toHaveLength(2); // refusal renders once
+  expect(container.querySelector('.ssh-prompt')!.textContent).toContain('SSH host key refused');
   expect(container.textContent).not.toContain('SSH disconnected');
   expect(container.querySelector('[data-action=cancel]')).toBeNull();
   const warning = 'Connected; password was not saved (Remember unavailable).';
@@ -64,6 +66,28 @@ test('inline prompts do not steal or restore sibling focus and refusals render o
   act(() => root.render(<SshPaneShell {...props} view={{ ...view('connected'), reason: warning }} />));
   expect(container.textContent).toContain(warning);
   sibling.remove();
+});
+
+test('opening the details popover keeps focus on the prompt field it contains', () => {
+  const props = { terminal: <div />, browserCollapsed: false, onBrowserCollapsedChange: jest.fn(),
+    onSecret: jest.fn(async () => {}), onTrust: jest.fn(async () => {}), onCancel: jest.fn() };
+  act(() => root.render(<SshPaneShell {...props} view={view('needs-secret')} />));
+  const invoker = container.querySelector<HTMLButtonElement>('[aria-label="SSH notice details"]')!;
+  invoker.focus();
+  act(() => invoker.click());
+  const popover = container.querySelector('.ssh-pane-popover')!;
+  expect(popover.querySelector('.ssh-prompt')!.contains(document.activeElement)).toBe(true);
+  expect(document.activeElement).not.toBe(popover);
+});
+
+test('non-interactive SSH presentation keeps the reserved row empty', () => {
+  const props = { terminal: <div />, browserWidth: 220, browserCollapsed: false,
+    onBrowserCollapsedChange: jest.fn(), onSecret: jest.fn(async () => {}),
+    onTrust: jest.fn(async () => {}), onCancel: jest.fn() };
+  act(() => root.render(<SshPaneShell {...props} view={view('needs-secret')} interactive={false} />));
+  const row = container.querySelector('.ssh-pane-chrome')!;
+  expect(row.outerHTML).toBe('<div class="ssh-pane-chrome"></div>');
+  expect(row.nextElementSibling?.className).toBe('ssh-pane-body');
 });
 
 test('two-hop prompts retain pending focus, chain, and restore only inside their scope', async () => {

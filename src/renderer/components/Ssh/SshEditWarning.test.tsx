@@ -2,7 +2,7 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { openSettingsTab } from '../../services/openSettings';
-import { SshEditWarning } from './SshEditWarning';
+import { SshEditWarning, displayLocalPath } from './SshEditWarning';
 import type { EditStatus, SshFileApi } from './sshFileTypes';
 
 jest.mock('../../services/openSettings', () => ({ openSettingsTab: jest.fn() }));
@@ -17,6 +17,7 @@ function bridge(edits: EditStatus[]) {
   const api = {
     onFsEditState: jest.fn(async () => unlisten), onFsCwd: jest.fn(async () => unlisten),
     fsEditList: jest.fn(async () => edits), fsOpen: jest.fn(), fsOpenWith: jest.fn(),
+    fsEditDismiss: jest.fn(async () => {}),
     fsEditStop: jest.fn(async () => ({ retained: true, localPath: edit.localPath })),
   };
   return { api, files: api as unknown as SshFileApi, unlisten };
@@ -58,7 +59,23 @@ test('ssh_edit_warning_shows_retained_path_and_stop', async () => {
   expect(api.fsEditStop.mock.calls).toEqual([[{ terminalId: edit.terminalId, path: active.path, editId: active.editId }]]);
   expect(container.textContent).toContain('/remote/active — paused (retained)');
   expect(container.querySelectorAll('code')[1].textContent).toBe(edit.localPath);
-  expect(container.querySelector('button')).toBeNull();
+  expect(container.querySelector('[aria-label^="Stop editing"]')).toBeNull();
+  const dismiss = container.querySelector<HTMLButtonElement>('button[aria-label="Dismiss /remote/file (keeps the local copy)"]')!;
+  await act(async () => { dismiss.click(); });
+  expect(api.fsEditDismiss.mock.calls).toEqual([[{ terminalId: edit.terminalId, path: edit.path, editId: edit.editId }]]);
+  expect(container.textContent).not.toContain('/remote/file — conflict');
+  expect(container.querySelectorAll('li')).toHaveLength(1);
+});
+
+test('local_copy_is_shown_without_the_windows_verbatim_prefix', async () => {
+  // P068-6: the backend canonicalizes the edit root; the UI must not show `\\?\`.
+  const retained = { ...edit, state: 'conflict', retained: true, localPath: '\\\\?\\C:\\Users\\u\\edits\\a.txt' };
+  const { files } = bridge([retained]);
+  await act(async () => { root.render(<SshEditWarning terminalId={edit.terminalId} api={files} />); });
+  expect(container.querySelector('code')?.textContent).toBe('C:\\Users\\u\\edits\\a.txt');
+  expect(displayLocalPath('\\\\?\\UNC\\srv\\share\\a.txt')).toBe('\\\\srv\\share\\a.txt');
+  expect(displayLocalPath('/private/copy')).toBe('/private/copy');
+  expect(displayLocalPath('C:\\plain')).toBe('C:\\plain');
 });
 
 test('needs_editor_routes_to_existing_terminal_setting_and_cancelled_is_silent', async () => {

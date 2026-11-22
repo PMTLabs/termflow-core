@@ -132,15 +132,12 @@ fn same_path(a: &Path, b: &Path) -> bool {
 pub(super) struct Tracker {
     seen: Option<(Identity, Instant)>,
     running: Option<Identity>,
-    observed_start: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Observation { Wait, Running, Exited }
 
 impl Tracker {
-    pub(super) fn observed_start(&self) -> bool { self.observed_start }
-
     pub(super) fn running(&self) -> Option<Identity> { self.running }
 
     pub(super) fn sample(&mut self, sample: &Sample, now: Instant, may_start: bool) -> Observation {
@@ -154,7 +151,6 @@ impl Tracker {
             self.seen = None;
             return Observation::Wait;
         };
-        self.observed_start = true;
         match self.seen {
             Some((seen, since)) if seen == child => {
                 if now.saturating_duration_since(since) >= CONFIRM_FOR {

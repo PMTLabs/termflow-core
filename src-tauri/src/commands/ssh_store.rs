@@ -26,6 +26,7 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_fs_open,
             $crate::commands::ssh_fs_open_with,
             $crate::commands::ssh_fs_edit_stop,
+            $crate::commands::ssh_fs_edit_dismiss,
             $crate::commands::ssh_fs_edit_list,
             $crate::commands::ssh_fs_mkdir, $crate::commands::ssh_fs_create,
             $crate::commands::ssh_fs_rename, $crate::commands::ssh_fs_delete,

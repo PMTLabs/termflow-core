@@ -2,6 +2,9 @@
 // The real store pulls TerminalContainer -> tauri-bridge; cut that chain like the pane transfer tests.
 jest.mock('@termflow/terminal-core', () => ({ DEFAULT_THEME: {}, terminalCache: new Map() }));
 jest.mock('../TerminalContainer', () => ({ clearTabPanes: jest.fn() }));
+import path from 'path';
+import { readSource } from '../../utils/readSource';
+import { SSH_PANE_CHROME_H } from './SshPaneShell';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
@@ -12,7 +15,7 @@ import type { SshSessionView } from '../../types/ssh';
 import { SshBrowserPaneShell } from './SshBrowserPaneShell';
 import { SshFileBrowser } from './SshFileBrowser';
 import { readReconnectCoordinator, readSshLaunchState, type LaunchSnapshot, type SshPaneTag } from './ssh066Contract';
-import type { CwdEvent, EditOpen, FsRequest, RemoteListing, RemoteStat } from './sshFileTypes';
+import type { CwdEvent, EditNotice, EditOpen, FsRequest, RemoteListing, RemoteStat } from './sshFileTypes';
 import { writeClipboardText } from '../../utils/clipboard';
 import { terminalService } from '../../services/TerminalService';
 
@@ -40,6 +43,7 @@ function deferred<T>() {
 }
 
 function createBridge() {
+  let editListener: ((event: EditNotice) => void) | undefined;
   let cwd: ((event: CwdEvent) => void) | undefined;
   return {
     fsList: jest.fn(async ({ path, expectedGeneration }: FsRequest) => listing(path, expectedGeneration)),
@@ -55,7 +59,9 @@ function createBridge() {
     fsOpenWith: jest.fn(async (_request: FsRequest): Promise<EditOpen> => ({ state: 'cancelled' })),
     fsDownload: jest.fn(async (_request: FsRequest) => ({ status: 'cancelled' as const })),
     fsInsertPath: jest.fn(async (_request: FsRequest) => ({ written: true })),
-    onFsEditState: jest.fn(async () => () => {}), fsEditList: jest.fn(async () => []),
+    onFsEditState: jest.fn(async (cb: (event: EditNotice) => void) => { editListener = cb; return () => { editListener = undefined; }; }),
+    emitEdit(event: EditNotice) { editListener?.(event); },
+    fsEditList: jest.fn(async () => []),
     onFsCwd: jest.fn(async (cb: (event: CwdEvent) => void) => { cwd = cb; return () => { cwd = undefined; }; }),
     emit(path: string, sessionGeneration = 1) { cwd?.({ terminalId, path, sessionGeneration, host: 'remote' }); },
   };
@@ -119,6 +125,8 @@ test('real_shell_composition_has_one_host_one_reconnect', async () => {
     await act(async () => { observe(session, snapshot(1, 'ended')); shell(session); });
     expect(container.querySelectorAll('.terminal-display')).toHaveLength(1);
     expect(container.querySelector('.terminal-display')).toBe(host);
+    expect(button('Reconnect')).toBeUndefined();
+    if (session.state === 'disconnected') act(() => button('Details').click());
     expect([...container.querySelectorAll('button')].filter(b => b.textContent === 'Reconnect')).toHaveLength(session.state === 'disconnected' ? 1 : 0);
   }
   expect(container.textContent).toContain('Stale');
@@ -127,7 +135,70 @@ test('real_shell_composition_has_one_host_one_reconnect', async () => {
   act(() => shell(view('disconnected', 1, 3)));
   expect(button('Expand').closest('aside')?.classList.contains('collapsed')).toBe(true);
   expect(container.querySelector('.terminal-display')).toBe(host);
+  act(() => button('Details').click());
   expect([...container.querySelectorAll('button')].filter(b => b.textContent === 'Reconnect')).toHaveLength(1);
+});
+
+test('SSH notice strip CSS reserves one fixed in-flow row', () => {
+  const css = readSource(path.join(__dirname, 'SshPaneShell.css'));
+  const row = css.match(/\.ssh-pane-chrome\s*\{([^}]+)\}/)![1];
+  expect(row).not.toMatch(/position:\s*(absolute|fixed)|(?:min|max)-height:/);
+  expect(row).toMatch(/box-sizing:\s*border-box/);
+  expect(row).toMatch(/flex:\s*none/);
+  expect(row).toContain(`height:${SSH_PANE_CHROME_H}px;`);
+  expect(css).not.toMatch(/\.ssh-pane-chrome:empty/);
+});
+
+test('three SSH edits cannot cover toolbar; zero to three to zero preserves the host layout', async () => {
+  await act(async () => shell(view('connected')));
+  const chrome = container.querySelector('.ssh-pane-chrome')!;
+  const host = container.querySelector('.ssh-terminal-host')!;
+  const layout = (el: Element) => [el.className, el.getAttribute('style')];
+  const baseline = [layout(chrome), layout(host)];
+  const edits = [1, 2, 3].map(n => ({
+    terminalId, editId: `edit-${n}`, path: `/home/file-${n}`, state: 'watching' as const, sessionGeneration: 1,
+  }));
+  const expectStable = () => {
+    expect(container.querySelector('.ssh-pane-chrome')).toBe(chrome);
+    expect(container.querySelector('.ssh-terminal-host')).toBe(host);
+    expect([layout(chrome), layout(host)]).toEqual(baseline);
+  };
+  act(() => edits.forEach(edit => api.emitEdit(edit)));
+  expectStable();
+  const body = chrome.nextElementSibling!;
+  expect(body.className).toBe('ssh-pane-body');
+  for (const control of [button('Refresh'), pathBox(), [...container.querySelectorAll('label')].find(label => label.textContent?.includes('Follow cd'))?.control]) {
+    expect(control).toBeTruthy();
+    expect(body.contains(control!)).toBe(true);
+  }
+  expect(container.querySelector('.ssh-pane-popover')).toBeNull();
+  expect(chrome.textContent).toContain('/home/file-3 — watching');
+  expect(chrome.textContent).toContain('+2 more');
+  act(() => button('+2 more').click());
+  expect(container.querySelectorAll('.ssh-pane-popover li')).toHaveLength(3);
+  expectStable();
+  act(() => button('Close SSH notices').click());
+  act(() => edits.forEach(edit => api.emitEdit({ ...edit, state: 'stopped' })));
+  expectStable();
+  expect(chrome.textContent).toBe('');
+});
+
+test('SSH notice popover opens explicitly and restores focus on Escape and outside click', async () => {
+  await act(async () => shell(view('connected')));
+  act(() => api.emitEdit({ terminalId, editId: 'edit-1', path: '/home/file', state: 'watching', sessionGeneration: 1 }));
+  const dialog = () => container.querySelector<HTMLElement>('[role="dialog"][aria-label="SSH notices"]');
+  const invoker = button('Details');
+  expect(dialog()).toBeNull();
+  act(() => invoker.click());
+  expect(dialog()?.textContent).toContain('/home/file');
+  act(() => dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  expect(dialog()).toBeNull();
+  expect(document.activeElement).toBe(invoker);
+  act(() => invoker.click());
+  // An outside click closes without pulling focus back: the user moved it on purpose.
+  act(() => { pathBox().focus(); pathBox().click(); });
+  expect(dialog()).toBeNull();
+  expect(document.activeElement).toBe(pathBox());
 });
 
 test('collapse_only_patches_target_tag_and_never_hidden_metrics', async () => {
@@ -274,6 +345,7 @@ test('shell_reconnect_displays_coordinator_error_without_using_fallback', async 
   const reconnect = jest.fn(async () => ({ ok: false as const, error: { code: 'NotAtPrompt', message: 'Return to the local prompt to reconnect' } }));
   jest.mocked(readReconnectCoordinator).mockReturnValue(reconnect);
   await act(async () => { observe(view('connected', 1, 2), snapshot(1, 'ended')); shell(view('connected', 1, 2), fallback); });
+  act(() => button('Details').click());
   await act(async () => button('Reconnect').click());
   expect(reconnect).toHaveBeenCalledWith(terminalId); expect(fallback).not.toHaveBeenCalled();
   expect(container.textContent).toContain('Return to the local prompt to reconnect');
@@ -553,7 +625,10 @@ test('open_result_reaches_the_shell_edit_warning', async () => {
   api.fsOpen.mockResolvedValueOnce({ state: 'needsEditor' });
   await act(async () => shell(view('connected')));
   await choose('Open');
+  expect(button('Open editor settings')).toBeUndefined();
+  act(() => button('Details').click());
   expect(button('Open editor settings')).toBeDefined();
+  act(() => button('Close SSH notices').click());
   await choose('Open with…');
   expect(button('Open editor settings')).toBeUndefined();
 });

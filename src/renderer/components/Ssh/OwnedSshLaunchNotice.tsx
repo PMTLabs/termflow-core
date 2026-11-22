@@ -10,7 +10,9 @@ import { reconnectSshTerminal } from '../../services/sshLaunch';
 import { sshLaunchFailure, staleSshLaunch } from '../../services/sshLaunchAttempt';
 import { watchSshLaunch } from '../../services/sshLaunchGate';
 import type { LaunchAttemptRef, LaunchSnapshot, SshPromptReceipt } from '../../types/ssh';
-import { SshLaunchNotice } from './SshLaunchNotice';
+import { launchSshInTab } from '../../services/sshPicker';
+import { addToast } from '../../store/slices/uiSlice';
+import { SshLaunchNotice, SshLaunchStrip } from './SshLaunchNotice';
 
 interface Props {
   terminalId: string;
@@ -21,7 +23,9 @@ interface Props {
 }
 
 export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, connectionId }: Props) {
-  const view = useSelector((state: RootState) => state.sshSession.byTerminal[terminalId]?.session);
+  const pane = useSelector((state: RootState) => state.sshSession.byTerminal[terminalId]);
+  const view = pane?.session;
+  const reattached = pane?.connectionId === connectionId && pane?.reattachedProcessId === processId;
   const summary = useSelector((state: RootState) => selectSshLaunch(state, terminalId));
   const surface = useSurfaceHost(terminalId);
   const [binding, setBinding] = useState<{ owner: PaneCapture; snapshot: LaunchSnapshot }>();
@@ -105,7 +109,14 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
   // Keep the strip while waiting for adoption, but never show stale controls.
   const current = snapshot?.attempt.processIncarnation === processId && (view?.generation ?? 0) <= snapshot.attempt.sessionGeneration
     ? snapshot : undefined;
-  const notice = <SshLaunchNotice snapshot={current} view={view} failure={failure} retrying={retrying}
+  const notice = reattached && !current && !summary
+    ? <SshLaunchStrip status="This SSH session continued from before TermFlow restarted. The terminal still works; files and status aren't available for it.">
+      <button type="button" className="au-btn" onClick={() => {
+        const error = launchSshInTab(connectionId);
+        if (error) store.dispatch(addToast({ message: error, type: 'warning' }));
+      }}>Open a new SSH tab</button>
+    </SshLaunchStrip>
+    : <SshLaunchNotice snapshot={current} view={view} failure={failure} retrying={retrying}
     onCancel={cancel} onReconnect={reconnect}
     onTrust={async receipt => {
       requireCurrentPrompt(receipt);
