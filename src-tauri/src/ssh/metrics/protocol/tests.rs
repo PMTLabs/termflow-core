@@ -79,7 +79,7 @@ const UBUNTU_FIELDS: Option<[&str; 7]> = Some([
     "732604.51 16584995.26",
     "3.98 3.72 3.35 1/3221 2139206",
 ]);
-const ALPINE_MEM_TOTAL: Option<&str> = None;
+const ALPINE_MEM_TOTAL: Option<&str> = Some("MemTotal:       49327760 kB");
 // nfs.txt is DERIVED, NOT CAPTURED (leader ruling D55): the real Ubuntu envelope
 // with a modeled mount table; see fixtures/README.md.
 const NFS_LOCAL_IDENTITIES: &[(&str, &str, &str)] = &[
