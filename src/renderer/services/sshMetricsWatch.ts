@@ -29,6 +29,9 @@ interface Mount {
 }
 const clock = (): MetricsClock => ({ wall: Date.now(), mono: performance.now() });
 const HEARTBEAT_MS = 250;
+// Leave room for an in-flight collection and the following collection to finish
+// before the admitting fence expires, even when their durations differ.
+const RENEW_AFTER_MS = 1000;
 const SUSPENDED_MS = 1000;
 const noop = () => {};
 
@@ -95,10 +98,10 @@ class MetricsWatch {
   async resume(terminalId: string): Promise<boolean> {
     const mount = this.mounts.get(terminalId);
     if (!mount?.connected || !mount.issued || !this.current(mount)) return false;
+    this.invalidate(mount, false);
     const epoch = mount.epoch;
     if (mount.busy) await mount.busy;
     if (!this.current(mount) || mount.epoch !== epoch || mount.busy) return false;
-    this.invalidate(mount, false);
     return this.request(mount, true);
   }
 
@@ -169,9 +172,19 @@ class MetricsWatch {
       this.store.dispatch(sshMetricsControlled(control));
       if (!this.current(mount) || mount.epoch !== epoch) return false;
       const now = clock();
+      if (this.checkSuspension(now)) return false;
       if (metricsClockChanged(start, now) || now.mono - start.mono >= SSH_METRICS_MAX_AGE || document.hidden) {
         mount.trustWall = false;
-        mount.needsFence = true;
+        this.invalidate(mount, true);
+        return false;
+      }
+      const pane = this.pane(terminalId);
+      const previous = pane?.metricsFence;
+      const changedClock = (previous && metricsClockChanged(previous, now))
+        || (pane?.metricsReading && metricsClockChanged(pane.metricsReading.fence, now));
+      if (changedClock || (previous && now.mono - previous.mono >= SSH_METRICS_MAX_AGE)) {
+        if (changedClock) mount.trustWall = false;
+        this.invalidate(mount, true);
         return false;
       }
       const stampLag = now.wall - receipt.sampleFloor;
@@ -195,11 +208,14 @@ class MetricsWatch {
     if (!mount?.connected || document.hidden || this.disposed) return;
     const now = clock();
     if (this.checkSuspension(now)) return;
-    const fence = this.pane(mount.terminalId)?.metricsFence;
+    const pane = this.pane(mount.terminalId);
+    const fence = pane?.metricsFence;
     if (!fence) return;
-    if (now.mono - fence.mono >= SSH_METRICS_MAX_AGE || metricsClockChanged(fence, now)
+    const changedClock = metricsClockChanged(fence, now)
+      || (!!pane.metricsReading && metricsClockChanged(pane.metricsReading.fence, now));
+    if (now.mono - fence.mono >= SSH_METRICS_MAX_AGE || changedClock
       || (fence.trustWall && sample.sampledAt > fence.sampleFloor && sample.sampledAt > now.wall)) {
-      if (metricsClockChanged(fence, now) || (sample.sampledAt > fence.sampleFloor && sample.sampledAt > now.wall)) mount.trustWall = false;
+      if (changedClock || (sample.sampledAt > fence.sampleFloor && sample.sampledAt > now.wall)) mount.trustWall = false;
       this.invalidate(mount, true);
       this.kick(mount);
       return;
@@ -247,12 +263,17 @@ class MetricsWatch {
     for (const mount of this.mounts.values()) {
       const pane = this.pane(mount.terminalId);
       const fence = pane?.metricsFence;
-      if (fence && (now.mono - fence.mono >= SSH_METRICS_MAX_AGE || metricsClockChanged(fence, now))) {
-        if (metricsClockChanged(fence, now)) mount.trustWall = false;
+      const changedClock = (fence && metricsClockChanged(fence, now))
+        || (pane?.metricsReading && metricsClockChanged(pane.metricsReading.fence, now));
+      if (fence && (now.mono - fence.mono >= SSH_METRICS_MAX_AGE || changedClock)) {
+        if (changedClock) mount.trustWall = false;
         this.invalidate(mount, true);
         this.kick(mount);
       } else if (pane?.metricsReading && now.mono >= pane.metricsReading.deadline) {
         this.store.dispatch(sshMetricsExpired({ terminalId: mount.terminalId, mono: now.mono }));
+      } else if (fence && pane?.metricsReading && pane.metricsControl?.pausedReason == null
+        && mount.connected && !mount.busy && !document.hidden && now.mono - fence.mono >= RENEW_AFTER_MS) {
+        void this.request(mount, false);
       }
     }
     this.updateTimer();

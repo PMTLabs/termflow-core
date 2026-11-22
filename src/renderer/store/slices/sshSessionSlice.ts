@@ -8,10 +8,10 @@ export interface MetricsClock { mono: number; wall: number }
 export interface MetricsFence extends MetricsClock {
   consumerId: string; generation: number; sampleFloor: number; trustWall: boolean;
 }
-interface MetricsReading { sample: SshMetricsSample; deadline: number }
+interface MetricsReading { sample: SshMetricsSample; deadline: number; fence: MetricsFence }
 export interface SshPaneState {
   connectionId: string; session?: SshSessionView; reattachedProcessId?: string; metrics?: Record<string, unknown>; files?: unknown[]; browserPath?: string;
-  metricsFence?: MetricsFence; metricsReading?: MetricsReading; metricsLastStamp?: number;
+  metricsFence?: MetricsFence; metricsPreviousFences?: MetricsFence[]; metricsReading?: MetricsReading; metricsLastStamp?: number;
   metricsControl?: SshMetricsControl; metricsUnavailable?: string; metricsDelayed?: boolean;
 }
 
@@ -23,6 +23,7 @@ export function compareMetricsControl(a: SshMetricsControl, b?: SshMetricsContro
 }
 function disarmMetrics(pane: SshPaneState) {
   delete pane.metricsFence;
+  delete pane.metricsPreviousFences;
   delete pane.metricsReading;
 }
 function reconcileMetricsControl(pane: SshPaneState, control: SshMetricsControl) {
@@ -92,17 +93,28 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
     const control = { terminalId, generation: receipt.generation, pauseSeq: receipt.pauseSeq, pausedReason: receipt.pausedReason };
     if (compareMetricsControl(control, pane.metricsControl) < 0) return;
     reconcileMetricsControl(pane, control);
+    const previous = pane.metricsFence;
+    if (previous?.consumerId === fence.consumerId && previous.generation === fence.generation) {
+      // Keep only the overlapping window: in-flight collections may predate the newest floor.
+      pane.metricsPreviousFences = [previous, ...(pane.metricsPreviousFences ?? [])]
+        .filter(candidate => fence.mono - candidate.mono < SSH_METRICS_MAX_AGE);
+    } else {
+      disarmMetrics(pane);
+    }
     pane.metricsFence = fence;
     delete pane.metricsUnavailable;
   },
   sshMetricsSampled(state, { payload }: PayloadAction<{ sample: SshMetricsSample; now: MetricsClock; consumerId: string }>) {
     const { sample, now, consumerId } = payload;
     const pane = state.byTerminal[sample.terminalId];
-    const fence = pane?.metricsFence;
-    if (pane?.session?.state !== 'connected' || !fence || fence.consumerId !== consumerId || fence.generation !== pane.session.generation
+    const current = pane?.metricsFence;
+    if (pane?.session?.state !== 'connected' || !current || current.consumerId !== consumerId || current.generation !== pane.session.generation
       || pane.metricsControl?.pausedReason != null || !Number.isSafeInteger(sample.sampledAt)
-      || sample.sampledAt <= fence.sampleFloor || sample.sampledAt <= (pane.metricsLastStamp ?? -Infinity)
-      || metricsClockChanged(fence, now)) return;
+      || sample.sampledAt <= (pane.metricsLastStamp ?? -Infinity) || metricsClockChanged(current, now)
+      || now.mono - current.mono >= SSH_METRICS_MAX_AGE) return;
+    const fence = [current, ...(pane.metricsPreviousFences ?? [])].find(candidate => sample.sampledAt > candidate.sampleFloor
+      && now.mono - candidate.mono < SSH_METRICS_MAX_AGE && !metricsClockChanged(candidate, now));
+    if (!fence) return;
     const age = now.wall - sample.sampledAt;
     if (fence.trustWall && (age < 0 || age >= SSH_METRICS_MAX_AGE)) return;
     const deadline = Math.min(fence.mono + SSH_METRICS_MAX_AGE,
@@ -110,7 +122,7 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
     if (now.mono >= deadline) return;
     delete pane.metricsDelayed;
     pane.metricsLastStamp = sample.sampledAt;
-    pane.metricsReading = { sample, deadline };
+    pane.metricsReading = { sample, deadline, fence };
   },
   sshMetricsExpired(state, { payload }: PayloadAction<{ terminalId: string; mono: number }>) {
     const pane = state.byTerminal[payload.terminalId];
@@ -129,9 +141,9 @@ export function selectSshMetricsSample(state: SshSessionsState, terminalId: stri
   const fence = pane?.metricsFence;
   const reading = pane?.metricsReading;
   if (pane?.session?.state !== 'connected' || fence?.generation !== pane.session.generation || !fence || !reading
-    || pane.metricsControl?.pausedReason != null || reading.sample.sampledAt <= fence.sampleFloor
-    || now.mono >= reading.deadline || metricsClockChanged(fence, now)
-    || (fence.trustWall && (reading.sample.sampledAt > now.wall || now.wall - reading.sample.sampledAt >= SSH_METRICS_MAX_AGE))) return undefined;
+    || pane.metricsControl?.pausedReason != null || reading.sample.sampledAt <= reading.fence.sampleFloor
+    || now.mono >= reading.deadline || metricsClockChanged(reading.fence, now) || metricsClockChanged(fence, now)
+    || (reading.fence.trustWall && (reading.sample.sampledAt > now.wall || now.wall - reading.sample.sampledAt >= SSH_METRICS_MAX_AGE))) return undefined;
   return reading.sample;
 }
 export const selectSshMetricsPause = (state: SshSessionsState, id: string) =>

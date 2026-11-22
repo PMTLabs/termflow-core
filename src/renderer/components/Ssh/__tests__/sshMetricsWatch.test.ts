@@ -85,6 +85,66 @@ function setup(override?: SshMetricsAPI, eventsReady = Promise.resolve()) {
   };
 }
 
+test('real_stall_still_goes_delayed_at_the_admitted_deadline', async () => {
+  const h = setup(); retainSshMetrics(A); await flush();
+  await advance(50); h.emit(25);
+  const deadline = h.state().byTerminal[A].metricsReading!.deadline;
+  await advance(deadline - mono - 1);
+  expect(h.live()).toBeDefined();
+  expect(h.state().byTerminal[A].metricsDelayed).toBeFalsy();
+  expect(h.watch.mock.calls.length).toBeGreaterThan(1);
+  await advance(1);
+  expect(h.live()).toBeUndefined();
+  expect(h.state().byTerminal[A].metricsDelayed).toBe(true);
+});
+
+test('renewal_never_revives_old_or_queued_samples', async () => {
+  const h = setup(); retainSshMetrics(A); await flush();
+  const originalFloor = wall;
+  await advance(50); h.emit(25);
+  const original = h.state().byTerminal[A].metricsReading;
+  await advance(1200);
+  expect(h.watch).toHaveBeenCalledTimes(2);
+  h.emit(99, originalFloor - 1); h.emit(99, originalFloor);
+  expect(h.state().byTerminal[A].metricsReading).toEqual(original);
+  expect(h.live()?.sampledAt).toBe(originalFloor + 50);
+  // A collection began before the second watch, but returns after it.
+  h.emit(30, originalFloor + 990);
+  expect(h.live()?.sampledAt).toBe(originalFloor + 990);
+  expect(h.state().byTerminal[A].metricsReading?.deadline).toBe(original?.deadline);
+  await advance(1000);
+  expect(h.watch).toHaveBeenCalledTimes(3);
+  h.emit(99, originalFloor); h.emit(99, originalFloor + 990);
+  expect(h.live()).toEqual(reading(originalFloor + 990, 30));
+  expect(h.state().byTerminal[A].metricsReading?.deadline).toBe(original?.deadline);
+});
+
+test.each(['resume', 'local resume', 'pause', 'clock', 'generation'])
+('newer_control_or_clock_change_during_renewal_still_drops_the_reading (%s)', async change => {
+  const h = setup(); retainSshMetrics(A); await flush();
+  const late = deferred<Awaited<ReturnType<SshMetricsAPI['sshMetricsWatch']>>>();
+  h.watch.mockReturnValueOnce(late.promise);
+  await advance(50); h.emit(25);
+  await advance(1200);
+  expect(h.watch).toHaveBeenCalledTimes(2);
+  expect(h.live()).toBeDefined();
+  const oldFloor = wall;
+  let localResume: Promise<boolean> | undefined;
+  if (change === 'local resume') localResume = resumeSshMetrics(A);
+  else if (change === 'clock') { wall += 251; h.emit(99); }
+  else if (change === 'generation') h.session('connected', 2);
+  else h.control(1, change === 'pause' ? TIMEOUT : null);
+  expect(h.live()).toBeUndefined();
+  expect(h.state().byTerminal[A].metricsReading).toBeUndefined();
+  late.resolve({ sampleFloor: oldFloor, generation: 1, pauseSeq: 0, pausedReason: null });
+  if (change === 'pause' || change === 'resume') {
+    h.watch.mockResolvedValue({ sampleFloor: wall, generation: 1, pauseSeq: 1, pausedReason: change === 'pause' ? TIMEOUT : null });
+  }
+  await flush();
+  if (localResume) expect(await localResume).toBe(true);
+  expect(h.live()).toBeUndefined();
+});
+
 // Mutation: sshMetricsWatch.ts invokeFence readiness/receipt gate (and slice's !fence check).
 test('sample_before_watch_reply_is_dropped', async () => {
   const subscribed = deferred<void>();

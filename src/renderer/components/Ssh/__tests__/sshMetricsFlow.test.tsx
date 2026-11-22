@@ -10,7 +10,7 @@ import { sanitizePaneTreeSshFields } from '../../../services/sshPanePersistence'
 import { installSshSessionStartup } from '../../../services/sshSessionEvents';
 import { useSshMetricsWatch } from '../../../services/sshMetricsWatch';
 import panes, { selectSshHiddenMetrics, setActiveTabId, setPaneTree, type PaneNode } from '../../../store/slices/panesSlice';
-import sshSession, { sshLaunchReducer as sshLaunch } from '../../../store/slices/sshSessionSlice';
+import sshSession, { selectSshMetricsSample, sshLaunchReducer as sshLaunch } from '../../../store/slices/sshSessionSlice';
 import ssh from '../../../store/slices/sshSlice';
 import ui from '../../../store/slices/uiSlice';
 import type { SshMetricsSample, SshSessionView } from '../../../types/ssh';
@@ -95,6 +95,51 @@ afterEach(async () => {
   disposeBridgeListeners(); mockListeners.clear();
   host.remove(); jest.restoreAllMocks(); jest.clearAllMocks();
   delete (globalThis as any).IS_REACT_ACT_ENVIRONMENT;
+});
+
+test.each([50, 900, 1500].flatMap(duration => [0, 300].map(latency => [duration, latency])))
+('steady_two_second_samples_never_blank_across_fence_renewals (%d ms collection, %d ms IPC)', async (duration, latency) => {
+  jest.useFakeTimers({ doNotFake: ['performance', 'Date'] });
+  try {
+    const [baseline, rates] = snapshots();
+    const initialWall = wall;
+    let completed = 0;
+    const started: number[] = [];
+    const invoke = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation(async (...args) => {
+      if (args[0] !== 'ssh_metrics_watch') return invoke(...args);
+      started.push(mono);
+      const receipt = { generation: session.generation, sampleFloor: wall, pauseSeq: 0, pausedReason: null };
+      if (completed && latency) await new Promise(resolve => setTimeout(resolve, latency));
+      completed++;
+      return receipt;
+    });
+    const store = await setup();
+    const bar = host.querySelector('.ssh-metrics-status-bar')!;
+    act(() => bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
+    for (let elapsed = 50; elapsed <= 30_000; elapsed += 50) {
+      await act(async () => {
+        advance(50);
+        jest.advanceTimersByTime(50);
+        if ((elapsed - duration) % 2000 === 0 && elapsed >= duration) {
+          publish({ ...(elapsed === duration ? baseline : rates), sampledAt: initialWall + elapsed - duration + 1 });
+        }
+      });
+      if (elapsed < 2000 + duration) continue;
+      expect({ elapsed, live: !!selectSshMetricsSample(store.getState().sshSession, terminalId) }).toEqual({ elapsed, live: true });
+      expect(bar.textContent).not.toContain('Metrics delayed');
+      expect([...host.querySelectorAll('[data-metric]')].map(el => el.textContent).join(' ')).not.toMatch(/[—…]/);
+      const copy = [...document.querySelectorAll<HTMLButtonElement>('.context-menu button')]
+        .find(button => button.textContent?.includes('Copy all metrics'));
+      expect(copy?.disabled).toBe(false);
+    }
+    expect(completed - 1).toBeGreaterThanOrEqual(3);
+    expect(started.slice(1).every((start, i) => start - started[i] >= 1000)).toBe(true);
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd.startsWith('ssh_metrics_')).map(([cmd]) => cmd))
+      .toEqual(Array(duration === 1500 ? 30 : 31).fill('ssh_metrics_watch'));
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('ssh_metrics_fixture_to_bar_to_clipboard_roundtrip', async () => {
