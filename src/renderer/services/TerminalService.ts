@@ -51,7 +51,7 @@ export class TerminalServiceClass {
   // and panes another window handed over while still waiting. A handed-over pane
   // launches on its first launch query here: the move itself is the user's activation.
   private deferredSshLaunches = new Set<string>();
-  private carriedSshLaunches = new Set<string>();
+  private carriedSshLaunches = new Map<string, string>(); // terminalId -> pc
   // Keep the raw placement outcome even when its original copy leaves. A replacement
   // must wait for that work and bind its exact process, not race a Parked placement.
   private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
@@ -451,38 +451,49 @@ export class TerminalServiceClass {
       this.bindCreated(terminalId, processId, owningTabId);
 
       if (freshSsh && sshLaunchConnectionId && attemptPi) {
-        const placement = this.sshPlacement(terminalId, paneId, attemptPi, processId, sshLaunchConnectionId);
-        const launch = () => {
-          if (this.sshLaunches.get(attemptPi)?.pc === processId) return; // A carried launch already ran here.
+        const connectionId = sshLaunchConnectionId;
+        const launch = (owner: PaneCapture) => {
+          if (this.sshLaunches.get(owner)?.pc === processId) return; // A carried launch already ran here.
+          const placement = this.sshPlacement(terminalId, paneId, owner, processId, connectionId);
           const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
-          this.sshLaunches.set(attemptPi, { pc: processId, work });
+          this.sshLaunches.set(owner, { pc: processId, work });
           // Launch failure does not discard the successfully created local shell.
           void work.catch(() => {});
         };
         const store = (window as Window & { __REDUX_STORE__?: typeof rendererStore }).__REDUX_STORE__;
         if (coldRestore && store) {
           // Watch the owning tab, not the pane layout (maximize, split, etc.).
-          // Canvas has its own visibility signal for individual nodes.
+          // Canvas has its own visibility signal for individual nodes. A drag stashes the
+          // pane, and a cancelled drag re-mints its owner and rebinds the same process, so
+          // the wait follows the pane's current owner. It ends without launching only when
+          // the pane leaves this window or changes process or connection, or the page ends.
           let settled = false;
           this.deferredSshLaunches.add(terminalId);
           const check = () => {
             if (settled) return; // A nested notification can retain an older listener snapshot.
             const tabId = findTabIdByTerminalId(this.paneTrees(), terminalId);
-            const current = !!tabId && placement.current();
-            if (current && store.getState().panes.activeTabId !== tabId && !isSshCanvasVisible(terminalId)) return;
+            const stays = !!tabId && !protocol.ended && protocol === this.incarnations()
+              && this.getProcessId(terminalId) === processId
+              && findLeafByTerminalId(this.paneTrees(), terminalId)?.ssh?.connectionId === connectionId;
+            const owner = stays ? protocol.capture(terminalId, paneId) : undefined;
+            if (stays) {
+              // Stashed for a transfer, between copies, or a re-minted owner not yet rebound.
+              if (!owner || !protocol.isCurrent(terminalId, paneId, owner) || protocol.hasPendingRestore(owner)) return;
+              if (store.getState().panes.activeTabId !== tabId && !isSshCanvasVisible(terminalId)) return;
+            }
             settled = true;
             this.deferredSshLaunches.delete(terminalId);
             unsubscribeStore();
             unsubscribeCanvas();
             unsubscribeOwner();
-            if (current) launch();
+            if (owner) launch(owner);
           };
           const unsubscribeStore = store.subscribe(check);
           const unsubscribeCanvas = subscribeSshCanvasVisibility(check);
           const unsubscribeOwner = protocol.subscribe(check);
           check();
         } else {
-          launch();
+          launch(attemptPi);
         }
       }
 
@@ -526,7 +537,8 @@ export class TerminalServiceClass {
   async querySshLaunch(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted: () => boolean) {
     const placement = this.sshPlacement(terminalId, paneId, owner, pc, connectionId, mounted);
     if (!placement.current()) return;
-    if (this.carriedSshLaunches.delete(terminalId) && this.sshLaunches.get(owner)?.pc !== pc) {
+    if (this.carriedSshLaunches.get(terminalId) === pc && this.carriedSshLaunches.delete(terminalId)
+        && this.sshLaunches.get(owner)?.pc !== pc) {
       const work = observeOwnedSshLaunch(this.api(), placement, 'open');
       this.sshLaunches.set(owner, { pc, work });
       void work.catch(() => {});
@@ -834,8 +846,8 @@ export class TerminalServiceClass {
   }
 
   /** The source window never launched this carried SSH pane; launch it on its first query here. */
-  stashCarriedSshLaunch(terminalId: string): void {
-    this.carriedSshLaunches.add(terminalId);
+  stashCarriedSshLaunch(terminalId: string, pc: string): void {
+    this.carriedSshLaunches.set(terminalId, pc);
   }
 
   stashKeyboardProtocol(terminalId: string, data: KeyboardProtocolStateData | null): void {

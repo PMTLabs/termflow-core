@@ -184,7 +184,7 @@ afterEach(async () => {
 });
 afterAll(() => inputHandler.destroy());
 
-test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved'])('restored SSH launch: %s', async scenario => {
+test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cancelled'])('restored SSH launch: %s', async scenario => {
   const connection = saved('restore');
   await setup([connection]);
   const tabId = 'restore-tab';
@@ -221,10 +221,22 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved'])('rest
   expect(launchCounts()).toEqual(scenario === 'active' ? [1, 1] : [0, 0]);
   // A pane carried to another window before activation tells that window to launch it.
   expect(buildTabDetachPayload(tabId, tabId)!.terminals[0].sshLaunchDeferred).toBe(deferred ? true : undefined);
+  if (scenario === 'cancelled') {
+    // A cancelled drag re-mints the pane's owner and rebinds the same process.
+    const before = paneIncarnations.capture(id, paneId);
+    await act(async () => {
+      await paneIncarnations.cancel('tx-cancelled', [{ paneId, leaf: id, restore: true }], new Map([[id, shell.pc]]));
+    });
+    expect(paneIncarnations.capture(id, paneId)).not.toBe(before);
+    expect(launchCounts()).toEqual([0, 0]);
+  }
   if (scenario === 'moved') {
     // The receiving window's first launch query starts it, before any activation.
     await act(async () => {
-      terminalService.stashCarriedSshLaunch(id);
+      terminalService.stashCarriedSshLaunch(id, 'pc-other');
+      await terminalService.querySshLaunch(id, paneId, paneIncarnations.capture(id, paneId)!, shell.pc, connection.id, () => true);
+      expect(launchCounts()).toEqual([0, 0]); // A carried flag for another process is not this one's.
+      terminalService.stashCarriedSshLaunch(id, shell.pc);
       await terminalService.querySshLaunch(id, paneId, paneIncarnations.capture(id, paneId)!, shell.pc, connection.id, () => true);
     });
     expect(launchCounts()).toEqual([1, 1]);

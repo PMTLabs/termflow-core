@@ -478,7 +478,7 @@ async function closeWindowIfEmpty(): Promise<void> {
 function seedKeyboardProtocol(t: DetachTerminal): void {
   if (t.win32InputMode) terminalService.markReattachedSession(t.terminalId);
   if (t.keyboardProtocol) terminalService.stashKeyboardProtocol(t.terminalId, t.keyboardProtocol);
-  if (t.sshLaunchDeferred) terminalService.stashCarriedSshLaunch(t.terminalId);
+  if (t.sshLaunchDeferred) terminalService.stashCarriedSshLaunch(t.terminalId, t.processId);
 }
 
 /** Target-window handler: take the stashed payload for `token` and add it as a tab. */

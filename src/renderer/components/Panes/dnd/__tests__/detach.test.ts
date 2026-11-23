@@ -284,7 +284,7 @@ describe('detach carries the negotiated keyboard-protocol state across windows',
     expect(buildTabDetachPayload('tb-1')?.terminals[0].sshLaunchDeferred).toBeUndefined();
 
     applyDetachPayload(payload!);
-    expect(terminalService.stashCarriedSshLaunch).toHaveBeenCalledWith('tm-1');
+    expect(terminalService.stashCarriedSshLaunch).toHaveBeenCalledWith('tm-1', 'proc-tm-1');
     expect(terminalService.stashCarriedSshLaunch).toHaveBeenCalledTimes(1);
   });
 

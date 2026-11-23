@@ -303,9 +303,12 @@ export class PaneIncarnations {
   }
 
   setRestoreResolved(pi: PaneCapture): void {
+    let changed = false;
     for (const slot of this.slots.values()) {
-      if (slot.pi === pi && !slot.suppressed) slot.resolved = true;
+      if (slot.pi === pi && !slot.suppressed && !slot.resolved) { slot.resolved = true; changed = true; }
     }
+    // A deferred SSH launch (D105) waits for a re-minted owner to be rebound.
+    if (changed) this.changed();
   }
 
   isSuppressed(pi: PaneCapture): boolean {
