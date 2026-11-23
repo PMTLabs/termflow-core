@@ -99,8 +99,10 @@ describe('host-key trust on the Canvas surface', () => {
     // No path types `ssh` (or anything) from the renderer: that is 066's Rust launch coordinator.
     expect(terminalService.writeToTerminal).not.toHaveBeenCalled();
     expect(bridge.writeToTerminal).not.toHaveBeenCalled();
-    // While not connected, the Canvas status row is "—" and the browser is dimmed and disabled.
-    expect(node.querySelector('.ssh-status-text')!.textContent).toBe('—');
+    // While not connected, the Canvas status row says so once (the metrics state, not also "—", backlog 030)
+    // and the browser is dimmed and disabled.
+    expect(node.querySelector('.ssh-status-text')).toBeNull();
+    expect(node.querySelector('.ssh-metrics-state')!.classList.contains('is-live')).toBe(false);
     expect(node.querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
   });
 });
@@ -135,14 +137,15 @@ describe('file replies across a disconnect', () => {
     await act(async () => { rowButton(canvasNode(A), '/srv/a/old').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); await flush(); });
     expect(lastList(bridge)).toEqual({ terminalId: A, path: '/srv/a/old', expectedGeneration: 1 });
 
-    // Disconnect: every control is disabled, the browser dims and the status row reads "—".
+    // Disconnect: every control is disabled, the browser dims and the status row reads "Disconnected" once.
     observe({ terminalId: A, state: 'disconnected', generation: 1, revision: 2, reason: 'Connection lost' });
     await act(async () => { await flush(); });
     expect(refresh().disabled).toBe(true);
     expect(buttons(canvasNode(A), 'New folder')[0].disabled).toBe(true);
     expect(canvasNode(A).querySelector<HTMLInputElement>('input[aria-label="Remote path"]')!.disabled).toBe(true);
     expect(canvasNode(A).querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
-    expect(canvasNode(A).querySelector('.ssh-status-text')!.textContent).toBe('—');
+    expect(canvasNode(A).querySelector('.ssh-status-text')).toBeNull();
+    expect(canvasNode(A).querySelector('.ssh-metrics-state')!.textContent).toContain('Disconnected');
     expect(canvasNode(A).textContent).toContain('Remote files unavailable');
 
     // Reconnect on generation 2 (both the app channel and the launch seam).
@@ -251,7 +254,7 @@ describe('metrics status row', () => {
     expect(bar.querySelector('[data-metric=netUp]')!.textContent).toBe('—');
     act(() => { bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
     expect(buttons(document, 'Copy all metrics')[0].disabled).toBe(true);
-    expect(node.querySelector('.ssh-status-text')!.textContent).toBe('—');
+    expect(node.querySelector('.ssh-status-text')).toBeNull(); // the bar's "Disconnected" is the one marker (030)
     expect(node.querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
   });
 });
