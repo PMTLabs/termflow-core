@@ -5,8 +5,15 @@ use crate::ssh::{
 };
 use russh::{server, Channel, ChannelMsg};
 use serde_json::{json, Value};
-use std::{collections::VecDeque, fmt::Write, sync::atomic::{AtomicUsize, Ordering::SeqCst}};
-use tokio::{io::AsyncWriteExt, time::{sleep, timeout}};
+use std::{
+    collections::VecDeque,
+    fmt::Write,
+    sync::atomic::{AtomicUsize, Ordering::SeqCst},
+};
+use tokio::{
+    io::AsyncWriteExt,
+    time::{sleep, timeout},
+};
 use tokio_util::sync::CancellationToken;
 
 mod reader;
@@ -14,7 +21,7 @@ mod scheduler;
 
 const A: &str = "tm-a";
 const B: &str = "tm-b";
-const WAIT: Duration = Duration::from_secs(8);
+const WAIT: Duration = Duration::from_secs(CADENCE.as_secs() * 3 + DEADLINE.as_secs());
 const WIRE_STDOUT_CAP: usize = 1_048_576;
 const WIRE_STDERR_CAP: usize = 16_384;
 
@@ -26,7 +33,9 @@ struct Capture {
 
 impl EventSink for Capture {
     fn emit(&self, name: &'static str, event: MetricsEvent<'_>) {
-        self.events.lock().push((name, serde_json::to_value(event).unwrap()));
+        self.events
+            .lock()
+            .push((name, serde_json::to_value(event).unwrap()));
         self.changed.notify_one();
     }
 }
@@ -35,14 +44,21 @@ impl Capture {
     async fn event(&self, name: &str, index: usize) -> Value {
         timeout(WAIT, async {
             loop {
-                if let Some(value) = self.events.lock().iter()
-                    .filter(|(kind, _)| *kind == name).nth(index).map(|(_, v)| v.clone())
+                if let Some(value) = self
+                    .events
+                    .lock()
+                    .iter()
+                    .filter(|(kind, _)| *kind == name)
+                    .nth(index)
+                    .map(|(_, v)| v.clone())
                 {
                     return value;
                 }
                 self.changed.notified().await;
             }
-        }).await.unwrap_or_else(|_| panic!("missing {name}[{index}]: {:?}", self.events.lock()))
+        })
+        .await
+        .unwrap_or_else(|_| panic!("missing {name}[{index}]: {:?}", self.events.lock()))
     }
 }
 
@@ -51,7 +67,11 @@ enum Reply {
     #[default]
     Good,
     Nfs(u8),
-    WatchdogWithChild { exit: u8, ping: Arc<Notify>, pong: Arc<Notify> },
+    WatchdogWithChild {
+        exit: u8,
+        ping: Arc<Notify>,
+        pong: Arc<Notify>,
+    },
     Hang,
     Gate(Arc<Notify>),
     Exit(u32),
@@ -60,7 +80,10 @@ enum Reply {
     NoStatus,
     NoClose,
     AtCaps,
-    Flood { stdout: usize, stderr: usize },
+    Flood {
+        stdout: usize,
+        stderr: usize,
+    },
 }
 
 struct ExecStart {
@@ -78,7 +101,9 @@ struct Wire {
 }
 
 impl Wire {
-    fn count(&self) -> usize { self.starts.lock().len() }
+    fn count(&self) -> usize {
+        self.starts.lock().len()
+    }
 
     async fn started(&self, count: usize) -> Instant {
         timeout(WAIT, async {
@@ -88,21 +113,35 @@ impl Wire {
                 }
                 self.changed.notified().await;
             }
-        }).await.expect("real collector exec request")
+        })
+        .await
+        .expect("real collector exec request")
     }
 
-    fn reply(&self, channel: Channel<server::Msg>, command: &[u8], session: &mut server::Session, host: &str) -> Result<(), russh::Error> {
+    fn reply(
+        &self,
+        channel: Channel<server::Msg>,
+        command: &[u8],
+        session: &mut server::Session,
+        host: &str,
+    ) -> Result<(), russh::Error> {
         let command = std::str::from_utf8(command).unwrap();
         let (prefix, suffix) = command.rsplit_once(" || /bin/sh -c 'exit 125'").unwrap();
         assert!(suffix.is_empty());
         let (_, nonce) = prefix.rsplit_once(' ').unwrap();
-        assert_eq!(command, super::super::encode(nonce, super::super::COLLECT).unwrap());
+        assert_eq!(
+            command,
+            super::super::encode(nonce, super::super::COLLECT).unwrap()
+        );
         let ch = channel.id();
         let stopped = CancellationToken::new();
         let index = {
             let mut starts = self.starts.lock();
             let index = starts.len() as u64;
-            starts.push(ExecStart { at: Instant::now(), stopped: stopped.clone() });
+            starts.push(ExecStart {
+                at: Instant::now(),
+                stopped: stopped.clone(),
+            });
             index
         };
         self.changed.notify_one();
@@ -212,7 +251,13 @@ impl Wire {
             Reply::AtCaps => {
                 let padding = WIRE_STDOUT_CAP - valid.len();
                 let mut stdout: Vec<_> = (1..=padding)
-                    .map(|i| if i % 256 == 0 || i == padding { b'\n' } else { b'b' })
+                    .map(|i| {
+                        if i % 256 == 0 || i == padding {
+                            b'\n'
+                        } else {
+                            b'b'
+                        }
+                    })
                     .collect();
                 stdout.extend(valid);
                 for chunk in stdout.chunks(8191) {
@@ -223,7 +268,14 @@ impl Wire {
             _ => session.data(ch, valid)?,
         }
         if !matches!(reply, Reply::NoStatus) {
-            session.exit_status_request(ch, if let Reply::Exit(code) = reply { code } else { 0 })?;
+            session.exit_status_request(
+                ch,
+                if let Reply::Exit(code) = reply {
+                    code
+                } else {
+                    0
+                },
+            )?;
         }
         session.eof(ch)?;
         if !matches!(reply, Reply::NoClose) {
@@ -234,13 +286,21 @@ impl Wire {
 }
 
 // Synthetic framed readings generated from the actual request nonce. Each
-// interval advances remote uptime by 2 s, busy/idle by 10/30, RX/TX by 30/60.
+// interval advances remote uptime by CADENCE, busy/idle by 10/30, RX/TX by 30/60.
 fn frame(nonce: &str, host: &str, index: u64, nfs: u8) -> Vec<u8> {
     let prefix = format!("__TFM_{nonce}_");
     let mut body = format!("{prefix}V1_BEGIN__\n");
-    let stat = format!("cpu {} 0 0 {} 0 0 0 0\nbtime 1000", 10 + 10 * index, 100 + 30 * index);
-    let net = format!("eth0: {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0", 100 + 30 * index, 200 + 60 * index);
-    let uptime = (10 + 2 * index).to_string();
+    let stat = format!(
+        "cpu {} 0 0 {} 0 0 0 0\nbtime 1000",
+        10 + 10 * index,
+        100 + 30 * index
+    );
+    let net = format!(
+        "eth0: {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0",
+        100 + 30 * index,
+        200 + 60 * index
+    );
+    let uptime = (10 + CADENCE.as_secs() * index).to_string();
     for (key, data, exit) in [
         ("platform", "Linux", 0), ("hostname", host, 0), ("architecture", "arm64", 0),
         ("stat", &stat, 0), ("meminfo", "MemTotal: 1000 kB\nMemAvailable: 750 kB", 0),
@@ -258,7 +318,12 @@ fn frame(nonce: &str, host: &str, index: u64, nfs: u8) -> Vec<u8> {
     body.into_bytes()
 }
 
-fn server(seed: u8, user: &str, host: &'static str, replies: impl IntoIterator<Item = Reply>) -> (Server, Arc<Wire>) {
+fn server(
+    seed: u8,
+    user: &str,
+    host: &'static str,
+    replies: impl IntoIterator<Item = Reply>,
+) -> (Server, Arc<Wire>) {
     let mut server = Server::new(seed, user);
     let wire = Arc::new(Wire {
         replies: Mutex::new(replies.into_iter().collect()),
@@ -266,11 +331,15 @@ fn server(seed: u8, user: &str, host: &'static str, replies: impl IntoIterator<I
         ..Wire::default()
     });
     let copy = wire.clone();
-    server.exec_fixture = Some(Arc::new(move |ch, command, session| copy.reply(ch, command, session, host)));
+    server.exec_fixture = Some(Arc::new(move |ch, command, session| {
+        copy.reply(ch, command, session, host)
+    }));
     (server, wire)
 }
 
-fn rig(replies: impl IntoIterator<Item = Reply>) -> (Fixture, Arc<Wire>, Arc<Capture>, Arc<SamplerRegistry>) {
+fn rig(
+    replies: impl IntoIterator<Item = Reply>,
+) -> (Fixture, Arc<Wire>, Arc<Capture>, Arc<SamplerRegistry>) {
     let (server, wire) = server(1, "alice", "sample-host", replies);
     let f = Fixture::new(server, vec![hop("c-a", "alice")], true);
     let capture = Arc::new(Capture::default());
@@ -281,9 +350,22 @@ fn rig(replies: impl IntoIterator<Item = Reply>) -> (Fixture, Arc<Wire>, Arc<Cap
 async fn connect(f: &Fixture, id: &str) -> u64 {
     let opened = f.registry.open(id, "c-a", false, || true).unwrap();
     let prompt = wait_state(&f.registry, id, false, SessionState::NeedsSecret).await;
-    f.registry.submit_secret(id, false, Some(opened.generation), prompt.prompt_id.as_deref(), f.server.password.clone(), false).unwrap();
-    f.registry.on_launch_lifecycle(id, opened.generation, 1, LaunchState::Running, None).unwrap();
-    wait_state(&f.registry, id, false, SessionState::Connected).await.generation
+    f.registry
+        .submit_secret(
+            id,
+            false,
+            Some(opened.generation),
+            prompt.prompt_id.as_deref(),
+            f.server.password.clone(),
+            false,
+        )
+        .unwrap();
+    f.registry
+        .on_launch_lifecycle(id, opened.generation, 1, LaunchState::Running, None)
+        .unwrap();
+    wait_state(&f.registry, id, false, SessionState::Connected)
+        .await
+        .generation
 }
 
 async fn reconnect(f: &Fixture) -> u64 {
@@ -292,7 +374,8 @@ async fn reconnect(f: &Fixture) -> u64 {
 }
 
 fn admit(worker: &Terminal, f: &Fixture, capture: &Capture, wall: u64) -> Tick {
-    let Action::Collect(tick) = worker.plan_tick(&f.registry, capture, Instant::now(), || wall) else {
+    let Action::Collect(tick) = worker.plan_tick(&f.registry, capture, Instant::now(), || wall)
+    else {
         panic!("expected eligible tick");
     };
     tick
@@ -300,7 +383,9 @@ fn admit(worker: &Terminal, f: &Fixture, capture: &Capture, wall: u64) -> Tick {
 
 async fn deliver(worker: &Terminal, f: &Fixture, capture: &Capture, tick: &Tick) {
     let (result, nonce) = collect(&f.registry, &worker.id, tick.lease.clone()).await;
-    worker.finish(&f.registry, capture, tick, classify(&result, &nonce)).unwrap();
+    worker
+        .finish(&f.registry, capture, tick, classify(&result, &nonce))
+        .unwrap();
 }
 
 fn assert_rates(value: &Value, percent: Value, up: Value, down: Value) {
@@ -312,8 +397,17 @@ fn assert_rates(value: &Value, percent: Value, up: Value, down: Value) {
     }
 }
 
-fn assert_warming(value: &Value) { assert_rates(value, Value::Null, Value::Null, Value::Null); }
-fn assert_advancing(value: &Value) { assert_rates(value, json!(25.0), json!(30.0), json!(15.0)); }
+fn assert_warming(value: &Value) {
+    assert_rates(value, Value::Null, Value::Null, Value::Null);
+}
+fn assert_advancing(value: &Value) {
+    assert_rates(
+        value,
+        json!(25.0),
+        json!(60.0 / CADENCE.as_secs_f64()),
+        json!(30.0 / CADENCE.as_secs_f64()),
+    );
+}
 
 #[tokio::test]
 async fn cached_visibility_cannot_admit_a_tick_without_a_current_census() {
@@ -322,14 +416,25 @@ async fn cached_visibility_cannot_admit_a_tick_without_a_current_census() {
     let terminal = Terminal::new(A);
     terminal.set_eligible(true).unwrap();
     let at = Instant::now();
-    assert!(matches!(terminal.plan_checked(&f.registry, &*events, at, false, wall_now_ms), Action::Wait(Some(_))));
+    assert!(matches!(
+        terminal.plan_checked(&f.registry, &*events, at, false, wall_now_ms),
+        Action::Wait(Some(_))
+    ));
     assert_eq!(wire.count(), 0);
-    let Action::Collect(tick) = terminal.plan_checked(&f.registry, &*events, at, true, wall_now_ms) else {
+    let Action::Collect(tick) = terminal.plan_checked(&f.registry, &*events, at, true, wall_now_ms)
+    else {
         panic!("fresh census must allow the eligible tick");
     };
     deliver(&terminal, &f, &events, &tick).await;
     assert_eq!(wire.count(), 1);
     f.registry.shutdown().await;
+}
+
+#[test]
+fn cadence_is_ten_seconds_and_deadline_five() {
+    assert_eq!(CADENCE, Duration::from_secs(10));
+    assert_eq!(DEADLINE, Duration::from_secs(5));
+    assert_eq!(ELIGIBILITY_WAKE, Duration::from_secs(2));
 }
 
 #[tokio::test]
@@ -347,8 +452,16 @@ async fn two_consumers_one_terminal_have_one_exec_worker() {
     assert!(second_floor_a > floor_a);
     let a = events.event(SAMPLE, 0).await;
     let b = events.event(SAMPLE, 1).await;
-    let by_id = HashMap::from([(a["terminalId"].as_str().unwrap(), a["sampledAt"].as_u64().unwrap()),
-        (b["terminalId"].as_str().unwrap(), b["sampledAt"].as_u64().unwrap())]);
+    let by_id = HashMap::from([
+        (
+            a["terminalId"].as_str().unwrap(),
+            a["sampledAt"].as_u64().unwrap(),
+        ),
+        (
+            b["terminalId"].as_str().unwrap(),
+            b["sampledAt"].as_u64().unwrap(),
+        ),
+    ]);
     assert_eq!(by_id.len(), 2);
     assert!(by_id[A] > floor_a && by_id[B] > floor_b);
     assert_eq!(wire.count(), 2);
@@ -366,42 +479,54 @@ async fn two_consumers_one_terminal_have_one_exec_worker() {
 // Pause from runtime creation so the virtual clock starts on the timer wheel's
 // millisecond grid; pausing after authentication keeps a fractional offset.
 #[tokio::test(start_paused = true)]
-async fn slow_exec_skips_ticks_never_bursts_or_overlaps() {
+async fn healthy_start_to_start_and_overruns_skip_without_bursts_or_overlap() {
     let (f, _, events, _) = rig([]);
     connect(&f, A).await;
     let worker = Arc::new(Terminal::new(A));
     worker.set_eligible(true).unwrap();
     let simulated = Arc::new(Mutex::new(VecDeque::from([
-        (3000, SessionError::OutputTooLarge), (5000, SessionError::TimedOut),
-        (1375, SessionError::Cancelled), (2401, SessionError::OutputTooLarge),
-        (0, SessionError::OutputTooLarge),
+        (CADENCE / 2, SessionError::OutputTooLarge),
+        (DEADLINE, SessionError::TimedOut),
+        (CADENCE / 2, SessionError::Cancelled),
+        (CADENCE * 2 + CADENCE / 2, SessionError::OutputTooLarge),
+        (Duration::ZERO, SessionError::OutputTooLarge),
     ])));
     let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
     let active = Arc::new(AtomicUsize::new(0));
     let runner = {
-        let (worker, sessions, events, active) = (worker.clone(), f.registry.clone(), events.clone(), active.clone());
+        let (worker, sessions, events, active) = (
+            worker.clone(),
+            f.registry.clone(),
+            events.clone(),
+            active.clone(),
+        );
         tokio::spawn(async move {
-            worker.run(&sessions, &*events, None, |_| {
-                let (ms, error) = simulated.lock().pop_front().expect("unexpected catch-up exec");
-                let (active, started) = (active.clone(), started.clone());
-                async move {
-                    assert_eq!(active.fetch_add(1, SeqCst), 0, "overlapping execs");
-                    started.send(Instant::now()).unwrap();
-                    sleep(Duration::from_millis(ms)).await;
-                    assert_eq!(active.fetch_sub(1, SeqCst), 1);
-                    (error.into(), String::new())
-                }
-            }).await;
+            worker
+                .run(&sessions, &*events, None, |_| {
+                    let (ms, error) = simulated
+                        .lock()
+                        .pop_front()
+                        .expect("unexpected catch-up exec");
+                    let (active, started) = (active.clone(), started.clone());
+                    async move {
+                        assert_eq!(active.fetch_add(1, SeqCst), 0, "overlapping execs");
+                        started.send(Instant::now()).unwrap();
+                        sleep(ms).await;
+                        assert_eq!(active.fetch_sub(1, SeqCst), 1);
+                        (error.into(), String::new())
+                    }
+                })
+                .await;
         })
     };
     let first = timeout(WAIT, starts.recv()).await.unwrap().unwrap();
     let second = timeout(WAIT, starts.recv()).await.unwrap().unwrap();
-    assert_eq!((second - first).as_millis(), 4000);
+    assert_eq!(second - first, CADENCE);
     events.event(CONTROL, 0).await; // The five-second timeout really disarms ticks.
     worker.fence(&f.registry, &*events, true).unwrap();
-    for ms in [10000, 12000, 16000] {
+    for periods in [2, 3, 6] {
         let actual = timeout(WAIT, starts.recv()).await.unwrap().unwrap();
-        assert_eq!((actual - first).as_millis(), ms);
+        assert_eq!(actual - first, CADENCE * periods);
     }
     worker.retire();
     runner.await.unwrap();
@@ -419,7 +544,10 @@ async fn disconnected_cannot_exec_or_emit_even_when_completion_is_late() {
     assert!(events.event(SAMPLE, 0).await["sampledAt"].as_u64().unwrap() > floor);
     wire.started(2).await;
     f.registry.disconnect(A, "ended");
-    assert!(matches!(f.registry.lease(A), Err(SessionError::NotConnected)));
+    assert!(matches!(
+        f.registry.lease(A),
+        Err(SessionError::NotConnected)
+    ));
     let (outcome, _) = collect(&f.registry, A, lease).await;
     assert_eq!(outcome.result, Err(SessionError::NotConnected));
     sleep(CADENCE + Duration::from_millis(100)).await;
@@ -456,15 +584,24 @@ async fn lease_recheck_blocks_emit_before_transition_observer_runs() {
     assert!(result.result.is_ok());
     f.registry.disconnect(A, "ended before observer");
     assert!(observer.has_changed().unwrap());
-    assert!(matches!(f.registry.lease(A), Err(SessionError::NotConnected)));
+    assert!(matches!(
+        f.registry.lease(A),
+        Err(SessionError::NotConnected)
+    ));
     assert_eq!(worker.state.lock().generation, Some(first_generation));
-    assert_eq!(worker.finish(&f.registry, &*events, &late, classify(&result, &nonce)), Err(SessionError::NotConnected));
+    assert_eq!(
+        worker.finish(&f.registry, &*events, &late, classify(&result, &nonce)),
+        Err(SessionError::NotConnected)
+    );
     assert_eq!(events.events.lock().len(), 1);
     let generation = reconnect(&f).await;
     assert!(generation > first_generation);
     let fresh = admit(&worker, &f, &events, 102);
     deliver(&worker, &f, &events, &fresh).await;
-    assert_eq!(worker.finish(&f.registry, &*events, &late, classify(&result, &nonce)), Err(SessionError::NotConnected));
+    assert_eq!(
+        worker.finish(&f.registry, &*events, &late, classify(&result, &nonce)),
+        Err(SessionError::NotConnected)
+    );
     assert_eq!(events.events.lock().len(), 3);
     assert_warming(&events.event(SAMPLE, 1).await);
     assert_eq!(wire.count(), 3);
@@ -478,13 +615,22 @@ async fn watch_floor_survives_backward_wall_clock_and_late_event() {
     let worker = Terminal::new(A);
     worker.set_eligible(true).unwrap();
     let old = admit(&worker, &f, &events, 1000);
-    let fence = worker.fence_at(&f.registry, &*events, false, || 50).unwrap();
+    let fence = worker
+        .fence_at(&f.registry, &*events, false, || 50)
+        .unwrap();
     deliver(&worker, &f, &events, &old).await;
     let fresh = admit(&worker, &f, &events, 51);
     deliver(&worker, &f, &events, &fresh).await;
     let late = events.event(SAMPLE, 0).await;
     let live = events.event(SAMPLE, 1).await;
-    assert_eq!((late["sampledAt"].as_u64(), fence.sample_floor, live["sampledAt"].as_u64()), (Some(1000), 1001, Some(1002)));
+    assert_eq!(
+        (
+            late["sampledAt"].as_u64(),
+            fence.sample_floor,
+            live["sampledAt"].as_u64()
+        ),
+        (Some(1000), 1001, Some(1002))
+    );
     let accept = |event: &Value| event["sampledAt"].as_u64().unwrap() > fence.sample_floor;
     assert!(!accept(&late) && accept(&live));
     assert_advancing(&live); // Fence renewal did not clear the shared baseline.
@@ -500,7 +646,10 @@ async fn resume_clears_baseline_and_samples_within_two_seconds() {
     assert_advancing(&events.event(SAMPLE, 1).await);
     let before = Instant::now();
     let fence = sampler.resume(A).unwrap();
-    assert_eq!(events.event(CONTROL, 0).await, json!({"terminalId":A,"generation":generation,"pauseSeq":1,"pausedReason":null}));
+    assert_eq!(
+        events.event(CONTROL, 0).await,
+        json!({"terminalId":A,"generation":generation,"pauseSeq":1,"pausedReason":null})
+    );
     let start = wire.started(3).await;
     // Allow local scheduler jitter; the virtual-time test pins the exact boundary.
     assert!(start - before <= CADENCE + Duration::from_millis(100));
@@ -519,21 +668,30 @@ async fn metrics_emit_name_and_complete_payload_are_exact() {
     worker.set_eligible(true).unwrap();
     let tick = admit(&worker, &f, &events, 123_456);
     deliver(&worker, &f, &events, &tick).await;
-    assert_eq!(events.events.lock()[0], ("ssh-metrics:sample", json!({
-        "terminalId": A, "sampledAt": 123456, "metrics": {
-            "host": {"available":true,"hostname":"sample-host","os":{"available":true,"name":"Test Linux 12"},"architecture":{"available":true,"name":"arm64"}},
-            "cpu":{"available":true,"percent":null,"cores":{"available":true,"count":4},"load1":{"available":true,"value":1.25}},
-            "ram":{"available":true,"usedBytes":256000,"totalBytes":1024000,"percent":25.0},
-            "netUp":{"available":true,"bytesPerSecond":null}, "netDown":{"available":true,"bytesPerSecond":null},
-            "uptime":{"available":true,"seconds":10.0}, "users":{"available":true,"count":3,"names":["alex","zoe"]},
-            "partitions":{"available":true,"mounts":[{"source":"/dev/test","mountPoint":"/","fsType":"ext4","totalBytes":102400,"usedBytes":20480,"availableBytes":76800,"usedPercent":22}]},
-            "nfs":{"available":true,"mounts":[]}
-        }
-    })));
+    assert_eq!(
+        events.events.lock()[0],
+        (
+            "ssh-metrics:sample",
+            json!({
+                "terminalId": A, "sampledAt": 123456, "metrics": {
+                    "host": {"available":true,"hostname":"sample-host","os":{"available":true,"name":"Test Linux 12"},"architecture":{"available":true,"name":"arm64"}},
+                    "cpu":{"available":true,"percent":null,"cores":{"available":true,"count":4},"load1":{"available":true,"value":1.25}},
+                    "ram":{"available":true,"usedBytes":256000,"totalBytes":1024000,"percent":25.0},
+                    "netUp":{"available":true,"bytesPerSecond":null}, "netDown":{"available":true,"bytesPerSecond":null},
+                    "uptime":{"available":true,"seconds":10.0}, "users":{"available":true,"count":3,"names":["alex","zoe"]},
+                    "partitions":{"available":true,"mounts":[{"source":"/dev/test","mountPoint":"/","fsType":"ext4","totalBytes":102400,"usedBytes":20480,"availableBytes":76800,"usedPercent":22}]},
+                    "nfs":{"available":true,"mounts":[]}
+                }
+            })
+        )
+    );
     let distinct = admit(&worker, &f, &events, 123_457);
     deliver(&worker, &f, &events, &distinct).await;
     let sample = events.event(SAMPLE, 1).await;
-    assert_eq!(sample["metrics"]["uptime"]["seconds"], json!(12.0));
+    assert_eq!(
+        sample["metrics"]["uptime"]["seconds"],
+        json!((10 + CADENCE.as_secs()) as f64)
+    );
     assert_advancing(&sample);
     let failed = admit(&worker, &f, &events, 123_458);
     deliver(&worker, &f, &events, &failed).await;
@@ -559,10 +717,15 @@ async fn renderer_snapshots() -> Vec<Value> {
         deliver(&worker, &f, &events, &tick).await;
     }
     assert_eq!(wire.count(), 2);
-    let snapshots = events.events.lock().iter().map(|(name, value)| {
-        assert_eq!(*name, SAMPLE);
-        value.clone()
-    }).collect();
+    let snapshots = events
+        .events
+        .lock()
+        .iter()
+        .map(|(name, value)| {
+            assert_eq!(*name, SAMPLE);
+            value.clone()
+        })
+        .collect();
     f.registry.shutdown().await;
     snapshots
 }
@@ -571,12 +734,17 @@ async fn renderer_snapshots() -> Vec<Value> {
 #[ignore = "regenerates the checked-in renderer fixture"]
 async fn generate_ssh_metrics_renderer_snapshots() {
     let snapshots = renderer_snapshots().await;
-    std::fs::write(renderer_fixture_path(), serde_json::to_string_pretty(&snapshots).unwrap() + "\n").unwrap();
+    std::fs::write(
+        renderer_fixture_path(),
+        serde_json::to_string_pretty(&snapshots).unwrap() + "\n",
+    )
+    .unwrap();
 }
 
 #[tokio::test]
 async fn memory_server_emits_renderer_fixture_snapshots() {
-    let expected: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(renderer_fixture_path()).unwrap()).unwrap();
+    let expected: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(renderer_fixture_path()).unwrap()).unwrap();
     assert_eq!(renderer_snapshots().await, expected);
 }
 
@@ -586,7 +754,11 @@ fn assert_unavailable(sample: &Value, reason: &str) {
     assert_eq!(metrics.len(), keys.len() + 1);
     assert_eq!(metrics["unavailableReason"], json!(reason));
     for key in keys {
-        assert_eq!(metrics[key], json!({"available":false,"reason":reason}), "{key}");
+        assert_eq!(
+            metrics[key],
+            json!({"available":false,"reason":reason}),
+            "{key}"
+        );
     }
 }
 
@@ -595,10 +767,22 @@ async fn probe_never_watches_or_execs_metrics() {
     let (f, wire, events, sampler) = rig([]);
     let probe = f.registry.probe("c-a").unwrap();
     let prompt = wait_state(&f.registry, &probe, true, SessionState::NeedsSecret).await;
-    f.registry.submit_secret(&probe, true, Some(prompt.generation), prompt.prompt_id.as_deref(), f.server.password.clone(), false).unwrap();
+    f.registry
+        .submit_secret(
+            &probe,
+            true,
+            Some(prompt.generation),
+            prompt.prompt_id.as_deref(),
+            f.server.password.clone(),
+            false,
+        )
+        .unwrap();
     wait_state(&f.registry, &probe, true, SessionState::Connected).await;
     assert_eq!(sampler.fence(&probe), Err(SessionError::NotConnected));
-    assert_eq!(sampler.set_eligible(&probe, true), Err(SessionError::NotConnected));
+    assert_eq!(
+        sampler.set_eligible(&probe, true),
+        Err(SessionError::NotConnected)
+    );
     assert_eq!(sampler.resume(&probe), Err(SessionError::NotConnected));
     assert!(sampler.workers.lock().is_empty());
     assert_eq!(wire.count(), 0);
@@ -620,24 +804,54 @@ async fn metrics_exec_samples_final_target_through_jump() {
     let f = Fixture::new(jump, vec![jump_hop, hop("c-a", "destination")], true);
     let opened = f.registry.open(A, "c-a", false, || true).unwrap();
     let first = wait_state(&f.registry, A, false, SessionState::NeedsSecret).await;
-    f.registry.submit_secret(A, false, Some(opened.generation), first.prompt_id.as_deref(), "password-bastion".into(), false).unwrap();
+    f.registry
+        .submit_secret(
+            A,
+            false,
+            Some(opened.generation),
+            first.prompt_id.as_deref(),
+            "password-bastion".into(),
+            false,
+        )
+        .unwrap();
     let second = timeout(WAIT, async {
         loop {
             let v = f.registry.state(A, false).unwrap();
             assert_ne!(v.state, SessionState::Error, "{v:?}");
-            if v.state == SessionState::NeedsSecret && v.prompt_id != first.prompt_id { break v; }
+            if v.state == SessionState::NeedsSecret && v.prompt_id != first.prompt_id {
+                break v;
+            }
             sleep(Duration::from_millis(2)).await;
         }
-    }).await.unwrap();
-    f.registry.submit_secret(A, false, Some(opened.generation), second.prompt_id.as_deref(), "password-destination".into(), false).unwrap();
-    f.registry.on_launch_lifecycle(A, opened.generation, 1, LaunchState::Running, None).unwrap();
+    })
+    .await
+    .unwrap();
+    f.registry
+        .submit_secret(
+            A,
+            false,
+            Some(opened.generation),
+            second.prompt_id.as_deref(),
+            "password-destination".into(),
+            false,
+        )
+        .unwrap();
+    f.registry
+        .on_launch_lifecycle(A, opened.generation, 1, LaunchState::Running, None)
+        .unwrap();
     wait_state(&f.registry, A, false, SessionState::Connected).await;
     let events = Arc::new(Capture::default());
     let sampler = SamplerRegistry::new(f.registry.clone(), events.clone());
     sampler.set_eligible(A, true).unwrap();
-    assert_eq!(events.event(SAMPLE, 0).await["metrics"]["host"]["hostname"], "target-gauge");
+    assert_eq!(
+        events.event(SAMPLE, 0).await["metrics"]["host"]["hostname"],
+        "target-gauge"
+    );
     assert_eq!((bastion.count(), final_host.count()), (0, 1));
-    assert_eq!(*f.server.counters.direct_addresses.lock(), [("target.test".to_owned(), 22)]);
+    assert_eq!(
+        *f.server.counters.direct_addresses.lock(),
+        [("target.test".to_owned(), 22)]
+    );
     f.registry.shutdown().await;
 }
 
@@ -649,7 +863,9 @@ async fn sync_eligibility_starts_worker_from_std_thread_without_tokio() {
         assert!(tokio::runtime::Handle::try_current().is_err());
         sampler.set_eligible(A, true).unwrap();
         sampler
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
     // Keep the owner alive until the fallback runtime produces a real sample.
     // (The registry is returned from the thread, not dropped there.)
     assert_eq!(events.event(SAMPLE, 0).await["terminalId"], A);

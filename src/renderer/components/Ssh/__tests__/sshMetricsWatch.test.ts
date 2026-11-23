@@ -3,7 +3,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { configureStore } from '@reduxjs/toolkit';
 import reducer, {
-  selectSshMetricsPause, selectSshMetricsSample, selectSshMetricsUnavailable, sshOwnersChanged, sshSessionObserved,
+  SSH_METRICS_MAX_AGE, selectSshMetricsPause, selectSshMetricsSample, selectSshMetricsUnavailable, sshOwnersChanged, sshSessionObserved,
 } from '../../../store/slices/sshSessionSlice';
 import { installSshMetricsWatch, refenceSshMetricsOnSystemResume, resumeSshMetrics, retainSshMetrics, useSshMetricsWatch } from '../../../services/sshMetricsWatch';
 import type { SshMetricsAPI, SshMetricsControl, SshMetricsSample, SshSessionView, SshState } from '../../../types/ssh';
@@ -207,10 +207,10 @@ test('disconnect_clears_immediately_even_if_cache_is_populated', async () => {
 });
 
 // Mutation: slice selector deadline or coordinator Resume invalidation/floor replacement.
-test('stale_after_five_seconds_and_resume_cannot_render_old_values', async () => {
+test('stale_after_max_age_and_resume_cannot_render_old_values', async () => {
   const h = setup(); retainSshMetrics(A); await flush();
   await advance(1); const sample = wall; h.emit(92);
-  await advance(4998); expect(h.live()).toEqual(reading(sample, 92));
+  await advance(SSH_METRICS_MAX_AGE - 2); expect(h.live()).toEqual(reading(sample, 92));
   await advance(2); expect(h.live()).toBeUndefined();
   const resumeReply = deferred<{ sampleFloor: number; generation: number; pauseSeq: number }>();
   h.resumeReceipt.mockReturnValueOnce(resumeReply.promise);
@@ -262,13 +262,14 @@ test('strictmode_and_late_watch_reply_do_not_leak_consumers', async () => {
 test('same_generation_above_floor_delayed_sample_and_burst_never_revive', async () => {
   const h = setup(); retainSshMetrics(A); await flush();
   await advance(1); const old = wall;
-  await advance(4900); h.emit(21, old); expect(h.live()).toEqual(reading(old, 21));
+  await advance(SSH_METRICS_MAX_AGE - 100); h.emit(21, old); expect(h.live()).toEqual(reading(old, 21));
   // Even before the timer runs, the action-time selector must refuse Copy.
   elapse(100); expect(h.live()).toBeUndefined();
   const late = deferred<Awaited<ReturnType<SshMetricsAPI['sshMetricsWatch']>>>();
   h.watch.mockReturnValueOnce(late.promise);
+  const watchesBeforeExpiry = h.watch.mock.calls.length;
   elapse(30_000); for (let i = 0; i < 3; i++) { h.emit(99, old + i); expect(h.live()).toBeUndefined(); }
-  await flush(); expect(h.watch).toHaveBeenCalledTimes(2);
+  await flush(); expect(h.watch).toHaveBeenCalledTimes(watchesBeforeExpiry + 1);
   const newFloor = wall;
   late.resolve({ sampleFloor: newFloor, generation: 1, pauseSeq: 0, pausedReason: null }); await flush();
   elapse(1); h.emit(22); expect(h.live()).toEqual(reading(wall, 22));

@@ -21,7 +21,8 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
-const CADENCE: Duration = Duration::from_secs(2);
+pub(super) const CADENCE: Duration = Duration::from_secs(10);
+pub(super) const ELIGIBILITY_WAKE: Duration = Duration::from_secs(2);
 const DEADLINE: Duration = Duration::from_secs(5);
 const STDOUT_CAP: usize = 1024 * 1024;
 const STDERR_CAP: usize = 16 * 1024;
@@ -122,7 +123,11 @@ impl SamplerRegistry {
     pub(crate) fn status(&self, id: &str) -> Option<(Option<u64>, bool, bool)> {
         let worker = self.existing(id)?;
         let state = worker.state.lock();
-        Some((state.generation, state.eligible && !state.retired, state.in_flight))
+        Some((
+            state.generation,
+            state.eligible && !state.retired,
+            state.in_flight,
+        ))
     }
 
     /// Apply the authoritative eligibility decision for this terminal. Callers
@@ -180,7 +185,9 @@ impl SamplerRegistry {
         let observer = self.observer.clone();
         engine_runtime().spawn(async move {
             running
-                .run(&sessions, &*events, observer.as_deref(), |lease| collect(&sessions, &running.id, lease))
+                .run(&sessions, &*events, observer.as_deref(), |lease| {
+                    collect(&sessions, &running.id, lease)
+                })
                 .await;
             if let Some(workers) = workers.upgrade() {
                 workers.lock().remove(&running.id);
@@ -256,7 +263,10 @@ impl State {
 
     fn warn(&mut self, id: &str, reason: &'static str) {
         let now = Instant::now();
-        if self.last_warning.is_none_or(|last| now - last >= Duration::from_secs(30)) {
+        if self
+            .last_warning
+            .is_none_or(|last| now - last >= Duration::from_secs(30))
+        {
             self.last_warning = Some(now);
             log::warn!("[SSH-METRICS] {id}: {reason}");
         }
@@ -397,16 +407,18 @@ impl Terminal {
         match result {
             Ok(Some(tick)) => {
                 #[cfg(test)]
-                { state.in_flight = true; }
+                {
+                    state.in_flight = true;
+                }
                 Action::Collect(tick)
             }
             Ok(None) if waking && (!visibility_checked || not_before > now) => {
                 Action::Wait(Some(not_before.max(now)))
             }
-            Ok(None) => Action::Wait(waking.then(|| now + CADENCE)),
+            Ok(None) => Action::Wait(waking.then(|| now + ELIGIBILITY_WAKE)),
             Err(_) => {
                 state.forget_telemetry();
-                Action::Wait(waking.then(|| now + CADENCE))
+                Action::Wait(waking.then(|| now + ELIGIBILITY_WAKE))
             }
         }
     }
@@ -417,10 +429,12 @@ impl Terminal {
     }
 
     async fn run<F, Fut>(
-        &self, sessions: &SessionRegistry, events: &dyn EventSink,
-        observer: Option<&dyn EligibilityObserver>, collect: F,
-    )
-    where
+        &self,
+        sessions: &SessionRegistry,
+        events: &dyn EventSink,
+        observer: Option<&dyn EligibilityObserver>,
+        collect: F,
+    ) where
         F: Fn(Arc<SshSession>) -> Fut,
         Fut: Future<Output = (ExecOutcome, String)>,
     {
@@ -485,7 +499,9 @@ impl Terminal {
     ) -> Result<(), SessionError> {
         let mut state = self.state.lock();
         #[cfg(test)]
-        { state.in_flight = false; }
+        {
+            state.in_flight = false;
+        }
         if state.retired {
             return Err(SessionError::OwnerRetired);
         }
@@ -504,7 +520,9 @@ impl Terminal {
                 (eligible.then(|| Metrics::unavailable(reason)), None)
             }
             Reading::IndeterminateRemoteWork { reason, completed } => {
-                let metrics = completed.filter(|_| eligible).map(|raw| state.reducer.reduce(raw));
+                let metrics = completed
+                    .filter(|_| eligible)
+                    .map(|raw| state.reducer.reduce(raw));
                 state.reducer.reset();
                 (metrics, Some(reason))
             }
@@ -551,7 +569,10 @@ fn next_start(start: Instant, finished: Instant) -> Instant {
 }
 
 fn wall_now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 async fn collect(
@@ -588,7 +609,9 @@ enum Reading<'a> {
         reason: &'static str,
         completed: Option<RawSample<'a>>,
     },
-    Discard { disarm: bool },
+    Discard {
+        disarm: bool,
+    },
 }
 
 fn classify<'a>(outcome: &'a ExecOutcome, nonce: &str) -> Reading<'a> {
@@ -619,7 +642,10 @@ fn classify<'a>(outcome: &'a ExecOutcome, nonce: &str) -> Reading<'a> {
 }
 
 fn paused(reason: &'static str) -> Reading<'static> {
-    Reading::IndeterminateRemoteWork { reason, completed: None }
+    Reading::IndeterminateRemoteWork {
+        reason,
+        completed: None,
+    }
 }
 
 fn classify_error(error: &SessionError) -> Reading<'static> {
@@ -631,10 +657,25 @@ fn classify_error(error: &SessionError) -> Reading<'static> {
         TransportClosed => Reading::Unavailable("Metrics transport closed"),
         MissingExitStatus => Reading::Unavailable("Metrics exit status missing"),
         Cancelled => Reading::Discard { disarm: false },
-        NotConnected | NotFound | StaleAttempt | OwnerRetired | AdmissionClosed | InvalidTarget
-        | HostKeyChanged | HostKeyRevoked | HostCertificateUnsupported | KnownHostsMalformed { .. }
-        | KnownHostsUnreadable | TrustWriteFailed | TrustAlreadyPinned | AuthRejected
-        | AgentUnavailable | IdentityUnreadable | IdentityEncryptionUnsupported | UnsupportedAuthentication | RememberUnavailable
+        NotConnected
+        | NotFound
+        | StaleAttempt
+        | OwnerRetired
+        | AdmissionClosed
+        | InvalidTarget
+        | HostKeyChanged
+        | HostKeyRevoked
+        | HostCertificateUnsupported
+        | KnownHostsMalformed { .. }
+        | KnownHostsUnreadable
+        | TrustWriteFailed
+        | TrustAlreadyPinned
+        | AuthRejected
+        | AgentUnavailable
+        | IdentityUnreadable
+        | IdentityEncryptionUnsupported
+        | UnsupportedAuthentication
+        | RememberUnavailable
         | StoreUnavailable => Reading::Discard { disarm: true },
     }
 }

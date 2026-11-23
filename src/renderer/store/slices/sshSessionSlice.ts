@@ -2,7 +2,10 @@ import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { newerSshView, SshSessionView, type LaunchSnapshot } from '../../types/ssh';
 import type { SshMetricsControl, SshMetricsSample, SshMetricsWatchReceipt } from '../../types/ssh';
 
-export const SSH_METRICS_MAX_AGE = 5000;
+// Allow one collection interval plus the full exec deadline before a sample or fence expires.
+export const SSH_METRICS_CADENCE_MS = 10_000;
+const SSH_METRICS_DEADLINE_MS = 5_000;
+export const SSH_METRICS_MAX_AGE = SSH_METRICS_CADENCE_MS + SSH_METRICS_DEADLINE_MS;
 export const SSH_METRICS_CLOCK_SKEW = 250;
 export interface MetricsClock { mono: number; wall: number }
 export interface MetricsFence extends MetricsClock {
