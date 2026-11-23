@@ -32,6 +32,7 @@ import { SshConnectionsDialogHost } from '../AllSshConnectionsDialog';
 import { OwnedSshLaunchNotice } from '../OwnedSshLaunchNotice';
 
 import { publishSshCanvasVisible } from '../sshPresentations';
+import { buildTabDetachPayload } from '../../Panes/dnd/detach';
 
 const SOURCE = 'tm-source';
 const sourceRect = { x: 45, y: 35, w: NODE_W, h: NODE_H };
@@ -183,7 +184,7 @@ afterEach(async () => {
 });
 afterAll(() => inputHandler.destroy());
 
-test.each(['background', 'active', 'attach', 'closed', 'canvas'])('restored SSH launch: %s', async scenario => {
+test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved'])('restored SSH launch: %s', async scenario => {
   const connection = saved('restore');
   await setup([connection]);
   const tabId = 'restore-tab';
@@ -207,6 +208,27 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas'])('restored SSH 
   const shell = await mountShell(connection.id);
   if (scenario === 'attach') expect(store.getState().sshSession.byTerminal[id]?.reattachedProcessId).toBe(shell.pc);
   expect(launchCounts()).toEqual(scenario === 'active' ? [1, 1] : [0, 0]);
+  const deferred = scenario !== 'active' && scenario !== 'attach';
+  // Only this pane's tab or this pane's Canvas node counts as its activation.
+  const unrelated = 'unrelated-tab';
+  await act(async () => {
+    store.dispatch(addTabTree({ tabId: unrelated, tree: { id: 'unrelated-pane', type: 'terminal', terminalId: 'tm-unrelated' } }));
+    store.dispatch(addTab({ id: unrelated, title: unrelated, shellType: profile.id, icon: '' }));
+    if (scenario !== 'active') store.dispatch(setActiveTabId(unrelated));
+    publishSshCanvasVisible('tm-unrelated', true)();
+    publishSshCanvasVisible(id, false)();
+  });
+  expect(launchCounts()).toEqual(scenario === 'active' ? [1, 1] : [0, 0]);
+  // A pane carried to another window before activation tells that window to launch it.
+  expect(buildTabDetachPayload(tabId, tabId)!.terminals[0].sshLaunchDeferred).toBe(deferred ? true : undefined);
+  if (scenario === 'moved') {
+    // The receiving window's first launch query starts it, before any activation.
+    await act(async () => {
+      terminalService.stashCarriedSshLaunch(id);
+      await terminalService.querySshLaunch(id, paneId, paneIncarnations.capture(id, paneId)!, shell.pc, connection.id, () => true);
+    });
+    expect(launchCounts()).toEqual([1, 1]);
+  }
   let retract: (() => void) | undefined;
   await act(async () => {
     if (scenario === 'closed') store.dispatch(removeTabTree(tabId));
@@ -215,6 +237,7 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas'])('restored SSH 
   });
   const expected = scenario === 'attach' || scenario === 'closed' ? [0, 0] : [1, 1];
   expect(launchCounts()).toEqual(expected);
+  if (scenario !== 'closed') expect(buildTabDetachPayload(tabId, tabId)!.terminals[0].sshLaunchDeferred).toBeUndefined();
   await act(async () => {
     retract?.();
     store.dispatch(setActiveTabId(background));

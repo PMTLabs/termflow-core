@@ -59,6 +59,9 @@ export interface DetachTerminal {
   // new window before its first refresh tick restarts at the profile default, even
   // though the source window knew exactly where it was.
   cwd?: string;
+  // A restored SSH pane the source window had not launched yet (D105: it waits
+  // for first activation). The destination launches it instead.
+  sshLaunchDeferred?: true;
 }
 
 export interface DetachPayload {

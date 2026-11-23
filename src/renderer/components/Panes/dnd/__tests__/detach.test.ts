@@ -22,6 +22,8 @@ jest.mock('../../../../services/TerminalService', () => ({
     detachTerminal: jest.fn(),
     markReattachedSession: jest.fn(),
     stashKeyboardProtocol: jest.fn(),
+    hasDeferredSshLaunch: jest.fn(() => false),
+    stashCarriedSshLaunch: jest.fn(),
   },
 }));
 
@@ -271,6 +273,19 @@ describe('detach carries the negotiated keyboard-protocol state across windows',
     mockState.panes.treesByTabId = { 'tb-1': tree };
     mockState.zoom.levels = {};
     for (const k of Object.keys(mockCacheEntries)) delete mockCacheEntries[k];
+  });
+
+  it('carries a not-yet-launched restored SSH pane so the destination launches it (D105)', () => {
+    terminalService.stashCarriedSshLaunch.mockClear();
+    terminalService.hasDeferredSshLaunch.mockImplementation((id: string) => id === 'tm-1');
+    const payload = buildTabDetachPayload('tb-1');
+    terminalService.hasDeferredSshLaunch.mockImplementation(() => false);
+    expect(payload?.terminals[0].sshLaunchDeferred).toBe(true);
+    expect(buildTabDetachPayload('tb-1')?.terminals[0].sshLaunchDeferred).toBeUndefined();
+
+    applyDetachPayload(payload!);
+    expect(terminalService.stashCarriedSshLaunch).toHaveBeenCalledWith('tm-1');
+    expect(terminalService.stashCarriedSshLaunch).toHaveBeenCalledTimes(1);
   });
 
   it('packs an active Win32-Input-Mode and re-seeds it for the destination mount', () => {

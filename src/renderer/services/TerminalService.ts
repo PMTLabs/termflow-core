@@ -47,6 +47,11 @@ export class TerminalServiceClass {
   private hostWaitStates = new Map<string, HostWaitState>();
   private sshReconnects = new WeakMap<PaneCapture, { pc: string; work: Promise<ReconnectSshResult> }>();
   private sshLaunches = new WeakMap<PaneCapture, { pc: string; work: Promise<SshLaunchObservation | undefined> }>();
+  // D105: restored SSH panes in this window whose launch waits for first activation,
+  // and panes another window handed over while still waiting. A handed-over pane
+  // launches on its first launch query here: the move itself is the user's activation.
+  private deferredSshLaunches = new Set<string>();
+  private carriedSshLaunches = new Set<string>();
   // Keep the raw placement outcome even when its original copy leaves. A replacement
   // must wait for that work and bind its exact process, not race a Parked placement.
   private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
@@ -448,6 +453,7 @@ export class TerminalServiceClass {
       if (freshSsh && sshLaunchConnectionId && attemptPi) {
         const placement = this.sshPlacement(terminalId, paneId, attemptPi, processId, sshLaunchConnectionId);
         const launch = () => {
+          if (this.sshLaunches.get(attemptPi)?.pc === processId) return; // A carried launch already ran here.
           const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
           this.sshLaunches.set(attemptPi, { pc: processId, work });
           // Launch failure does not discard the successfully created local shell.
@@ -458,12 +464,14 @@ export class TerminalServiceClass {
           // Watch the owning tab, not the pane layout (maximize, split, etc.).
           // Canvas has its own visibility signal for individual nodes.
           let settled = false;
+          this.deferredSshLaunches.add(terminalId);
           const check = () => {
             if (settled) return; // A nested notification can retain an older listener snapshot.
             const tabId = findTabIdByTerminalId(this.paneTrees(), terminalId);
             const current = !!tabId && placement.current();
             if (current && store.getState().panes.activeTabId !== tabId && !isSshCanvasVisible(terminalId)) return;
             settled = true;
+            this.deferredSshLaunches.delete(terminalId);
             unsubscribeStore();
             unsubscribeCanvas();
             unsubscribeOwner();
@@ -518,6 +526,11 @@ export class TerminalServiceClass {
   async querySshLaunch(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted: () => boolean) {
     const placement = this.sshPlacement(terminalId, paneId, owner, pc, connectionId, mounted);
     if (!placement.current()) return;
+    if (this.carriedSshLaunches.delete(terminalId) && this.sshLaunches.get(owner)?.pc !== pc) {
+      const work = observeOwnedSshLaunch(this.api(), placement, 'open');
+      this.sshLaunches.set(owner, { pc, work });
+      void work.catch(() => {});
+    }
     const started = this.sshLaunches.get(owner);
     const startFailure = started?.pc === pc
       ? await started.work.then(() => undefined, sshLaunchFailure) : undefined;
@@ -815,6 +828,16 @@ export class TerminalServiceClass {
    * in the SOURCE window and will not repeat them here; without this the pane
    * sends legacy encodings to a TUI that negotiated CSI u. Null clears any stash.
    */
+  /** True while a restored SSH pane here still waits for its first activation (D105). */
+  hasDeferredSshLaunch(terminalId: string): boolean {
+    return this.deferredSshLaunches.has(terminalId);
+  }
+
+  /** The source window never launched this carried SSH pane; launch it on its first query here. */
+  stashCarriedSshLaunch(terminalId: string): void {
+    this.carriedSshLaunches.add(terminalId);
+  }
+
   stashKeyboardProtocol(terminalId: string, data: KeyboardProtocolStateData | null): void {
     if (data) this.keyboardProtocolHandoff.set(terminalId, data);
     else this.keyboardProtocolHandoff.delete(terminalId);
