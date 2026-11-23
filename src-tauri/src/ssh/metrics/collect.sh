@@ -13,10 +13,49 @@ section() {
     section_end "$section_key" "$?"
 }
 
+# Keep this list in sync with protocol.rs.
+local_types='ext2 ext3 ext4 xfs btrfs zfs overlay f2fs jfs reiserfs vfat exfat ntfs ntfs3 bcachefs udf fuseblk'
+
+file_mounts() {
+    [ "$inventory_status" -eq 0 ] || return 125
+    candidates=$(awk -v local_types="$local_types" '
+        NF != 6 || $2 !~ /^\// { invalid = 1; next }
+        index(" " local_types " ", " " $3 " ") { local_path[$2] = 1; next }
+        { foreign[$2] = 1 }
+        END {
+            if (invalid) exit 1
+            for (point in local_path) {
+                # A foreign mount may hide the local mount at this path.
+                if (point in foreign) continue
+                path = ""
+                for (i = 1; i <= length(point); i++) {
+                    c = substr(point, i, 1)
+                    if (c == "\\") {
+                        escape = substr(point, i+1, 3)
+                        if (escape == "040") c = " "
+                        else if (escape != "134") break
+                        i += 3
+                    }
+                    path = path c
+                }
+                if (i > length(point)) print point " " path
+            }
+        }
+    ' <<EOF
+$inventory
+EOF
+    ) || return "$?"
+    while IFS= read -r candidate; do
+        if [ -n "$candidate" ] && test -f "${candidate#* }"; then
+            printf '%s\n' "${candidate%% *}"
+        fi
+    done <<EOF
+$candidates
+EOF
+}
+
 local_df_by_type() {
-    # BusyBox 1.36 df filters by type before statvfs. Keep this list in
-    # sync with protocol.rs; the parser decides which overlay rows to keep.
-    local_types='ext2 ext3 ext4 xfs btrfs zfs overlay f2fs jfs reiserfs vfat exfat ntfs ntfs3 bcachefs udf fuseblk'
+    # BusyBox 1.36 df filters by type before statvfs.
     # A local record can be hidden by a different filesystem at the same
     # path. Fail closed rather than let df stat the visible foreign mount.
     types=$(awk -v local_types="$local_types" '
@@ -92,6 +131,7 @@ if [ "$status" -eq 0 ] && [ "$platform" = Linux ]; then
     section_begin mounts
     printf '%s' "$inventory"
     section_end mounts "$inventory_status"
+    section fileMounts file_mounts
     has_nfs=no
     while IFS=' ' read -r source mount type rest; do
         case "$type" in nfs|nfs4) has_nfs=yes ;; esac

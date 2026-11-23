@@ -24,7 +24,7 @@ pub(in crate::ssh::metrics) fn sample(reducer: &mut Reducer, uptime: &str, overr
         ("stat", BASE_STAT), ("meminfo", MEM), ("netdev", BASE_NET), ("uptime", uptime),
         ("bootId", BOOT), ("cpuinfo", "processor : 0"), ("nproc", "4"),
         ("loadavg", "1.25 1.00 0.75 1/10 100"), ("who", "zoe pts/0\nalex pts/1\nzoe pts/2"),
-        ("dfLocal", LOCAL), ("dfNfs", ""), ("mounts", "/dev/test / ext4 rw 0 0"),
+        ("dfLocal", LOCAL), ("dfNfs", ""), ("mounts", "/dev/test / ext4 rw 0 0"), ("fileMounts", ""),
         ("osRelease", "NAME='Derived Linux'\nVERSION_ID=12"),
     ];
     for (key, default) in sections.iter().take(if linux { sections.len() } else { 3 }) {
@@ -426,7 +426,7 @@ __TFM_{N}_V1_END__"));
         for platform in ["Linux", "FreeBSD"] {
             let mut lines = Vec::new();
             lines.push(format!("__TFM_{N}_V1_BEGIN__"));
-            let linux_sections = ["stat", "meminfo", "netdev", "uptime", "bootId", "cpuinfo", "nproc", "loadavg", "who", "dfLocal", "dfNfs", "mounts", "osRelease"];
+            let linux_sections = ["stat", "meminfo", "netdev", "uptime", "bootId", "cpuinfo", "nproc", "loadavg", "who", "dfLocal", "dfNfs", "mounts", "fileMounts", "osRelease"];
             let mut keys = vec!["platform", "hostname", "architecture", "iostat"];
             if platform == "Linux" { keys.extend(linux_sections); }
             for key in keys { lines.push(format!("__TFM_{N}_SECTION_{key}_BEGIN__

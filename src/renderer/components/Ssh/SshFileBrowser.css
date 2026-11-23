@@ -27,7 +27,7 @@ button.ssh-file-expander:hover { color:var(--text-primary); background:var(--bg-
   flex:1; min-width:0; text-align:start; color:inherit; background:transparent;
   border:0; padding:3px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
-.ssh-file-size { flex:none; }
+.ssh-file-size { flex:none; margin-inline-start:auto; white-space:nowrap; text-align:end; }
 .ssh-file-dialog code, .ssh-remote-path { overflow-wrap:anywhere; white-space:pre-wrap; }
 .ssh-file-dialog dl { display:grid; grid-template-columns:max-content minmax(0, 1fr); gap:6px 12px; }
 .ssh-file-dialog dd { margin:0; overflow-wrap:anywhere; }

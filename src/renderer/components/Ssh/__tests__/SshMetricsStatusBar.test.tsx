@@ -12,6 +12,8 @@ import { installSshMetricsWatch, useSshMetricsWatch } from '../../../services/ss
 import { writeClipboardText } from '../../../utils/clipboard';
 import type { SshMetricsAPI, SshMetricsSample, SshMetricsControl, SshState } from '../../../types/ssh';
 import { SshMetricsStatusBar } from '../SshMetricsStatusBar';
+import { SshBrowserPaneShell } from '../SshBrowserPaneShell';
+import type { LaunchSnapshot } from '../../../types/ssh';
 import { SSH_METRIC_KEYS, SSH_METRIC_LABELS } from '../sshMetricKeys';
 import { SshIcon, type SshIconName } from '../SshIcons';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -19,6 +21,9 @@ import { formatSshMetricsCopy } from '../metricFormat';
 
 jest.mock('../../../utils/clipboard', () => ({ writeClipboardText: jest.fn() }));
 jest.mock('../../../services/sshLaunch', () => ({ reconnectSshTerminal: jest.fn() }));
+// The status-row table renders SshBrowserPaneShell, whose import chain reaches the store's
+// TerminalContainer -> tauri-bridge listeners; cut it as the Canvas SSH suites do.
+jest.mock('../../TerminalContainer', () => ({ clearTabPanes: jest.fn() }));
 const write = jest.mocked(writeClipboardText);
 const A = 'tm-ssh', B = 'tm-other';
 const na = (reason: string) => ({ available: false as const, reason });
@@ -60,6 +65,64 @@ function setup() {
   const render = (children = <SshMetricsStatusBar terminalId={B} />) => act(() => root.render(<Provider store={store}>{children}</Provider>));
   return { store, dispatch, session, publish, render, toasts: () => store.getState().ui.toasts.map(t => t.type) };
 }
+type RowSession = SshState | 'none' | 'restored';
+const rowSessions: RowSession[] = ['none', 'restored', 'connecting', 'needs-secret', 'needs-hostkey', 'connected', 'disconnected', 'error'];
+const rowStages: (LaunchSnapshot['stage'] | undefined)[] = [undefined, 'preparing', 'waiting-ready', 'waiting-trust', 'typed', 'running', 'ended', 'blocked', 'cancelled', 'error'];
+const rowLabels: Record<RowSession, string> = {
+  none: 'Disconnected', restored: 'Disconnected', connecting: 'Connecting', 'needs-secret': 'Waiting for credentials',
+  'needs-hostkey': 'Waiting for host key approval', connected: 'Collecting first sample', disconnected: 'Disconnected', error: 'SSH error',
+};
+const statusSlot = <SshMetricsStatusBar terminalId={A} />;
+function renderRow(h: ReturnType<typeof setup>, state: SshState, status?: React.ReactNode) {
+  h.render(<SshBrowserPaneShell terminalId={A} sshTag={{ connectionId: 'saved' }} surfaceActive
+    browserController={null} onPatchTag={() => {}} terminal={null} sessionPrompts={false} status={status}
+    view={{ terminalId: A, connectionId: 'saved', state, generation: 2, gate: 'verified' }}
+    onSecret={async () => {}} onTrust={async () => {}} onCancel={() => {}} />);
+  return host.querySelector('.ssh-status')!;
+}
+const markerCount = (row: Element) => [...row.querySelectorAll('.ssh-status-text')]
+  .filter(span => span.textContent === '—').length;
+
+describe('SSH status row liveness', () => {
+  test.each(rowSessions.flatMap(state => rowStages.flatMap(stage => (['current', 'stale'] as const).map(age => ({ state, stage, age })))))
+  ('$state / $stage / $age', ({ state, stage, age }) => {
+    const h = setup();
+    const viewState = state === 'none' || state === 'restored' ? 'disconnected' : state;
+    if (state === 'restored') h.dispatch(sshAttachmentResolved({ terminalId: A, connectionId: 'saved', reattachedProcessId: 'pc-old' }));
+    if (state !== 'none' && state !== 'restored') h.session(state, 2, A);
+    if (stage) {
+      const generation = age === 'current' ? 2 : 1;
+      h.dispatch(sshLaunchObserved({ terminalId: A, connectionId: 'saved', stage, revision: 1, launchSeq: 1,
+        attempt: { sessionGeneration: generation, processIncarnation: 'pc-test', ownerIncarnation: { pg: 1, seq: 1 },
+          attemptReceipt: { generation, gate: 'verified' } } }));
+    }
+
+    const row = renderRow(h, viewState, statusSlot);
+    // No samples or pauses are seeded: a connected bar always shows the first-sample label here.
+    const ended = state !== 'none' && state !== 'restored' && stage === 'ended' && age === 'current';
+    const expectedLabel = ended ? 'SSH session ended' : state === 'restored' && !stage ? 'Metrics unavailable' : rowLabels[state];
+    const status = row.querySelector('.ssh-metrics-state')?.textContent?.replace(/^○\s*/, '');
+    expect(status).toBe(expectedLabel);
+    const terminalLive = state === 'connected' && ['preparing', 'waiting-ready', 'waiting-trust', 'typed', 'running'].includes(stage ?? '');
+    expect(markerCount(row) + Number(status !== 'Collecting first sample')).toBe(terminalLive ? 0 : 1);
+  });
+
+  test('keeps the marker when all metrics are hidden', () => {
+    const h = setup();
+    h.dispatch(setSshHiddenMetrics({ terminalId: A, hiddenMetrics: SSH_METRIC_KEYS }));
+    const row = renderRow(h, 'disconnected', statusSlot);
+    expect(row.querySelector('.ssh-metrics-status-bar')).not.toBeNull();
+    expect(row.querySelector('.ssh-metrics-state')).toBeNull();
+    expect(markerCount(row)).toBe(1);
+  });
+
+  test('keeps the marker when there is no status slot', () => {
+    const row = renderRow(setup(), 'disconnected');
+    expect(row.querySelector('.ssh-metrics-status-bar')).toBeNull();
+    expect(markerCount(row)).toBe(1);
+  });
+});
+
 const bar = () => host.querySelector<HTMLElement>('[aria-label="Remote host metrics"]')!;
 // D101: a value is an aria-hidden glyph followed by text, so its textContent is the value alone.
 const metric = (key: string) => bar().querySelector<HTMLElement>(`[data-metric="${key}"]`)!.textContent;

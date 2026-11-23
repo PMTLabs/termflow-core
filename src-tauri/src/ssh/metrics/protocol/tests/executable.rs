@@ -148,10 +148,13 @@ esac"#);
         self.script("sh", r#"printf 'collector-entry\n' >> "$TRACE"
 [ "$1" = -c ] || exit 90
 printf '%s' "$2" > collector-input || exit 91
-if [ -n "$FAKE_UTMP" ]; then
+if [ -n "$FAKE_UTMP$FAKE_FILES" ]; then
     # Intercept only the production existence probes; do not depend on host utmp.
     probe='test() {
         case "$*" in
+            "-f "*)
+                printf "probe: %s\n" "$2" >> "$TRACE"
+                command test -f ".$2" ;;
             "-e /var/run/utmp") [ "$FAKE_UTMP" = yes ] ;;
             "-e /run/utmp") return 1 ;;
             *) command test "$@" ;;
@@ -323,6 +326,43 @@ fn df_busybox_fallback_stays_in_one_exec() {
     assert!(s.local.is_err());
     assert_eq!(s.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
     assert_eq!(df_trace(&trace), ["df -l -P -T", "df -l -P", "df -P -T -t ext4", "timeout -s KILL 2 df -P -t nfs -t nfs4", "df -P -t nfs -t nfs4"]);
+}
+
+#[test]
+fn collector_excludes_file_binds_but_keeps_local_directories() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+    let host = Host::new();
+    fs::create_dir(host.0.join("etc")).unwrap();
+    fs::create_dir(host.0.join("data")).unwrap();
+    for file in ["etc/hosts", "etc/hostname", "etc/resolv.conf", "a b", r"c\040d", "nfs", "stacked"] {
+        fs::write(host.0.join(file), "").unwrap();
+    }
+    let mounts = r"overlay / overlay rw 0 0
+/dev/disk /etc/hosts ext4 rw 0 0
+/dev/disk /etc/hostname ext4 rw 0 0
+/dev/disk /etc/resolv.conf ext4 rw 0 0
+/dev/disk /data ext4 rw 0 0
+/dev/disk /a\040b ext4 rw 0 0
+/dev/disk /c\134040d ext4 rw 0 0
+/dev/disk /skip\011me ext4 rw 0 0
+server:/vol /nfs nfs4 rw 0 0
+/dev/disk /stacked ext4 rw 0 0
+server:/vol /stacked nfs4 rw 0 0
+";
+    let local = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n\
+overlay overlay 100 30 60 34% /\n\
+/dev/disk ext4 100 30 60 34% /etc/hosts\n\
+/dev/disk ext4 100 30 60 34% /etc/hostname\n\
+/dev/disk ext4 100 30 60 34% /etc/resolv.conf\n\
+/dev/disk ext4 100 30 60 34% /data\n\
+/dev/disk ext4 100 30 60 34% /a b\n";
+    let (stdout, nonce, trace) = host.run(&[("FAKE_FILES", "yes"), ("MOUNTS", mounts), ("LOCAL", local)]);
+    let sample = parse(stdout.as_bytes(), &nonce).unwrap();
+    let mut files = sample.section("fileMounts").unwrap().rows().unwrap().to_vec();
+    files.sort_unstable();
+    assert_eq!(files, [r"/a\040b", r"/c\134040d", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf"]);
+    assert_eq!(sample.local.unwrap().into_iter().map(|m| m.mount_point).collect::<Vec<_>>(), ["/", "/data"]);
+    assert!(!trace.iter().any(|line| line.starts_with("probe: /nfs") || line.starts_with("probe: /skip") || line.starts_with("probe: /stacked")));
 }
 
 #[test]
