@@ -1,4 +1,4 @@
-use super::{adopted_host_build_warning, host_build_disposition,plan_connection, ConnectPlan, HostBuildDisposition, HostConnectionOrigin, HostRetention};
+use super::{adopted_host_build_warning, spawned_host_capability_error, host_build_disposition,plan_connection, ConnectPlan, HostBuildDisposition, HostConnectionOrigin, HostRetention};
 use termflow_pty_protocol::{HostRecord, LifecycleContract, RetentionPolicy};
 
 fn record(proto_min: u16, proto_max: u16) -> HostRecord {
@@ -176,4 +176,34 @@ fn launchable_host_with_unreadable_local_digest_does_not_reject_a_discovered_hos
         HostBuildDisposition::Unknown,
         "a missing parent-side digest is unverified, not evidence that the readable launch path mismatches the host"
     );
+}
+
+#[test]
+fn a_spawned_host_older_than_the_app_is_reported_by_its_own_record() {
+    use termflow_pty_protocol::bootstrap::{CAP_SSH_PROMPT_REGISTRATION, HOST_BASE_CAPABILITIES};
+    let mut current = record(1, 1);
+    current.capabilities = HOST_BASE_CAPABILITIES;
+    assert_eq!(spawned_host_capability_error(HostConnectionOrigin::SpawnedHere, Some(&current), Some(1)), None);
+    current.capabilities |= termflow_pty_protocol::CAP_INHERIT_CURSOR;
+    assert_eq!(spawned_host_capability_error(HostConnectionOrigin::SpawnedHere, Some(&current), Some(1)), None);
+
+    // The user's nightly: an Oct 11 host advertising bits 1-5 (0x3e), without SSH registration.
+    let mut stale = record(1, 1);
+    stale.capabilities = 0x3e;
+    let error = spawned_host_capability_error(HostConnectionOrigin::SpawnedHere, Some(&stale), Some(1)).unwrap();
+    let missing = HOST_BASE_CAPABILITIES & !0x3e;
+    assert!(missing & CAP_SSH_PROMPT_REGISTRATION != 0);
+    assert!(error.contains(&format!("lacks capability bits {missing:#x} (advertises 0x3e)")), "{error}");
+    // Each base bit alone is enough to report.
+    for bit in (0..32).map(|n| 1u32 << n).filter(|b| HOST_BASE_CAPABILITIES & b != 0) {
+        stale.capabilities = HOST_BASE_CAPABILITIES & !bit;
+        assert!(spawned_host_capability_error(HostConnectionOrigin::SpawnedHere, Some(&stale), Some(1)).is_some(), "{bit:#x}");
+    }
+
+    // Adopted hosts are judged by build identity, and a record of another process says nothing.
+    stale.capabilities = 0x3e;
+    assert_eq!(spawned_host_capability_error(HostConnectionOrigin::Adopted, Some(&stale), Some(1)), None);
+    assert_eq!(spawned_host_capability_error(HostConnectionOrigin::SpawnedHere, Some(&stale), Some(2)), None);
+    assert_eq!(spawned_host_capability_error(HostConnectionOrigin::SpawnedHere, Some(&stale), None), None);
+    assert_eq!(spawned_host_capability_error(HostConnectionOrigin::SpawnedHere, None, Some(1)), None);
 }

@@ -2252,6 +2252,29 @@ pub fn adopted_host_build_warning(
     }
 }
 
+/// The error for a host THIS connection launched whose own record lacks a bit every host of this
+/// build advertises: the sidecar beside the app is an older binary than the app (a build that
+/// refreshed the app but not its sidecars). Its build id is the launched file's own hash, so
+/// `adopted_host_build_warning` can never see this. A record that does not name the serving
+/// process says nothing about it, so no error then.
+pub fn spawned_host_capability_error(
+    origin: HostConnectionOrigin,
+    record: Option<&termflow_pty_protocol::HostRecord>,
+    server_pid: Option<u32>,
+) -> Option<String> {
+    if origin != HostConnectionOrigin::SpawnedHere {
+        return None;
+    }
+    let record = record.filter(|r| server_pid == Some(r.pid))?;
+    let missing = termflow_pty_protocol::bootstrap::HOST_BASE_CAPABILITIES & !record.capabilities;
+    (missing != 0).then(|| format!(
+        "[HOTSWAP] the bundled pty-host is older than this app: it lacks capability bits {missing:#x} \
+         (advertises {:#x}), so features that need them (SSH) are refused; reinstall or rebuild TermFlow \
+         so the host sidecar beside the app matches it",
+        record.capabilities
+    ))
+}
+
 pub fn host_build_disposition(record: Option<&termflow_pty_protocol::HostRecord>, expected: Option<&str>) -> HostBuildDisposition {
     match (record.and_then(|r| r.build_id.as_deref()), expected) {
         (_, None) => HostBuildDisposition::Unknown,
