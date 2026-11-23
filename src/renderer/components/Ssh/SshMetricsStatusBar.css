@@ -48,6 +48,13 @@
 .ssh-metrics-value[data-metric='netDown'] { flex: none; }
 .ssh-metrics-value[data-metric='host'] { max-width: 30%; }
 
+/* D101: each value leads with its metric glyph; the full label stays in title and aria-label. */
+.ssh-metrics-value > svg {
+  margin-right: 4px;
+  vertical-align: -2px;
+  opacity: 0.85;
+}
+
 .ssh-metrics-state,
 .ssh-metrics-value[data-metric='partitions'],
 .ssh-metrics-value[data-metric='nfs'] { max-width: 35%; }

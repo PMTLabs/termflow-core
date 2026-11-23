@@ -242,13 +242,13 @@ describe('metrics status row', () => {
         fence: { ...now, consumerId, generation: 1, sampleFloor, trustWall: true } }));
       sample();
     });
-    expect(bar.textContent).toContain('↑ 3.2KB/s');
+    expect(bar.querySelector('[data-metric=netUp]')!.textContent).toBe('3.2KB/s');
     observe({ terminalId: A, state: 'disconnected', generation: 1, revision: 2 });
     await act(async () => { sample(); await flush(); });
     expect(bar.textContent).toContain('Disconnected');
     expect(bar.querySelector('.ssh-metrics-state')!.classList.contains('is-live')).toBe(false);
     expect(bar.textContent).not.toContain('3.2KB/s');
-    expect(bar.querySelector('[data-metric=netUp]')!.textContent).toBe('↑ —');
+    expect(bar.querySelector('[data-metric=netUp]')!.textContent).toBe('—');
     act(() => { bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); });
     expect(buttons(document, 'Copy all metrics')[0].disabled).toBe(true);
     expect(node.querySelector('.ssh-status-text')!.textContent).toBe('—');

@@ -147,11 +147,12 @@ test('ssh_metrics_fixture_to_bar_to_clipboard_roundtrip', async () => {
   const store = await setup();
   act(() => { advance(1); publish(baseline); });
   expect(reading('host')).toBe('sample-host');
-  expect(reading('cpu')).toBe('CPU …');
+  expect(reading('cpu')).toBe('…');
   act(() => { advance(1); publish(rates); });
+  // D101: each value leads with an aria-hidden glyph, so textContent is the value alone.
   expect([...host.querySelectorAll('[data-metric]')].map(el => el.textContent)).toEqual([
-    'sample-host', 'CPU 25%', 'RAM 0.0/0.0 GiB', '↑ 30B/s',
-    '↓ 15B/s', 'Up 0m 12s', 'Users 3', 'Disk / 22%', 'NFS none mounted',
+    'sample-host', '25%', '0.0/0.0 GiB', '30B/s',
+    '15B/s', '0m 12s', '3', '/ 22%', 'none mounted',
   ]);
   await menuClick('Uptime');
   await menuClick('Connected users');
@@ -179,17 +180,17 @@ test('ssh_metrics_fixture_to_bar_to_clipboard_roundtrip', async () => {
   act(() => root.render(<Provider store={restored}><SshMetricsStatusBar terminalId={terminalId} /></Provider>));
   expect(reading('uptime')).toBeUndefined();
   expect(reading('users')).toBeUndefined();
-  expect(reading('cpu')).toBe('CPU —');
+  expect(reading('cpu')).toBe('—');
 });
 
 test.each([8, 7])('exec_inflight_disconnect_reconnect_flow_never_resurrects_snapshot (generation %d)', async generation => {
   const [baseline, rates] = snapshots();
   const store = await setup();
   act(() => { advance(2); publish(rates); });
-  expect(reading('cpu')).toBe('CPU 25%');
+  expect(reading('cpu')).toBe('25%');
   act(() => connect('disconnected'));
-  expect(reading('cpu')).toBe('CPU —');
-  expect(reading('netUp')).toBe('↑ —');
+  expect(reading('cpu')).toBe('—');
+  expect(reading('netUp')).toBe('—');
   await act(async () => { advance(10); floor = wall; connect('connected', generation); });
   expect(store.getState().sshSession.byTerminal[terminalId].metricsFence).toMatchObject({ generation, sampleFloor: floor });
   // The payload itself has no generation. Both a queued pre-disconnect reply
@@ -202,12 +203,12 @@ test.each([8, 7])('exec_inflight_disconnect_reconnect_flow_never_resurrects_snap
   expect(store.getState().sshSession.byTerminal[terminalId].metricsReading).toBeUndefined();
   act(() => { advance(1); publish({ ...baseline, sampledAt: wall }); });
   expect(reading('host')).toBe('sample-host');
-  expect(reading('cpu')).toBe('CPU …');
-  expect(reading('netUp')).toBe('↑ …');
+  expect(reading('cpu')).toBe('…');
+  expect(reading('netUp')).toBe('…');
   act(() => { advance(1); publish({ ...rates, sampledAt: wall }); });
-  expect(reading('cpu')).toBe('CPU 25%');
-  expect(reading('netUp')).toBe('↑ 30B/s');
-  expect(reading('netDown')).toBe('↓ 15B/s');
+  expect(reading('cpu')).toBe('25%');
+  expect(reading('netUp')).toBe('30B/s');
+  expect(reading('netDown')).toBe('15B/s');
 });
 
 test('page_hide_is_a_pause_not_a_delay_and_restore_shows_a_fresh_baseline', async () => {
