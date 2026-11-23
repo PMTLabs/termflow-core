@@ -189,6 +189,17 @@ fn interface_churn_rates_over_common_interfaces() {
 }
 
 #[test]
+fn added_interface_sorting_first_does_not_shift_survivors() {
+    let mut r = Reducer::default();
+    let before = format!("{BASE_NET}\n{}", netrow("eth1", 10, 10));
+    sample(&mut r, "2", &[("netdev", &before, 0)]);
+    // aa0 sorts before both survivors, so pairing by position would mismatch every row.
+    let now = format!("{}\n{SECOND_NET}\n{}", netrow("aa0", 999_999, 999_999), netrow("eth1", 14, 12));
+    // Upload = TX: eth0 60 + eth1 2 over 2 s; download = RX: eth0 30 + eth1 4 over 2 s.
+    assert_eq!(rates(&sample(&mut r, "4", &[("netdev", &now, 0)])), (Some(31.0), Some(17.0)));
+}
+
+#[test]
 fn iowait_decrease_does_not_wrap() {
     let mut r = Reducer::default();
     sample(&mut r, "1", &[]);
@@ -400,8 +411,14 @@ __TFM_{N}_V1_END__"));
         let s = FIXTURE.replace("2440182655", "2440183655");
         let m = read(&s, &mut r, start + cadence);
         assert_eq!(avail(&m.net_up).bytes_per_second, Some(1000.0 / cadence.as_secs_f64()));
-        let s = s.replace("en0 ", "new0 ");
-        assert_eq!(avail(&read(&s, &mut r, start + cadence * 2).net_up).bytes_per_second, Some(0.0));
+        // en0 is replaced; the surviving en6 moves 2000 B up and 500 B down.
+        let en6 = "en6        1500  <Link#8>    02:00:00:00:00:05        0     0          0        0     0          0     0";
+        let s = s.replace("en0 ", "new0 ").replace(en6, "en6        1500  <Link#8>    02:00:00:00:00:05        1     0        500        1     0       2000     0");
+        let m = read(&s, &mut r, start + cadence * 2);
+        assert_eq!(
+            (avail(&m.net_up).bytes_per_second, avail(&m.net_down).bytes_per_second),
+            (Some(2000.0 / cadence.as_secs_f64()), Some(500.0 / cadence.as_secs_f64()))
+        );
     }
     #[test]
     fn darwin_reboot_resets_baselines() {

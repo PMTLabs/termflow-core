@@ -125,6 +125,18 @@ fn windows_rates_over_common_adapters() {
 }
 
 #[test]
+fn windows_two_common_adapters_with_one_added_between_them() {
+    let mut reducer = Reducer::default();
+    let step = 2 * CADENCE.as_secs();
+    adapter_frame(&mut reducer, 0, "100 200 A\n300 400 C");
+    // B sorts between the survivors; every common adapter counts, not just the first.
+    let now = adapter_frame(&mut reducer, 1, &format!(
+        "{} {} A\n99999 99999 B\n{} {} C", 100 + step, 200 + 2 * step, 300 + 3 * step, 400 + 4 * step
+    ));
+    assert_eq!((rate(&now.net_down), rate(&now.net_up)), (Some(4.0), Some(6.0)));
+}
+
+#[test]
 fn windows_backwards_uptime_resets_both_baselines_even_with_increasing_counters() {
     let mut reducer = Reducer::default();
     frame(&mut reducer, 0, 0, "A", 0);
