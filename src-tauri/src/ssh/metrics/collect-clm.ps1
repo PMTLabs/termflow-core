@@ -9,7 +9,7 @@ S platform Windows
 S hostname $env:COMPUTERNAME
 S architecture $env:PROCESSOR_ARCHITECTURE
 $b='blocked 1'
-$v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+$v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ea 0
 $r=@($b)
 if($v){$a=$v.ProductName;if([int]$v.CurrentBuild -ge 22000){$a=$a -replace '^Windows 10','Windows 11'};$r+="caption $a","version 10.0.$($v.CurrentBuild).$($v.UBR)"}
 S winOs $r 126

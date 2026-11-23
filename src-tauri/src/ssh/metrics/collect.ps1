@@ -27,8 +27,8 @@ function Native {
     $a=[AppDomain]::CurrentDomain.DefineDynamicAssembly((New-Object Reflection.AssemblyName Tfm),[Reflection.Emit.AssemblyBuilderAccess]::Run)
     $t=$a.DefineDynamicModule('Tfm').DefineType('TfmNative','Public,Class')
     $r=[uint64].MakeByRefType()
-    foreach($name in 'GetSystemTimes','GlobalMemoryStatusEx'){
-        $types=if($name -eq 'GetSystemTimes'){@($r,$r,$r)}else{@([uint64[]])}
+    foreach($name in 'GetSystemTimes','GlobalMemoryStatusEx','TerminateProcess'){
+        $types=switch($name){'GetSystemTimes'{@($r,$r,$r)}'GlobalMemoryStatusEx'{@([uint64[]])}default{@([IntPtr],[uint32])}}
         $m=$t.DefinePInvokeMethod($name,'kernel32.dll','Public,Static,PinvokeImpl','Standard',[bool],[type[]]$types,'Winapi','Auto')
         $m.SetImplementationFlags('PreserveSig')
     }
@@ -87,10 +87,14 @@ S winNetDrives {
     if(!$paths.Count){return}
     $ps=[PowerShell]::Create()
     $job=$ps.AddScript({param($names) foreach($n in $names){try{$d=[IO.DriveInfo]::new($n);@{n=$n;s=$d.TotalSize;f=$d.TotalFreeSpace}}catch{}}}).AddArgument(@($paths.Keys)).BeginInvoke()
-    if(!$job.AsyncWaitHandle.WaitOne(2000)){$script:rc=137;return}
+    if(!$job.AsyncWaitHandle.WaitOne(2000)){$script:rc=137;$script:hung=$true;return}
     try{foreach($d in $ps.EndInvoke($job)){"$($d.n.TrimEnd('\'))`t$($d.s)`t$($d.f)`t$($paths[$d.n])"}}finally{$ps.Dispose()}
 }
 $o.Write("${p}V1_END__`n")
 $o.Flush()
 if($env:TFM_TIMING -eq '1'){[Console]::Error.WriteLine("cpu_ms $((Get-Process -Id $PID).TotalProcessorTime.TotalMilliseconds)")}
-[Environment]::Exit(0)
+if($script:hung){
+    try{Native;$null=$K::TerminateProcess([IntPtr]::new(-1),0)}catch{}
+    [Environment]::Exit(0)
+}
+exit 0

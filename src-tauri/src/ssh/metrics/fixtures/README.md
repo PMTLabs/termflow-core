@@ -71,7 +71,18 @@ brackets and numbered suffixes), and the UNC host/share were pseudonymized;
 the measurements and section statuses were not changed. A mapped network
 drive in the console is not evidence of a mapping in the sshd logon session.
 
-An sshd capture as a non-admin user will be added by the orchestrator.
+`windows-sshd-nonadmin.txt`: **captured over sshd**. One exec of the production
+command, using the WMI-free collector before its exit path changed, as the local
+non-admin account `tf-sshtest`, which is a member of Users only. The command ran
+over Win32-OpenSSH 9.5 with DefaultShell = Windows PowerShell 5.1, on the same
+host, on 2026-11-23. Stdout only, with LF endings. The nonce became the fixture
+nonce and the hostname became `WINHOST`. Adapter names are the host's generic
+ones and were kept. `winUsers` ends 1 because quser refuses non-admin network
+logons; WMI was refused the same way, which is why the collector does not use it.
+Wall time over sshd, from exec start to exit, was 0.9–1.7 s per run. The process
+used 0.45–0.52 s of CPU, and defining the native type took 43–52 ms.
+`[Environment]::Exit` added about 2.5 s under sshd, so the script ends with a
+plain `exit 0`, and the hung-share path uses `TerminateProcess`.
 `windows-clm.txt` is a separate local capture: the child used
 `__PSLockdownPolicy=4` and explicitly entered Constrained Language Mode when
 retail PowerShell ignored that variable. Output was ASCII with LF endings;

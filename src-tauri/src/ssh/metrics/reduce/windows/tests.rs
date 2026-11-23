@@ -174,3 +174,39 @@ fn windows_ram_block_does_not_hide_working_clock_or_cpu() {
     assert!(matches!(metrics.cpu, Metric::Available(_)));
     assert!(matches!(metrics.host, Metric::Available(_)));
 }
+
+#[test]
+fn sshd_non_admin_capture_reduces_every_metric_but_users() {
+    let text = include_str!("../../fixtures/windows-sshd-nonadmin.txt");
+    let metrics = capture(&mut Reducer::default(), text);
+    assert_eq!(metrics.platform, Some("Windows"));
+    let total = 136_770_584_576u64;
+    let used = total - 53_008_818_176;
+    assert!(matches!(
+        &metrics.ram,
+        Metric::Available(Ram { used_bytes, total_bytes, .. })
+            if *used_bytes == used && *total_bytes == total
+    ));
+    assert_eq!(
+        metrics.uptime,
+        Metric::Available(Uptime {
+            seconds: 10_727_166_953_538.0 / 10_000_000.0
+        })
+    );
+    assert!(matches!(
+        &metrics.cpu,
+        Metric::Available(Cpu {
+            percent: None,
+            cores: Metric::Available(Cores { count: 24 }),
+            ..
+        })
+    ));
+    assert!(matches!(&metrics.partitions, Metric::Available(p) if p.mounts.len() == 4));
+    assert!(matches!(&metrics.nfs, Metric::Available(p) if p.mounts.is_empty()));
+    assert!(matches!(&metrics.net_up, Metric::Available(_)));
+    assert!(matches!(&metrics.host, Metric::Available(_)));
+    assert_eq!(
+        metrics.users,
+        Metric::Unavailable("Signed-in users require an administrator account on Windows".into())
+    );
+}
