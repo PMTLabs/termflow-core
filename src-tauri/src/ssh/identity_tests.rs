@@ -99,6 +99,16 @@ fn rejects_unreadable_identities() {
         .0
         .replace("RSA PRIVATE KEY", "EC PRIVATE KEY");
     let encrypted_pkcs8 = encrypted_ec.replace("EC PRIVATE KEY", "PRIVATE KEY");
+    let pkcs8 = fixture!("rsa_pkcs8_enc").0.replace("\r\n", "\n");
+    let truncated_pkcs8 = pkcs8[..pkcs8.find("-----END ").unwrap()].to_owned();
+    let corrupt_pkcs8 = pkcs8.replacen("\nM", "\n!M", 1);
+    let empty_pkcs8 =
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\n-----END ENCRYPTED PRIVATE KEY-----\n".to_owned();
+    let pem = fixture!("rsa_pem_enc").0.replace("\r\n", "\n");
+    let truncated_pem = pem[..pem.find("-----END ").unwrap()].to_owned();
+    // The untouched sources stay Locked, so each mutation above is what makes them unreadable.
+    assert!(matches!(parse(&pkcs8), Ok(Identity::Locked { .. })));
+    assert!(matches!(parse(&pem), Ok(Identity::Locked { .. })));
     for text in [
         include_str!("fixtures/key_formats/rsa_pem_des3"),
         &encrypted_ec,
@@ -113,6 +123,11 @@ fn rejects_unreadable_identities() {
         "",
         "garbage",
         "-----BEGIN RSA PRIVATE KEY-----\nA!\n-----END RSA PRIVATE KEY-----\n",
+        // Locked keys are checked for armour before any passphrase prompt.
+        &truncated_pkcs8,
+        &corrupt_pkcs8,
+        &empty_pkcs8,
+        &truncated_pem,
     ] {
         assert!(matches!(parse(text), Err(SessionError::IdentityUnreadable)));
     }

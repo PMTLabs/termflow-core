@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+    Engine as _,
+};
 use sha2::{Digest, Sha256};
 use ssh_key::{HashAlg, PrivateKey};
 use zeroize::Zeroizing;
@@ -30,19 +33,27 @@ pub(crate) fn parse_identity(mut text: Zeroizing<String>) -> Result<Identity, Se
     let mut lines = pem.lines();
     let begin = lines.next().ok_or(SessionError::IdentityUnreadable)?;
     if begin == "-----BEGIN OPENSSH PRIVATE KEY-----" {
-        return PrivateKey::from_openssh(text.as_bytes())
+        return PrivateKey::from_openssh(pem.as_bytes())
             .map(|key| Identity::Key(Box::new(key)))
             .map_err(|_| SessionError::IdentityUnreadable);
     }
     let mut encrypted = false;
     let mut dek_info = None;
-    for line in lines.take_while(|line| !line.starts_with("-----END ")) {
+    let mut ended = false;
+    let mut body = Zeroizing::new(String::new());
+    for line in lines {
+        if line.starts_with("-----END ") {
+            ended = true;
+            break;
+        }
         if line.starts_with("-----BEGIN ") {
             return Err(SessionError::IdentityUnreadable);
         }
         encrypted |= line == "Proc-Type: 4,ENCRYPTED";
         if let Some(info) = line.strip_prefix("DEK-Info: ") {
             dek_info = Some(info);
+        } else if !line.contains(':') {
+            body.push_str(line.trim());
         }
     }
     match begin {
@@ -71,6 +82,17 @@ pub(crate) fn parse_identity(mut text: Zeroizing<String>) -> Result<Identity, Se
                 .ok_or(SessionError::IdentityUnreadable);
         }
         _ => return Err(SessionError::IdentityUnreadable),
+    }
+    // A locked key is only checked again after the passphrase prompt, so reject a truncated or
+    // corrupt armour now instead of prompting for a passphrase that can never succeed.
+    if !ended
+        || body.is_empty()
+        || STANDARD
+            .decode(body.as_bytes())
+            .map(Zeroizing::new)
+            .is_err()
+    {
+        return Err(SessionError::IdentityUnreadable);
     }
     // Encrypted PEM has no public key available before loading the saved passphrase.
     let normalized = Zeroizing::new(text.replace("\r\n", "\n"));
