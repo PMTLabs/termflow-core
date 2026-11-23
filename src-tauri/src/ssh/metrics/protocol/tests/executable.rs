@@ -189,7 +189,7 @@ impl Drop for Host {
 
 pub(super) fn darwin_has_no_proc_trace() {
     let host = Host::new();
-    let (stdout, nonce, trace) = host.run(&[("PLATFORM", "Darwin")]);
+    let (stdout, nonce, trace) = host.run(&[("PLATFORM", "FreeBSD")]);
     assert_darwin(&parse(stdout.as_bytes(), &nonce).unwrap(), "test-host", "test-arch");
     let utilities: Vec<_> = trace.iter().filter(|line| !line.starts_with("awk ") && !line.starts_with("sh ") && *line != "collector-entry").map(String::as_str).collect();
     assert_eq!(utilities, ["uname -s", "uname -n", "uname -m"]);
@@ -397,3 +397,59 @@ fn ordinary_nfs_errors_and_missing_utilities_are_not_indeterminate_and_recover()
     assert!(!s.nfs_watchdog_expired);
     assert_eq!(s.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn darwin_production_command_runs_with_absolute_utilities_under_dash_and_posix_sh() {
+    let host = Host::new();
+    let fixture = include_str!("../../fixtures/darwin.txt");
+    let nonce = "07100000000000000000000000000001";
+    let raw = parse(fixture.as_bytes(), nonce).unwrap();
+    let mut binds = Vec::new();
+    for (name, path, key) in [
+        ("sw_vers", "/usr/bin/sw_vers", "swVers"), ("vm_stat", "/usr/bin/vm_stat", "vmstat"),
+        ("netstat", "/usr/sbin/netstat", "netstat"), ("iostat", "/usr/sbin/iostat", "iostat"),
+        ("who", "/usr/bin/who", "who"), ("mount", "/sbin/mount", "mounts"),
+        ("date", "/bin/date", "now"), ("df", "/bin/df", "dfLocal"),
+        ("df", "/bin/df", "dfLocal"), ("date", "/bin/date", "now"),
+    ] {
+        let data = raw.section(key).unwrap().rows().unwrap().join("
+");
+        host.utility(name, &format!("/bin/cat <<'DATA'
+{data}
+DATA"));
+        binds.push(format!("{}:{path}", host.0.join(name).display()));
+    }
+    let mut sysctl = String::from("case \"$2\" in
+");
+    for (name, key) in [("hw.logicalcpu", "ncpu"), ("hw.memsize", "memsize"), ("hw.pagesize", "pagesize"), ("kern.boottime", "boottime"), ("vm.loadavg", "loadavg")] {
+        sysctl.push_str(&format!("{name}) /bin/cat <<'DATA'
+{}
+DATA
+;;
+", raw.section(key).unwrap().rows().unwrap().join("
+")));
+    }
+    sysctl.push_str("*) exit 1 ;;
+esac");
+    host.utility("sysctl", &sysctl);
+    binds.push(format!("{}:/usr/sbin/sysctl", host.0.join("sysctl").display()));
+    for (shell, flags) in [("/bin/dash", &[][..]), ("/bin/bash", &["--posix"][..])] {
+        host.script("sh", &format!("exec {shell} {} \"$@\"", flags.join(" ")));
+        let (command, n) = collector_command();
+        let mut cmd = Command::new(find_executable("proot").expect("install proot"));
+        for bind in &binds { cmd.arg("-b").arg(bind); }
+        let output = cmd.arg(shell).args(flags).arg("-c").arg(command)
+            .env("PATH", &host.0).env("PLATFORM", "Darwin").env("TRACE", host.0.join("trace"))
+            .env("REAL_AWK", find_executable("awk").unwrap()).output().expect("install proot for absolute-path Darwin fixture");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let sample = parse(&output.stdout, &n).unwrap();
+        assert_eq!(sample.platform, Platform::Darwin);
+        assert_eq!(sample.local.as_ref().unwrap().len(), 4);
+        assert_eq!(sample.section("iostat").unwrap().rows().unwrap().len(), 4);
+    }
+    let trace = fs::read_to_string(host.0.join("trace")).unwrap();
+    assert!(!trace.contains("/proc"));
+    assert!(!trace.contains("df -P -k -t nfs"));
+}
+

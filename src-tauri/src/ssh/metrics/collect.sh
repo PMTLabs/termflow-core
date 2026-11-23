@@ -125,5 +125,31 @@ EOF
         timeout -s KILL 2 df -P -t nfs -t nfs4
         section_end dfNfs "$?"
     fi
+elif [ "$status" -eq 0 ] && [ "$platform" = Darwin ]; then
+    section swVers /usr/bin/sw_vers
+    section ncpu /usr/sbin/sysctl -n hw.logicalcpu
+    section memsize /usr/sbin/sysctl -n hw.memsize
+    section pagesize /usr/sbin/sysctl -n hw.pagesize
+    section boottime /usr/sbin/sysctl -n kern.boottime
+    section now /bin/date -u +%s
+    section loadavg /usr/sbin/sysctl -n vm.loadavg
+    section vmstat /usr/bin/vm_stat
+    section netstat /usr/sbin/netstat -ibn
+    section iostat /usr/sbin/iostat -c 2 -w 1
+    section who /usr/bin/who
+    section mounts /sbin/mount
+    section dfLocal /bin/df -P -l -k
+    section_begin dfNfs
+    # Never stat a network filesystem without a fixed, absolute watchdog.
+    if [ -x /usr/local/bin/timeout ]; then
+        /usr/local/bin/timeout -s KILL 2 /bin/df -P -k -t nfs
+        section_end dfNfs "$?"
+    elif [ -x /opt/homebrew/bin/gtimeout ]; then
+        /opt/homebrew/bin/gtimeout -s KILL 2 /bin/df -P -k -t nfs
+        section_end dfNfs "$?"
+    else
+        section_end dfNfs 127
+    fi
+
 fi
 printf '%sV1_END__\n' "$prefix"

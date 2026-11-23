@@ -300,3 +300,86 @@ fn numeric_input_overflow_fails_independently() {
     assert!(matches!(m.net_down, Metric::Unavailable(_)));
     assert_eq!(avail(&m.uptime).seconds, 12.0);
 }
+
+mod darwin_tests {
+    use super::*;
+    const N: &str = "07100000000000000000000000000001";
+    const FIXTURE: &str = include_str!("../fixtures/darwin.txt");
+    fn read(text: &str, reducer: &mut Reducer, started: std::time::Instant) -> Metrics {
+        reducer.reduce_at(parse(text.as_bytes(), N).unwrap(), started)
+    }
+    #[test]
+    fn darwin_capture_parses_every_section_with_exact_values() {
+        let raw = parse(FIXTURE.as_bytes(), N).unwrap();
+        assert_eq!(raw.platform, crate::ssh::metrics::protocol::Platform::Darwin);
+        assert_eq!(raw.os.unwrap(), "macOS 26.5.2");
+        assert_eq!(raw.hostname.unwrap(), "mac-host.local");
+        assert_eq!(raw.local.unwrap().len(), 4);
+    }
+    #[test]
+    fn darwin_cpu_is_available_on_first_sample() {
+        let m = read(FIXTURE, &mut Reducer::default(), std::time::Instant::now());
+        assert_eq!(avail(&m.cpu).percent, Some(14.0));
+        assert_eq!(avail(&avail(&m.cpu).cores).count, 14);
+        assert_eq!(avail(&avail(&m.cpu).load1).value, 4.05);
+    }
+    #[test]
+    fn darwin_ram_matches_activity_monitor_formula() {
+        let m = read(FIXTURE, &mut Reducer::default(), std::time::Instant::now());
+        assert_eq!(avail(&m.ram).used_bytes, (352705 + 401644 + 305892) * 16384);
+        assert_eq!(avail(&m.ram).total_bytes, 38654705664);
+        assert_eq!(avail(&m.users).count, 4);
+        assert_eq!(avail(&m.uptime).seconds, (1795458834u64 - 1788608901) as f64);
+    }
+    #[test]
+    fn vm_stat_page_size_mismatch_is_unavailable() {
+        let s = FIXTURE.replace("page size of 16384", "page size of 4096");
+        assert!(matches!(read(&s, &mut Reducer::default(), std::time::Instant::now()).ram, Metric::Unavailable(_)));
+    }
+    #[test]
+    fn mount_nobrowse_and_system_volumes_are_not_local() {
+        let raw = parse(FIXTURE.as_bytes(), N).unwrap();
+        let mounts = raw.local.unwrap();
+        assert_eq!(mounts.iter().map(|m| m.mount_point.as_str()).collect::<Vec<_>>(), ["/", "/Volumes/Volume One", "/Volumes/AppDisk 1.0", "/Volumes/USB Drive"]);
+    }
+    #[test]
+    fn unknown_fs_type_makes_partitions_unavailable() {
+        let s = FIXTURE.replace("(exfat,", "(futurefs,");
+        assert!(parse(s.as_bytes(), N).unwrap().local.is_err());
+    }
+    #[test]
+    fn darwin_and_linux_sections_are_mutually_exclusive() {
+        let s = FIXTURE.replace(&format!("__TFM_{N}_V1_END__"), &format!("__TFM_{N}_SECTION_stat_BEGIN__
+cpu 1 2 3 4
+__TFM_{N}_SECTION_stat_END_0__
+__TFM_{N}_V1_END__"));
+        assert!(parse(s.as_bytes(), N).is_err());
+    }
+    #[test]
+    fn netstat_takes_only_link_rows_and_skips_lo0() {
+        let raw = parse(FIXTURE.as_bytes(), N).unwrap();
+        let map = super::super::darwin::interfaces(&raw).unwrap();
+        assert!(!map.contains_key("lo0"));
+        assert!(!map.keys().any(|s| s.ends_with('*')));
+        assert_eq!(map["en0"], [3342652065, 2440182655]);
+    }
+    #[test]
+    fn darwin_network_rate_uses_local_exec_start_and_resets_on_interface_change() {
+        let start = std::time::Instant::now();
+        let cadence = crate::ssh::metrics::sampler::CADENCE;
+        let mut r = Reducer::default();
+        assert_eq!(avail(&read(FIXTURE, &mut r, start).net_up).bytes_per_second, None);
+        let s = FIXTURE.replace("2440182655", "2440183655");
+        let m = read(&s, &mut r, start + cadence);
+        assert_eq!(avail(&m.net_up).bytes_per_second, Some(1000.0 / cadence.as_secs_f64()));
+        let s = s.replace("en0 ", "new0 ");
+        assert_eq!(avail(&read(&s, &mut r, start + cadence * 2).net_up).bytes_per_second, None);
+    }
+    #[test]
+    fn darwin_reboot_resets_baselines() {
+        let start = std::time::Instant::now();
+        let mut r = Reducer::default(); read(FIXTURE, &mut r, start);
+        let s = FIXTURE.replace("1788608901", "1788608902");
+        assert_eq!(avail(&read(&s, &mut r, start + crate::ssh::metrics::sampler::CADENCE).net_up).bytes_per_second, None);
+    }
+}

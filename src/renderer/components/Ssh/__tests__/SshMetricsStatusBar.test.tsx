@@ -317,3 +317,12 @@ test.each(['Metrics collector unavailable', 'Metrics command failed', 'Metrics e
     expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toContain('12');
   },
 );
+
+ test('Darwin measurements render Connected with values', () => {
+    const reading = sample(14);
+    reading.metrics.host = { available: true, hostname: 'mac-host.local', os: { available: true, name: 'macOS 26.5.2' }, architecture: { available: true, name: 'arm64' } };
+    const h = setup(); h.publish(reading); h.render();
+    expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
+    expect(bar().textContent).toContain('14%');
+    expect(bar().textContent).toContain('mac-host.local');
+ });

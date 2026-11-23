@@ -61,13 +61,13 @@ fn snapshot_json_has_nine_camelcase_metric_keys_plus_only_the_platform_label_and
         }
     }));
 
-    let unsupported = to_value(sample(&mut reducer, "", &[("platform", "Darwin", 0)])).unwrap();
+    let unsupported = to_value(sample(&mut reducer, "", &[("platform", "FreeBSD", 0)])).unwrap();
     assert_eq!(unsupported.as_object().unwrap().len(), 10);
-    assert_eq!(unsupported["unsupportedPlatform"], json!("macOS (Darwin)"));
+    assert_eq!(unsupported["unsupportedPlatform"], json!("FreeBSD"));
     assert_eq!(unsupported["host"], json!({"available": true, "hostname": "derived-host",
-        "os": {"available": true, "name": "Darwin"}, "architecture": {"available": true, "name": "arm64"}}));
+        "os": {"available": true, "name": "FreeBSD"}, "architecture": {"available": true, "name": "arm64"}}));
     for key in ["cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
-        assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are supported only on Linux (Darwin)"}));
+        assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are supported only on Linux (FreeBSD)"}));
     }
     let other = to_value(sample(&mut reducer, "", &[("platform", "FreeBSD", 0)])).unwrap();
     assert_eq!(other["unsupportedPlatform"], json!("FreeBSD"));

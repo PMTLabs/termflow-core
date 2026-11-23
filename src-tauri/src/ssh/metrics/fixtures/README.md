@@ -64,3 +64,5 @@ the sanitized bytes independently and fill the literal oracles
 `derived-who-permission.txt` is a handwritten partial stdout fragment inserted
 under a nonzero permission status. In-memory protocol variants and recording
 utility outputs are also synthetic, not host captures.
+
+Darwin: synthesized from sanitized real macOS 26.5.2 arm64 command output, 2026-11-23. Source: darwin-commands.txt and darwin-commands.sh.txt. The iostat two header lines and first data row were synthesized around the captured final interval row (duplicated for the first row); all other command values are unchanged. Nonce is fixed for tests.
