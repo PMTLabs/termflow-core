@@ -67,15 +67,27 @@ export function externalBinFor(rootDir, args, target) {
   return bins;
 }
 
+/** Cargo's output folder for the profile: `dev` builds land in `debug`, every other profile in its own name. */
+function profileDir(opts) {
+  const index = opts.findIndex(arg => arg === '--profile' || arg.startsWith('--profile='));
+  if (index >= 0) {
+    const name = opts[index].startsWith('--profile=') ? opts[index].slice('--profile='.length) : opts[index + 1];
+    if (!name || name.startsWith('-')) throw new Error('Missing --profile value');
+    return name === 'dev' ? 'debug' : name;
+  }
+  return opts.includes('--debug') || opts.includes('-d') ? 'debug' : 'release';
+}
+
 /** `<target dir>[/<triple>]/<profile>`: cargo adds the triple only for an explicit --target. */
 export function releaseDirFor(args, target, targetDirectory) {
   const opts = options(args);
-  const profile = opts.includes('--debug') || opts.includes('-d') ? 'debug' : 'release';
+  const profile = profileDir(opts);
   const explicit = opts.some(arg => arg === '--target' || arg === '-t' || arg.startsWith('--target='));
   return explicit ? join(targetDirectory, target, profile) : join(targetDirectory, profile);
 }
 
-/** Source and destination for every external binary. */
+/** Source and destination for every external binary. For `universal-apple-darwin` Tauri itself
+ * requires `<name>-universal-apple-darwin` sources, so the same naming holds there. */
 export function sidecarPlan(rootDir, externalBin, target, releaseDir) {
   const ext = target.includes('windows') ? '.exe' : '';
   return externalBin.map(entry => ({
@@ -89,6 +101,9 @@ const sha256 = path => createHash('sha256').update(readFileSync(path)).digest('h
 export function stageSidecars(plan) {
   for (const { source, dest } of plan) {
     if (!existsSync(source)) throw new Error(`sidecar source missing: ${source}`);
+    // An identical copy is left alone: on Windows a running sidecar cannot be overwritten, and
+    // failing the build for a file that is already current would be a false failure.
+    if (existsSync(dest) && sha256(source) === sha256(dest)) continue;
     mkdirSync(join(dest, '..'), { recursive: true });
     copyFileSync(source, dest);
   }

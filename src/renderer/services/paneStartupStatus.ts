@@ -35,7 +35,7 @@ export function getPaneStartupStatus(
 ): PaneStartupStatus | null {
   if (processId) return null;
   if (startupFailed === 'PtyHostOutdated') return {
-    text: "This TermFlow's terminal host is older than the app, so it can't open SSH sessions. Reinstall or rebuild TermFlow to get a matching host.", failed: true,
+    text: "This TermFlow's terminal host is older than the app, so it can't open SSH sessions. Reinstall or rebuild TermFlow; if this persists, quit TermFlow from the tray icon (this closes all terminals) and start it again.", failed: true,
   };
   if (typeof startupFailed === 'object') return {
     text: `TermFlow's data folder path can't be used for SSH helpers: ${startupFailed.reason}.`, failed: true,
