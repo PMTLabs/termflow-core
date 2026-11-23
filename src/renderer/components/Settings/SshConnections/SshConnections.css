@@ -44,10 +44,16 @@
 .ssh-inline-row { display:flex; gap:8px; align-items:center; }
 .ssh-inline-row .setting-input { flex:1; width:auto; }
 .ssh-inline-row .au-btn { flex:none; align-self:stretch; }
-.ssh-connection-editor .ssh-editor-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-.ssh-connection-editor .ssh-actions-group { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.ssh-connection-editor .ssh-editor-actions { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; }
+.ssh-connection-editor .ssh-actions-group { display:flex; flex-wrap:nowrap; align-items:center; gap:8px; }
+/* Same box height as the text buttons beside it: the glyph replaces a label, not the padding rhythm. */
+.ssh-connection-editor .ssh-delete-btn { align-self:stretch; justify-content:center; padding:0 8px; line-height:1; }
+.ssh-connection-editor .ssh-delete-btn svg { display:block; }
 .ssh-connection-editor .ssh-actions-end { margin-left:auto; justify-content:flex-end; }
 .ssh-editor-help { display:flex; flex-direction:column; gap:2px; margin-top:8px; color:var(--text-secondary); }
+/* The row needs ~333px in headless Edge (measured, D88). The window has no minimum width, so a single-column
+   editor can get narrower than that; only then do the two groups wrap, never below that width's neighbours. */
+@container sshedit (max-width:340px) { .ssh-connection-editor .ssh-editor-actions { flex-wrap:wrap; } }
 @container sshedit (max-width:440px) {
   .ssh-editor-grid { grid-template-columns:minmax(0, 1fr); }
   .ssh-editor-grid > .ssh-span-2, .ssh-editor-grid > .ssh-span-all { grid-column:1 / -1; }}

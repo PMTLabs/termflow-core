@@ -18,7 +18,8 @@ import { SettingsPage } from '../SettingsPage';
 import { clearSettingsGuard, runSettingsGuard } from '../../../services/settingsNavGuard';
 import type { SshStoreApi } from '../../../types/ssh';
 let root: Root; let container: HTMLDivElement; let save: jest.Mock;
-const button = (label: string) => { const result = [...document.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.trim() === label); if (!result) throw Error(`Button missing: ${label}`); return result; };
+// An open dialog's buttons win: the guard dialog and the editor row both say Save and Discard.
+const button = (label: string) => { const find = (scope: ParentNode) => [...scope.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.trim() === label); const dialog = document.querySelector('[role="dialog"]'); const result = (dialog && find(dialog)) || find(document); if (!result) throw Error(`Button missing: ${label}`); return result; };
 const active = () => container.querySelector('.settings-nav-item.active')?.textContent;
 const prompt = () => document.querySelector('.unsaved-dialog-overlay, .confirm-dialog-overlay');
 async function dirty() {

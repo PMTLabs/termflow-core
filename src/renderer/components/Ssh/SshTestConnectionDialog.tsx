@@ -94,6 +94,13 @@ function authCopy(kind?: string, auth?: SshConnection['auth'], final = false) {
   return failureCopy.get('auth-rejected')!;
 }
 
+function CheckIcon() {
+  return <svg className="ssh-success-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    <path d="M4.8 8.2l2.1 2.1 4.3-4.6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>;
+}
+
 function endpoint(row: Pick<SshConnection, 'user' | 'host' | 'port'>) {
   return `${row.user ? row.user + '@' : ''}${row.host.includes(':') && !row.host.startsWith('[') ? '[' + row.host + ']' : row.host}:${row.port}`;
 }
@@ -139,8 +146,8 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
   const code = failure ? failure.code : view?.errorCode;
   const credential = code === 'auth-rejected' ? lastCredential.current : undefined;
   const failedHop = view?.promptTarget ?? credential?.promptTarget;
-  const destination = failedHop ? `${failedHop.hop === 'jump' ? 'jump host ' : ''}${endpoint(failedHop)}`
-    : target ? `${endpoint(target)}${jump ? ' through jump host ' + endpoint(jump) : ''}` : undefined;
+  const route = target ? `${endpoint(target)}${jump ? ' through jump host ' + endpoint(jump) : ''}` : undefined;
+  const destination = failedHop ? `${failedHop.hop === 'jump' ? 'jump host ' : ''}${endpoint(failedHop)}` : route;
   const auth = failedHop?.hop === 'jump' ? jump?.auth : target?.auth;
   const line = !failure && code === 'known-hosts-malformed' ? view?.errorLine : undefined;
   const message = line === 0 ? 'known_hosts is not UTF-8 text (it may be saved as UTF-16). Save it as UTF-8 before connecting.'
@@ -161,7 +168,13 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
           {finalFailure && <p className="ssh-prompt-error" role="alert">{destination && `Couldn't complete the SSH test for ${destination}. `}{message}</p>}
           {!failure && (!view || view.state === 'connecting') && <p className="ssh-test-progress" role="status"><span className="ssh-spinner" aria-hidden="true" />Connecting…</p>}
           {!failure && changed && view && <SshHostKeyPrompt view={view} onCancel={close} onTrust={async () => {}} />}
-          {!failure && view?.state === 'connected' && <p role="status">Connected. File and metric capabilities have not been tested.{code === 'remember-unavailable' && ` ${failureCopy.get('remember-unavailable')}`}</p>}
+          {!failure && view?.state === 'connected' && <div className="ssh-prompt-success" role="status">
+            <CheckIcon />
+            {/* The route, never failedHop: a prompt's hop can linger on the connected snapshot. */}
+            <p><strong>Connected</strong>{route ? ` to ${route}.` : '.'} <span className="ssh-test-muted">File and metric capabilities have not been tested.</span></p>
+          </div>}
+          {/* Connected but not saved is a warning, so it stays out of the green panel. */}
+          {!failure && view?.state === 'connected' && code === 'remember-unavailable' && <p className="ssh-prompt-warning" role="status">{failureCopy.get('remember-unavailable')}</p>}
         </div>
         <div className="ssh-test-actions"><button type="button" className="au-btn" onClick={close}>Close</button></div>
       </>}

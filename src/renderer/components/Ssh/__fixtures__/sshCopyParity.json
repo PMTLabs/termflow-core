@@ -63,6 +63,6 @@
  "pane prompt saved-credential-unavailable": "SSH passwordTarget: alice@target.test:22The app channel signs in separately. This credential is never typed into the terminal.Saved credential unavailable. Enter it again; Remember may be unavailable.PasswordRemember for the app channelCancelContinue",
  "dialog needs-secret no reason": "Test SSH connectionSSH passwordTarget: alice@target.test:22The app channel signs in separately. This credential is never typed into the terminal.PasswordRemember for the app channelCancelContinue",
  "pane prompt no reason": "SSH passwordTarget: alice@target.test:22The app channel signs in separately. This credential is never typed into the terminal.PasswordRemember for the app channelCancelContinue",
- "dialog connected remember-unavailable": "Test SSH connectionTests the native app channel only; no terminal or recent-use record is created.Connected. File and metric capabilities have not been tested. The credential was not saved. Check access to the system keyring before using Remember again.Close",
+ "dialog connected remember-unavailable": "Test SSH connectionTests the native app channel only; no terminal or recent-use record is created.Connected. File and metric capabilities have not been tested.The credential was not saved. Check access to the system keyring before using Remember again.Close",
  "dialog connected no reason": "Test SSH connectionTests the native app channel only; no terminal or recent-use record is created.Connected. File and metric capabilities have not been tested.Close"
 }
