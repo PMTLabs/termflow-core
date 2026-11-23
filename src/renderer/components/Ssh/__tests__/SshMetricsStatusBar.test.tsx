@@ -294,7 +294,7 @@ test('a host with no collector says so instead of Connected, and still shows its
   open();
 
   // A Linux sample right after goes back to the live, Connected bar.
-  act(() => h.publish(sample(12)));
+  act(() => h.publish(sample(12, B, darwin.sampledAt + 1)));
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
   expect(bar().querySelector('.is-live')).not.toBeNull();
 });
@@ -309,7 +309,11 @@ test.each(['Metrics collector unavailable', 'Metrics command failed', 'Metrics e
     expect(state.textContent).toBe('○ Metrics unavailable');
     expect(state.title).toBe(`Metrics unavailable — ${reason}`);
     expect(bar().querySelector('.is-live')).toBeNull();
-    act(() => h.publish(sample(12)));
+    // Strictly newer than the reading, or the slice drops it as stale within the same millisecond.
+    act(() => h.publish(sample(12, B, reading.sampledAt + 1)));
     expect(state.textContent).toBe('● Connected');
+    expect(state.title).toBe('Connected');
+    expect(bar().querySelector('.is-live')).not.toBeNull();
+    expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toContain('12');
   },
 );

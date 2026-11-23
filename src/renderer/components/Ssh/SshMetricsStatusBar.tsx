@@ -29,7 +29,7 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
     : paused ?? (failureReason ? 'Metrics unavailable' : unsupported ? `Metrics not supported on ${unsupported}`
       : sample ? 'Connected' : delayed ? 'Metrics delayed' : 'Collecting first sample');
   const unsupportedReason = unsupported && sample?.metrics.cpu.available === false ? sample.metrics.cpu.reason : undefined;
-  const waiting = connected && !canResume && !delayed && !unavailable;
+  const waiting = connected && !canResume && !delayed && !failureReason;
   const visible = SSH_METRIC_KEYS.filter(key => !hidden.includes(key));
   const items: ContextMenuItem[] = [
     { label: 'Copy all metrics', enabled: !!sample, click: copy },

@@ -88,10 +88,44 @@ fn snapshot_json_has_nine_camelcase_metric_keys_plus_only_the_platform_label_and
 fn whole_sample_unavailable_has_explicit_reason_without_unsupported_label() {
     for reason in ["Metrics collector unavailable", "Metrics command failed", "Metrics exec unavailable"] {
         let value = to_value(Metrics::unavailable(reason)).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 10);
         assert_eq!(value["unavailableReason"], json!(reason));
         assert!(value.get("unsupportedPlatform").is_none());
         for key in ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
             assert_eq!(value[key], json!({"available": false, "reason": reason}));
         }
     }
+}
+
+#[test]
+fn a_parsed_sample_that_measured_nothing_is_flagged_unavailable() {
+    let mut reducer = Reducer::default();
+    // An unknown platform whose hostname also failed: every metric, Host included, is n/a.
+    let unknown = to_value(sample(&mut reducer, "", &[("platform", "", 1), ("hostname", "", 1)])).unwrap();
+    assert_eq!(unknown.as_object().unwrap().len(), 10);
+    assert_eq!(unknown["unavailableReason"], json!("Remote platform unavailable"));
+    assert!(unknown.get("unsupportedPlatform").is_none());
+
+    // Linux with every section failing.
+    let keys = ["platform", "hostname", "architecture", "stat", "meminfo", "netdev", "uptime", "bootId", "cpuinfo",
+        "nproc", "loadavg", "who", "dfLocal", "dfNfs", "mounts", "osRelease"];
+    let failed: Vec<_> = keys.iter().filter(|k| **k != "platform").map(|k| (*k, "", 1)).collect();
+    let linux = to_value(sample(&mut Reducer::default(), "", &failed)).unwrap();
+    for key in ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
+        assert_eq!(linux[key]["available"], json!(false), "{key}");
+    }
+    assert_eq!(linux["unavailableReason"], linux["cpu"]["reason"]);
+    assert!(linux["unavailableReason"].is_string());
+
+    // One measured metric is a measurement: no flag.
+    let mut one = failed.clone();
+    one.retain(|s| s.0 != "meminfo");
+    let partial = to_value(sample(&mut Reducer::default(), "", &one)).unwrap();
+    assert_eq!(partial["ram"]["available"], json!(true));
+    assert!(partial.get("unavailableReason").is_none());
+
+    // A named unsupported platform keeps its own status even though Host failed too (D95).
+    let darwin = to_value(sample(&mut Reducer::default(), "", &[("platform", "Darwin", 0), ("hostname", "", 1)])).unwrap();
+    assert_eq!(darwin["unsupportedPlatform"], json!("macOS (Darwin)"));
+    assert!(darwin.get("unavailableReason").is_none());
 }
