@@ -71,6 +71,10 @@ describe('SSH envelope and terminal remainder', () => {
     const wide = sshFallbackSurfaceBox({ w: 1600, h: 680 }, false);
     expect(wide.source).toBe('fallback');
     expect(wide.envelope).toEqual({ w: 1600 + SSH_CSS_BROWSER_W, h: 680 + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H + SSH_CSS_STATUS_H });
+    const custom = sshFallbackSurfaceBox({ w: 1600, h: 680 }, false, 420);
+    expect(custom.expandedBrowserW).toBe(420);
+    expect(custom.envelope.w).toBe(2020);
+    expect(sshBrowserAllocation(custom, false, 480)).toBe(480);
     const tight = sshFallbackSurfaceBox({ w: 300, h: 200 }, false);
     // a = min(260, 0.4 * (300 + a)) -> a = 200, and 200 is exactly 40% of the 500 px envelope.
     close(tight.expandedBrowserW, 200);

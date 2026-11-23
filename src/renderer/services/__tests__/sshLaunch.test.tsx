@@ -207,7 +207,7 @@ test('ssh_root_preseed_keeps_full_tag_and_default_profile', async () => {
     store.dispatch(addTabTree({ tabId: placed.tabId, tree: { ...leaf, ssh: { ...expected, hiddenMetrics: [...sentinel.hiddenMetrics] } } }));
     store.dispatch(patchSshPaneTag({
       terminalId: placed.terminalId,
-      patch: { browserCollapsed: true, browserPath: '/srv/a b', followCd: true },
+      patch: { browserCollapsed: true, browserPath: '/srv/a b', followCd: true, browserWidth: sentinel.browserWidth },
     }));
     await act(async () => { render(); await flush(); });
     const expectedTags = { [placed.terminalId]: sentinel, 'tm-other': other };

@@ -2,6 +2,10 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SshPaneShell } from './SshPaneShell';
+import { SshPathBar } from './SshPathBar';
+import { SshFileList } from './SshFileList';
+import { sanitizePaneSshFields } from '../../services/sshPanePersistence';
+import type { PaneNode } from '../../store/slices/panesSlice';
 import { SshSecretPrompt } from './SshSecretPrompt';
 import { SshHostKeyPrompt } from './SshHostKeyPrompt';
 import { SshDisconnectedBanner } from './SshDisconnectedBanner';
@@ -13,6 +17,78 @@ let container: HTMLDivElement, root: ReturnType<typeof createRoot>;
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 beforeEach(() => { container = document.createElement('div'); document.body.append(container); root = createRoot(container); });
 afterEach(() => { act(() => root.unmount()); container.remove(); });
+
+test('browser toggle and separator expose their state and commit resize actions', () => {
+  const collapse = jest.fn(), patch = jest.fn();
+  function Fixture() {
+    const [collapsed, setCollapsed] = React.useState(false);
+    const [width, setWidth] = React.useState<number>();
+    return <SshPaneShell view={{ ...view('connected'), terminalId: undefined }} terminal={<div />}
+      browserCollapsed={collapsed} preferredBrowserWidth={width}
+      onBrowserCollapsedChange={value => { collapse(value); setCollapsed(value); }}
+      onBrowserWidthChange={value => { patch({ browserWidth: value }); setWidth(value); }}
+      onSecret={jest.fn()} onTrust={jest.fn()} onCancel={jest.fn()} />;
+  }
+  act(() => root.render(<Fixture />));
+  const toggle = (name: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${name} file browser"]`)!;
+  const separator = () => container.querySelector('[role="separator"][aria-label="Resize file browser"]');
+  expect(toggle('Collapse').getAttribute('aria-expanded')).toBe('true');
+  act(() => toggle('Collapse').click());
+  expect(collapse).toHaveBeenLastCalledWith(true);
+  expect(toggle('Expand').getAttribute('aria-expanded')).toBe('false');
+  expect(separator()).toBeNull();
+  act(() => toggle('Expand').click());
+  expect(collapse).toHaveBeenLastCalledWith(false);
+  const grip = separator()!;
+  const key = (key: string) => act(() => grip.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true })));
+  const widthIs = (width: number) => {
+    expect(grip.getAttribute('aria-valuenow')).toBe(String(width));
+    expect(patch).toHaveBeenLastCalledWith({ browserWidth: width });
+  };
+  key('ArrowRight'); widthIs(276);
+  key('ArrowLeft'); widthIs(260);
+  for (let i = 0; i < 30; i++) key('ArrowLeft');
+  widthIs(200);
+  for (let i = 0; i < 30; i++) key('ArrowRight');
+  widthIs(600);
+  act(() => grip.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+  widthIs(260);
+  patch.mockClear();
+  const pointer = (target: EventTarget, type: string, clientX: number, buttons: number) =>
+    act(() => target.dispatchEvent(Object.assign(new MouseEvent(type, { bubbles: true, clientX, buttons }), { pointerId: 1 })));
+  pointer(grip, 'pointerdown', 260, 1);
+  pointer(window, 'pointermove', 310, 1);
+  pointer(window, 'pointermove', 330, 1);
+  expect(grip.getAttribute('aria-valuenow')).toBe('330');
+  expect(patch).not.toHaveBeenCalled();
+  pointer(window, 'pointerup', 330, 0);
+  expect(patch).toHaveBeenCalledTimes(1);
+  widthIs(330);
+});
+
+test('Follow cd uses the house checkbox and toggles the preference', () => {
+  const change = jest.fn();
+  act(() => root.render(<SshPathBar draft="/" setDraft={jest.fn()} navigate={jest.fn()}
+    followCd={false} onFollowChange={change} disabled={false} />));
+  const label = container.querySelector<HTMLLabelElement>('.au-checkrow')!;
+  expect(label.textContent).toContain('Follow cd');
+  act(() => (label.control as HTMLInputElement).click());
+  expect(change).toHaveBeenCalledWith(true);
+});
+
+test('persisted browser width is optional, clamped, and rejects malformed values', () => {
+  const tag = { connectionId: 'saved' };
+  const clean = (ssh: object) => sanitizePaneSshFields({ id: 'pane', type: 'terminal', terminalId: 'tm', ssh } as PaneNode).ssh;
+  expect(clean(tag)).not.toHaveProperty('browserWidth');
+  expect(clean({ ...tag, browserWidth: 320 })?.browserWidth).toBe(320);
+  expect(clean({ ...tag, browserWidth: 700 })?.browserWidth).toBe(600);
+  expect(clean({ ...tag, browserWidth: 80 })?.browserWidth).toBe(200);
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    expect(clean({ ...tag, browserWidth: '320' })).toBeUndefined();
+    expect(clean({ ...tag, browserWidth: Infinity })).toBeUndefined();
+  } finally { warn.mockRestore(); }
+});
 
 test('SshSecretPrompt secret_submit_sends_once_then_clears_without_redux_or_pty_write', async () => {
   let resolve: () => void = () => {}; const submit = jest.fn(() => new Promise<void>(r => { resolve = r; }));
@@ -250,4 +326,23 @@ test('SshPaneShell inactiveSurface_closesChromePopover_withoutTakingFocusOrEscap
     // The status row (069's focusable bar, D66) follows the same rule (review 349 F6).
     expect(container.querySelector('.ssh-status')!.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
   } finally { outside.remove(); }
+});
+
+test('folder rows expand through a plain chevron button that reports its state (D92)', () => {
+  const toggle = jest.fn();
+  const entries = [{ name: 'src', path: '/r/src', kind: 'directory' as const }, { name: 'a.txt', path: '/r/a.txt', kind: 'file' as const }];
+  const render = (expanded: Set<string>) => act(() => root.render(<SshFileList entries={entries} expanded={expanded}
+    childrenByPath={{ '/r/src': { entries: [] } }} disabled={false} onSelect={jest.fn()} onNavigate={jest.fn()} onToggle={toggle} />));
+  render(new Set());
+  const chevron = () => container.querySelector<HTMLButtonElement>('button.ssh-file-expander')!;
+  expect(container.querySelectorAll('button.ssh-file-expander')).toHaveLength(1); // files get a spacer, not a tab stop
+  expect(chevron().classList.contains('au-btn')).toBe(false);
+  expect(chevron().getAttribute('aria-label')).toBe('Expand src');
+  expect(chevron().getAttribute('aria-expanded')).toBe('false');
+  expect(chevron().querySelector('svg[aria-hidden="true"]')).not.toBeNull();
+  act(() => chevron().click());
+  expect(toggle).toHaveBeenCalledWith(entries[0]);
+  render(new Set(['/r/src']));
+  expect(chevron().getAttribute('aria-label')).toBe('Collapse src');
+  expect(chevron().getAttribute('aria-expanded')).toBe('true');
 });

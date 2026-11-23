@@ -1,11 +1,12 @@
 .ssh-file-browser { padding:6px; font-size:12px; min-width:0; overflow-wrap:anywhere; }
-.ssh-file-toolbar, .ssh-path-bar { display:flex; flex-wrap:wrap; gap:4px; align-items:center; margin-bottom:6px; }
-.ssh-file-toolbar .au-btn, .ssh-path-bar .au-btn { padding:2px 5px; }
+.ssh-file-toolbar, .ssh-path-bar { display:flex; flex-wrap:nowrap; gap:4px; align-items:center; margin-bottom:6px; }
+.ssh-file-toolbar .au-btn, .ssh-path-bar .au-btn { display:inline-grid; place-items:center; flex:none; padding:2px 5px; }
 .ssh-path-bar input:not([type=checkbox]), .ssh-remote-name {
   min-width:0; color:var(--text-primary); background:var(--bg-primary);
   border:1px solid var(--border-color); border-radius:4px; padding:4px;
 }
-.ssh-path-bar input:not([type=checkbox]) { flex:1 1 70px; }
+.ssh-path-bar input:not([type=checkbox]) { flex:1; min-width:0; }
+.ssh-follow-cd { flex:none; white-space:nowrap; }
 .ssh-remote-name { display:block; width:100%; box-sizing:border-box; margin-top:4px; }
 .ssh-browser-detail, .ssh-file-size { color:var(--text-secondary); }
 .ssh-file-rows.stale { opacity:.55; }
@@ -14,8 +15,14 @@
 .ssh-file-row { display:flex; align-items:center; gap:4px; }
 .ssh-file-row button:disabled { pointer-events:none; } /* stale rows still own context/middle mouse */
 .ssh-file-row[data-selected=true] { background:var(--bg-hover); }
-.ssh-file-expander { flex:0 0 19px; }
-.ssh-file-expander.au-btn { padding:0; }
+/* D92: a plain chevron, not a boxed button: transparent, hover tint only, rotated when open. */
+.ssh-file-expander { flex:0 0 16px; display:inline-grid; place-items:center; width:16px; height:16px; padding:0; margin:0;
+  color:var(--text-secondary); background:transparent; border:0; border-radius:3px; cursor:pointer; }
+button.ssh-file-expander:hover { color:var(--text-primary); background:var(--bg-hover); }
+.ssh-file-expander:focus-visible { outline:2px solid var(--accent-color, #007acc); outline-offset:0; }
+.ssh-file-expander > svg { transition:transform .12s ease; }
+.ssh-file-expander[aria-expanded=true] > svg { transform:rotate(90deg); }
+@media (prefers-reduced-motion:reduce) { .ssh-file-expander > svg { transition:none; } }
 .ssh-file-name {
   flex:1; min-width:0; text-align:start; color:inherit; background:transparent;
   border:0; padding:3px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -28,3 +35,12 @@
 .ssh-permission-grid th:first-child { text-align:start; }
 .ssh-permission-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 .ssh-permission-fields input { display:block; width:12ch; }
+/* AuCheck outside the automation editor: `.au-checkrow` is styled only under `.au-editor`, where it
+   is a bordered card row. In this toolbar it is the same mark and hidden native input, inline. */
+.ssh-follow-cd .au-checkrow { position:relative; display:inline-flex; align-items:center; gap:5px; cursor:pointer; color:var(--text-primary); }
+.ssh-follow-cd .au-checkrow input { position:absolute; opacity:0; width:1px; height:1px; margin:0; }
+.ssh-follow-cd .au-cmark { flex:none; display:grid; place-items:center; box-sizing:border-box; width:13px; height:13px; font-size:.7rem; line-height:1; color:transparent; border:1.5px solid #59606b; border-radius:4px; }
+.ssh-follow-cd .au-checkrow.on .au-cmark { color:#101115; background:#5aa9c9; border-color:#5aa9c9; }
+.ssh-follow-cd .au-checkrow input:focus-visible + .au-cmark { outline:2px solid #5aa9c9; outline-offset:2px; }
+.ssh-follow-cd .au-checkrow.disabled { opacity:.6; cursor:not-allowed; }
+@media (forced-colors:active) { .ssh-follow-cd .au-cmark { border-color:CanvasText; } .ssh-follow-cd .au-checkrow.on .au-cmark { color:Canvas; background:Highlight; border-color:Highlight; } }

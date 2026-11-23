@@ -3,6 +3,7 @@ import { generateId } from '../../utils/id';
 import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, findLeafByTerminalId, EdgeZone } from './paneTreeOps';
 import { setInitialCwd } from '../../services/initialCwd';
 
+import { clampSshBrowserWidth } from '../../types/sshBrowserWidth';
 import { normalizeHiddenMetrics, type MetricKey, type SshPaneTag } from '../../types/ssh';
 
 export interface PaneNode {
@@ -623,14 +624,17 @@ const panesSlice = createSlice({
 
     patchSshPaneTag: (state, action: PayloadAction<{
       terminalId: string;
-      patch: Partial<Pick<SshPaneTag, 'browserCollapsed' | 'browserPath' | 'followCd'>>;
+      patch: Partial<Pick<SshPaneTag, 'browserCollapsed' | 'browserWidth' | 'browserPath' | 'followCd'>>;
     }>) => {
       const { terminalId, patch } = action.payload;
       for (const [tabId, tree] of Object.entries(state.treesByTabId)) {
         const tag = findLeafByTerminalId({ [tabId]: tree }, terminalId)?.ssh;
         if (!tag) continue;
 
-        // Copy only the three browser fields, even if an untyped caller sends more.
+        // Copy only the four browser fields, even if an untyped caller sends more.
+        if (typeof patch.browserWidth === 'number' && Number.isFinite(patch.browserWidth)) {
+          tag.browserWidth = clampSshBrowserWidth(patch.browserWidth);
+        }
         if (typeof patch.browserCollapsed === 'boolean') tag.browserCollapsed = patch.browserCollapsed;
         if (typeof patch.followCd === 'boolean') tag.followCd = patch.followCd;
         if (Object.prototype.hasOwnProperty.call(patch, 'browserPath')) {

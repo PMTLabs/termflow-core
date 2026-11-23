@@ -18,6 +18,8 @@
 
 import { SSH_METRICS_BAR_HEIGHT_PX } from '../Ssh/sshPaneLayout';
 
+import { SSH_BROWSER_DEFAULT_WIDTH, SSH_BROWSER_MAX_FRACTION } from '../../types/sshBrowserWidth';
+
 export interface Box { w: number; h: number }
 
 /** Canvas-only and ephemeral: keyed by terminalId, cleared with `clearHostBoxes`, never persisted. */
@@ -28,6 +30,7 @@ export interface SshSurfaceBox {
   initialTerminal: Box;
   /** The browser column expanded, including its border, as capped by the shell CSS. */
   expandedBrowserW: number;
+  preferredBrowserWidth?: number;
   /** 068's collapsed rail, including its border. */
   collapsedBrowserW: number;
   /** The single fixed status row, including its border. */
@@ -53,9 +56,9 @@ export interface SshSurfaceBox {
  *   .ssh-launch-strip       { box-sizing:border-box; height:36px }   (Ssh/SshLaunchNotice.css)
  *   .ssh-pane-chrome        { flex:none; box-sizing:border-box; height:36px }   (= SSH_PANE_CHROME_H)
  */
-export const SSH_CSS_BROWSER_W = 260;
+export const SSH_CSS_BROWSER_W = SSH_BROWSER_DEFAULT_WIDTH;
 export const SSH_CSS_RAIL_W = 30;
-export const SSH_CSS_BROWSER_MAX_FRACTION = 0.4;
+export const SSH_CSS_BROWSER_MAX_FRACTION = SSH_BROWSER_MAX_FRACTION;
 /** D66: the one bottom row (shell status + 069 metrics bar), `.ssh-status` in SshPaneShell.css. */
 export const SSH_CSS_STATUS_H = SSH_METRICS_BAR_HEIGHT_PX;
 export const SSH_CSS_LAUNCH_STRIP_H = 36;
@@ -67,8 +70,9 @@ export function cappedBrowserW(cssW: number, bodyW: number): number {
   return Math.min(cssW, SSH_CSS_BROWSER_MAX_FRACTION * bodyW);
 }
 
-export function sshBrowserAllocation(box: SshSurfaceBox, collapsed: boolean): number {
-  return collapsed ? box.collapsedBrowserW : box.expandedBrowserW;
+export function sshBrowserAllocation(box: SshSurfaceBox, collapsed: boolean, preferredBrowserWidth = box.preferredBrowserWidth): number {
+  return collapsed ? box.collapsedBrowserW : preferredBrowserWidth === box.preferredBrowserWidth
+    ? box.expandedBrowserW : cappedBrowserW(preferredBrowserWidth ?? SSH_CSS_BROWSER_W, box.envelope.w);
 }
 
 /** The terminal slot: the remainder of the frozen envelope for the CURRENT collapse state. */
@@ -81,13 +85,14 @@ export function sshTerminalBox(box: SshSurfaceBox, collapsed: boolean): Box {
 
 /** Builds the descriptor from a measured source: terminal border box plus the rendered allocations. */
 export function sshSurfaceBoxFrom(m: {
-  terminal: Box; browserW: number; collapsed: boolean; statusH: number; columnGap: number;
+  terminal: Box; browserW: number; collapsed: boolean; statusH: number; columnGap: number; preferredBrowserWidth?: number;
 }): SshSurfaceBox {
   const envelope = { w: m.terminal.w + m.browserW + m.columnGap, h: m.terminal.h + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H + m.statusH };
   return {
     envelope,
     initialTerminal: { ...m.terminal },
-    expandedBrowserW: m.collapsed ? cappedBrowserW(SSH_CSS_BROWSER_W, envelope.w) : m.browserW,
+    expandedBrowserW: m.collapsed ? cappedBrowserW(m.preferredBrowserWidth ?? SSH_CSS_BROWSER_W, envelope.w) : m.browserW,
+    ...(m.preferredBrowserWidth !== undefined ? { preferredBrowserWidth: m.preferredBrowserWidth } : {}),
     collapsedBrowserW: m.collapsed ? m.browserW : cappedBrowserW(SSH_CSS_RAIL_W, envelope.w),
     statusH: m.statusH,
     stripH: SSH_CSS_LAUNCH_STRIP_H,
@@ -102,10 +107,10 @@ export function sshSurfaceBoxFrom(m: {
  * allocations. Its first real fit is expected (it had no correct size to keep). The capped width
  * solves `a = min(cssW, 0.4 * (terminal.w + a))`, i.e. the cap binds below `terminal.w = 1.5 cssW`.
  */
-export function sshFallbackSurfaceBox(terminal: Box, collapsed: boolean): SshSurfaceBox {
+export function sshFallbackSurfaceBox(terminal: Box, collapsed: boolean, preferredBrowserWidth?: number): SshSurfaceBox {
   const solve = (cssW: number) => Math.min(cssW, (SSH_CSS_BROWSER_MAX_FRACTION * terminal.w) / (1 - SSH_CSS_BROWSER_MAX_FRACTION));
-  const browserW = solve(collapsed ? SSH_CSS_RAIL_W : SSH_CSS_BROWSER_W);
-  return { ...sshSurfaceBoxFrom({ terminal, browserW, collapsed, statusH: SSH_CSS_STATUS_H, columnGap: 0 }), source: 'fallback' };
+  const browserW = solve(collapsed ? SSH_CSS_RAIL_W : preferredBrowserWidth ?? SSH_CSS_BROWSER_W);
+  return { ...sshSurfaceBoxFrom({ terminal, browserW, collapsed, preferredBrowserWidth, statusH: SSH_CSS_STATUS_H, columnGap: 0 }), source: 'fallback' };
 }
 
 /**

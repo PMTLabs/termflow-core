@@ -627,7 +627,7 @@ export const CanvasMode: React.FC = () => {
     const out: Record<string, SshSurfaceBox> = {};
     for (const n of model.nodes) {
       const tag = sshTags[n.terminalId];
-      if (tag) out[n.terminalId] = measureSshSurfaceBox(n.terminalId, hostBoxes[n.terminalId], tag.browserCollapsed);
+      if (tag) out[n.terminalId] = measureSshSurfaceBox(n.terminalId, hostBoxes[n.terminalId], tag.browserCollapsed, tag.browserWidth);
     }
     return out;
   }, [model.nodes, sshTags, hostBoxes]);
@@ -1525,7 +1525,7 @@ export const CanvasMode: React.FC = () => {
                 // browser allocation for the tag's collapse state, and a terminal-slot snapshot.
                 sshTag={sshTags[n.terminalId]}
                 sshBrowserWidth={sshTags[n.terminalId] && sshBoxes[n.terminalId]
-                  ? sshBrowserAllocation(sshBoxes[n.terminalId], sshTags[n.terminalId].browserCollapsed) : undefined}
+                  ? sshBrowserAllocation(sshBoxes[n.terminalId], sshTags[n.terminalId].browserCollapsed, sshTags[n.terminalId].browserWidth) : undefined}
                 // Same culling rule as `hidden` above: a culled SSH node is not a visible surface.
                 sshVisible={isOverlaid || !isHidden(n.terminalId)}
                 SshShell={sshTags[n.terminalId] ? SshCanvasPresentation : undefined}

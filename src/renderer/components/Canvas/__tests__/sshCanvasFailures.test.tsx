@@ -46,7 +46,7 @@ beforeEach(() => {
 });
 
 const lastList = (bridge: ReturnType<typeof makeBridge>) => bridge.ssh.fsList.mock.calls[bridge.ssh.fsList.mock.calls.length - 1][0];
-const buttons = (scope: ParentNode, label: string) => [...scope.querySelectorAll<HTMLButtonElement>('button')].filter(b => b.textContent === label);
+const buttons = (scope: ParentNode, label: string) => [...scope.querySelectorAll<HTMLButtonElement>('button')].filter(b => b.getAttribute('aria-label') === label || b.textContent === label);
 
 describe('host-key trust on the Canvas surface', () => {
   // D51: 066's launch notice owns the host-key and secret prompts on BOTH surfaces. In Canvas it is

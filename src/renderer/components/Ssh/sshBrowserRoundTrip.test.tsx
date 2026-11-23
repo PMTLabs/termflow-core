@@ -49,7 +49,7 @@ test('folder create waits for ack and listing; denied rename leaves the confirme
   Object.defineProperty(window, 'electronAPI', { value: { ssh: api }, configurable: true });
   const container = document.body.appendChild(document.createElement('div'));
   const root = createRoot(container);
-  const button = (label: string) => [...document.querySelectorAll('button')].find(el => el.textContent === label)!;
+  const button = (label: string) => [...document.querySelectorAll('button')].find(el => el.getAttribute('aria-label') === label || el.textContent === label)!;
   const row = (name: string) => [...container.querySelectorAll('.ssh-file-name')].find(el => el.lastChild?.textContent === name);
   const renameMenuItem = () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
     .find(el => el.querySelector('.context-menu-label')?.textContent === 'Rename')!;

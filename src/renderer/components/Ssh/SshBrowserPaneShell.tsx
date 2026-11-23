@@ -7,7 +7,7 @@ import { SshPaneShell, type SshPaneShellProps } from './SshPaneShell';
 import { readReconnectCoordinator, readSshLaunchState } from './ssh066Contract';
 
 type Props = SshFileBrowserProps & Omit<SshPaneShellProps,
-  'browser' | 'browserHandlesOffline' | 'launchDisconnected' | 'browserCollapsed' | 'onBrowserCollapsedChange'> & {
+  'browser' | 'browserHandlesOffline' | 'launchDisconnected' | 'browserCollapsed' | 'onBrowserCollapsedChange' | 'onBrowserWidthChange' | 'preferredBrowserWidth'> & {
   /**
    * The terminal's one file controller, owned by the pane composition (plan 070 §4.1 A).
    * `undefined` (only standalone tests) owns a controller here; `null` means this presentation
@@ -32,6 +32,8 @@ export function SshBrowserPaneShell({ terminalId, sshTag, surfaceActive, onPatch
   return <SshPaneShell {...shell} surfaceActive={surfaceActive} editOpenResult={opened?.terminalId === terminalId ? opened.result : shell.editOpenResult}
     browserCollapsed={sshTag.browserCollapsed} browserHandlesOffline={browserController !== null}
     launchDisconnected={launchDisconnected}
+    preferredBrowserWidth={sshTag.browserWidth}
+    onBrowserWidthChange={browserWidth => onPatchTag({ browserWidth })}
     onBrowserCollapsedChange={browserCollapsed => onPatchTag({ browserCollapsed })}
     onReconnect={reconnect ? async () => {
       const result = await reconnect(terminalId);

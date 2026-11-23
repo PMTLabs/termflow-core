@@ -37,6 +37,7 @@ export function normalizeHiddenMetrics(value: unknown): MetricKey[] {
 export interface SshPaneTag {
   connectionId: string;
   browserCollapsed: boolean;
+  browserWidth?: number;
   browserPath?: string;
   followCd: boolean;
   hiddenMetrics: MetricKey[];
