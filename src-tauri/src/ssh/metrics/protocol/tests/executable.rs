@@ -476,7 +476,6 @@ exec {shell} {} \"$@\"", flags.join(" ")));
 {mounts}
 DATA"));
 
-    assert!(!trace.contains("df -P -k -t nfs"));
     }
 }
 

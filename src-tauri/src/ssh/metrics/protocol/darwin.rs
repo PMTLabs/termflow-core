@@ -66,13 +66,3 @@ mod tests {
         assert_eq!(partitions(&[], &Ok(vec![]), true), Ok(vec![]));
     }
 }
-
-#[cfg(test)]
-mod empty_df_tests {
-    use super::*;
-    #[test]
-    fn empty_local_df_requires_header_even_without_local_mounts() {
-        assert_eq!(partitions(&[], &Ok(vec![]), false), Err(BAD_DF));
-        assert_eq!(partitions(&[], &Ok(vec![]), true), Ok(vec![]));
-    }
-}
