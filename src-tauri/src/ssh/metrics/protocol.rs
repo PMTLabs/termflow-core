@@ -220,7 +220,7 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
     if let Platform::Unsupported(name) = &sample.platform {
         sample.os = Ok(name.clone());
     }
-    if sample.platform == Platform::Linux {
+    if linux {
         let s = &sample.sections;
         sample.os = os_release(s["osRelease"].rows());
         let mounts = s["mounts"].rows().and_then(mount_inventory);
