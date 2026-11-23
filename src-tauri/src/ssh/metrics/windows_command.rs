@@ -20,6 +20,9 @@ fn encode(nonce: &str) -> Option<String> {
 
 fn bootstrap(nonce: &str) -> Option<String> {
     let gz = STANDARD.decode(PAYLOAD.trim_end()).ok()?;
+    // The last code unit can carry padding that unpacks as one extra zero byte;
+    // trim to the exact length so a strict gzip reader never sees trailing data.
+    let gz_len = gz.len();
     // The outer command must fit cmd.exe. Pack 15 gzip bits per UTF-16
     // code unit in a range with no surrogates, quotes or line terminators.
     let mut packed = String::new();
@@ -43,10 +46,10 @@ fn bootstrap(nonce: &str) -> Option<String> {
         "$m=[IO.MemoryStream]::new();$w=$b=0;",
         "foreach($c in '{packed}'.ToCharArray()){{$w=$w -bor (([int]$c-0x4000) -shl $b);$b+=15;",
         "while($b -ge 8){{$m.WriteByte($w -band 255);$w=$w -shr 8;$b-=8}}}};",
-        "$m.Position=0;$z=[IO.Compression.GzipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);",
+        "$m.SetLength({gz_len});$m.Position=0;$z=[IO.Compression.GzipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);",
         "$s=[scriptblock]::Create([IO.StreamReader]::new($z).ReadToEnd())",
         "}}catch{{}}}}\nif($s){{&$s $n}}else{{\n{clm}\n}}",
-    ), nonce = nonce, packed = packed, clm = clm))
+    ), nonce = nonce, packed = packed, gz_len = gz_len, clm = clm))
 }
 
 fn encode_bootstrap(bootstrap: &str) -> String {
@@ -87,7 +90,8 @@ mod tests {
     fn windows_command_is_shell_neutral() {
         let (command, nonce) = windows_collector_command();
         assert!(command.starts_with(PREFIX));
-        assert!(command.len() <= 7000, "{} bytes", command.len());
+        // cmd.exe caps a command line at 8,191 characters; keep headroom for DefaultShell=cmd.
+        assert!(command.len() <= 7500, "{} bytes", command.len());
         assert!(command
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"+/= -".contains(&b)));
@@ -153,7 +157,12 @@ mod tests {
             .stdin(Stdio::null())
             .output()
             .unwrap();
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "{:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(output.stdout.is_ascii() && !output.stdout.contains(&b'\r'));
         assert!(output.stdout.ends_with(b"V1_END__\n"));
         assert!(output.stderr.len() < 16 * 1024);
@@ -207,7 +216,8 @@ mod tests {
             };
             assert!(
                 output.status.success(),
-                "{shell}: {}",
+                "{shell} {:?}: {}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
             let raw =

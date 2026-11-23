@@ -62,8 +62,7 @@ S winCpu {
 S winNet {
     foreach($n in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()){
         if($n.NetworkInterfaceType -eq 'Loopback'){continue}
-        $b=$n.GetIPStatistics()
-        "$($b.BytesReceived) $($b.BytesSent) $($n.Name)"
+        try{$b=$n.GetIPStatistics();"$($b.BytesReceived) $($b.BytesSent) $($n.Name)"}catch{}
     }
 }
 S winUsers {
@@ -76,7 +75,7 @@ S winUsers {
 $drives={foreach($d in [IO.DriveInfo]::GetDrives()){if($d.DriveType -eq $args[0]){$d}}}
 S winDisks {
     foreach($d in (& $drives Fixed)){
-        try{if($d.IsReady){"$($d.Name.TrimEnd('\'))`t$($d.TotalSize)`t$($d.TotalFreeSpace)`t$($d.DriveFormat)"}}catch{}
+        try{if($d.IsReady -and $d.TotalSize -gt 0){"$($d.Name.TrimEnd('\'))`t$($d.TotalSize)`t$($d.TotalFreeSpace)`t$($d.DriveFormat)"}}catch{}
     }
 }
 S winNetDrives {
@@ -88,7 +87,7 @@ S winNetDrives {
     $ps=[PowerShell]::Create()
     $job=$ps.AddScript({param($names) foreach($n in $names){try{$d=[IO.DriveInfo]::new($n);@{n=$n;s=$d.TotalSize;f=$d.TotalFreeSpace}}catch{}}}).AddArgument(@($paths.Keys)).BeginInvoke()
     if(!$job.AsyncWaitHandle.WaitOne(2000)){$script:rc=137;$script:hung=$true;return}
-    try{foreach($d in $ps.EndInvoke($job)){"$($d.n.TrimEnd('\'))`t$($d.s)`t$($d.f)`t$($paths[$d.n])"}}finally{$ps.Dispose()}
+    try{foreach($d in $ps.EndInvoke($job)){if($d.s -gt 0){"$($d.n.TrimEnd('\'))`t$($d.s)`t$($d.f)`t$($paths[$d.n])"}}}finally{$ps.Dispose()}
 }
 $o.Write("${p}V1_END__`n")
 $o.Flush()

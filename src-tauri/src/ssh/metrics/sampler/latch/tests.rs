@@ -51,14 +51,31 @@ fn latch_trigger_table() {
     ));
     assert_eq!(fallback, Collector::Posix);
     assert_eq!(fallback.read(&failed, NONCE).1, Collector::Posix);
-    assert_eq!(
-        probe.read(&SessionError::TimedOut.into(), NONCE).1,
-        Collector::Posix
-    );
-    assert_eq!(
-        probe.read(&completed(0, capture), NONCE).1,
-        Collector::Windows
-    );
+    let timed_out = SessionError::TimedOut.into();
+    let (reading, after_timeout) = probe.read(&timed_out, NONCE);
+    // A probe timeout keeps the pause protection; it is not downgraded to a plain failure.
+    assert!(matches!(
+        reading,
+        Reading::IndeterminateRemoteWork {
+            completed: None,
+            ..
+        }
+    ));
+    assert_eq!(after_timeout, Collector::Posix);
+    // A non-Windows frame from the probe never latches Windows, and is not emitted.
+    let linux = include_str!("../../fixtures/ubuntu.txt");
+    let linux_nonce = &linux["__TFM_".len().."__TFM_".len() + 32];
+    let linux_output = completed(0, linux.as_bytes());
+    let (reading, not_windows) = probe.read(&linux_output, linux_nonce);
+    assert!(matches!(
+        reading,
+        Reading::Unavailable("Metrics command failed")
+    ));
+    assert_eq!(not_windows, Collector::Posix);
+    let windows_output = completed(0, capture);
+    let (reading, latched) = probe.read(&windows_output, NONCE);
+    assert!(matches!(reading, Reading::Sample(raw) if raw.platform == Platform::Windows));
+    assert_eq!(latched, Collector::Windows);
 
     struct IgnoreEvents;
     impl EventSink for IgnoreEvents {

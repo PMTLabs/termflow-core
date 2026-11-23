@@ -62,12 +62,13 @@ the sanitized bytes independently and fill the literal oracles
 
 ## Windows
 
-`windows.txt`: **local console capture; sshd capture pending live test**.
+`windows.txt`: **local console capture**. For the sshd capture, see
+`windows-sshd-nonadmin.txt` below.
 Windows 11 Pro 10.0.26300.9974, Windows PowerShell 5.1, local console.
 The WMI-free collector ran through the production UTF-16LE bootstrap under
 `cmd.exe /d /c` (6,886 command bytes). Stdout was
 captured with LF line endings. Host, users, adapter names (including the
-brackets and numbered suffixes), and the UNC host/share were pseudonymized;
+spaces and numbered suffixes), and the UNC host/share were pseudonymized;
 the measurements and section statuses were not changed. A mapped network
 drive in the console is not evidence of a mapping in the sshd logon session.
 
@@ -83,6 +84,7 @@ Wall time over sshd, from exec start to exit, was 0.9–1.7 s per run. The proce
 used 0.45–0.52 s of CPU, and defining the native type took 43–52 ms.
 `[Environment]::Exit` added about 2.5 s under sshd, so the script ends with a
 plain `exit 0`, and the hung-share path uses `TerminateProcess`.
+
 `windows-clm.txt` is a separate local capture: the child used
 `__PSLockdownPolicy=4` and explicitly entered Constrained Language Mode when
 retail PowerShell ignored that variable. Output was ASCII with LF endings;

@@ -23,7 +23,18 @@ fn frame(
     adapter: &str,
     rx: u64,
 ) -> Metrics {
-    let hz = 10_000_000;
+    frame_at(reducer, clock_index, counter_index, adapter, rx, 10_000_000, false)
+}
+
+fn frame_at(
+    reducer: &mut Reducer,
+    clock_index: u64,
+    counter_index: u64,
+    adapter: &str,
+    rx: u64,
+    hz: u64,
+    watchdog: bool,
+) -> Metrics {
     let ticks = (100 + clock_index * 2 * CADENCE.as_secs()) * hz;
     let text = section_data(
         CAPTURE,
@@ -38,10 +49,16 @@ fn frame(
             "idle100ns {}\nkernel100ns {}\nuser100ns {}\ncores 24",
             100 + d,
             400 + 3 * d,
-            900 + d
+            // Distinct idle and user deltas, so swapping the two fields changes the result.
+            900 + 2 * d
         ),
     );
     let text = section_data(&text, "winNet", &format!("{rx} {} {adapter}", 200 + 6 * d));
+    let text = if watchdog {
+        text.replace("winNetDrives_END_0__", "winNetDrives_END_137__")
+    } else {
+        text
+    };
     capture(reducer, &text)
 }
 
@@ -65,12 +82,12 @@ fn windows_cpu_needs_a_baseline_then_matches_formula() {
     assert_eq!(cpu_percent_of(&frame(&mut reducer, 0, 0, "A", 0)), None);
     assert_eq!(
         cpu_percent_of(&frame(&mut reducer, 1, 1, "A", 1)),
-        Some(75.0)
+        Some(80.0)
     );
     assert_eq!(cpu_percent_of(&frame(&mut reducer, 2, 0, "A", 2)), None);
     assert_eq!(
         cpu_percent_of(&frame(&mut reducer, 3, 1, "A", 3)),
-        Some(75.0)
+        Some(80.0)
     );
 }
 
@@ -102,14 +119,14 @@ fn windows_backwards_uptime_resets_both_baselines_even_with_increasing_counters(
     let mut reducer = Reducer::default();
     frame(&mut reducer, 0, 0, "A", 0);
     let same_boot = frame(&mut reducer, 1, 1, "A", 1);
-    assert_eq!(cpu_percent_of(&same_boot), Some(75.0));
+    assert_eq!(cpu_percent_of(&same_boot), Some(80.0));
     assert!(rate(&same_boot.net_down).is_some());
     let other_boot = frame(&mut reducer, 0, 2, "A", 2);
     assert_eq!(cpu_percent_of(&other_boot), None);
     assert_eq!(rate(&other_boot.net_down), None);
     assert_eq!(
         cpu_percent_of(&frame(&mut reducer, 1, 3, "A", 3)),
-        Some(75.0)
+        Some(80.0)
     );
 }
 
@@ -244,4 +261,57 @@ fn windows_sample_that_measured_nothing_is_flagged_unavailable() {
         capture(&mut Reducer::default(), sshd).unavailable_reason,
         None
     );
+}
+
+#[test]
+fn windows_watchdog_after_a_baseline_drops_rates_and_rewarms() {
+    let mut reducer = Reducer::default();
+    frame(&mut reducer, 0, 0, "A", 0);
+    assert_eq!(cpu_percent_of(&frame(&mut reducer, 1, 1, "A", 1)), Some(80.0));
+    let hung = frame_at(&mut reducer, 2, 2, "A", 2, 10_000_000, true);
+    assert_eq!(cpu_percent_of(&hung), None);
+    assert_eq!(rate(&hung.net_down), None);
+    assert_eq!(rate(&hung.net_up), None);
+    // The watchdog sample seeds nothing: the next one is a fresh baseline.
+    let after = frame(&mut reducer, 3, 3, "A", 3);
+    assert_eq!(cpu_percent_of(&after), None);
+    assert_eq!(rate(&after.net_down), None);
+    assert_eq!(cpu_percent_of(&frame(&mut reducer, 4, 4, "A", 4)), Some(80.0));
+}
+
+#[test]
+fn windows_qpc_frequency_change_resets_both_baselines() {
+    let mut reducer = Reducer::default();
+    frame(&mut reducer, 0, 0, "A", 0);
+    let changed = frame_at(&mut reducer, 1, 1, "A", 1, 3_000_000, false);
+    assert_eq!(cpu_percent_of(&changed), None);
+    assert_eq!(rate(&changed.net_down), None);
+    let same = frame_at(&mut reducer, 2, 2, "A", 2, 3_000_000, false);
+    assert_eq!(cpu_percent_of(&same), Some(80.0));
+    assert!(rate(&same.net_down).is_some());
+}
+
+#[test]
+fn windows_blocked_os_and_users_name_the_block_not_a_parse_or_admin_error() {
+    let text = CAPTURE
+        .replace(
+            &CAPTURE[CAPTURE.find("caption ").unwrap()..CAPTURE.find("
+__TFM_0123456789abcdef0123456789abcdef_SECTION_winOs_END").unwrap()],
+            "blocked 1",
+        )
+        .replace("winOs_END_0", "winOs_END_126");
+    let users_start = text.find("winUsers_BEGIN__
+").unwrap() + "winUsers_BEGIN__
+".len();
+    let users_end = text.find("__TFM_0123456789abcdef0123456789abcdef_SECTION_winUsers_END").unwrap();
+    let text = format!("{}blocked 1
+{}", &text[..users_start], &text[users_end..])
+        .replace("winUsers_END_0", "winUsers_END_126");
+    let metrics = capture(&mut Reducer::default(), &text);
+    assert_eq!(metrics.users, Metric::Unavailable(BLOCKED.into()));
+    assert_eq!(metrics.ram, Metric::Unavailable(BLOCKED.into()));
+    let Metric::Available(host) = &metrics.host else {
+        panic!("{:?}", metrics.host)
+    };
+    assert_eq!(host.os, Metric::Unavailable(BLOCKED.into()));
 }

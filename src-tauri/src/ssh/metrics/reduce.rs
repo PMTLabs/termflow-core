@@ -46,7 +46,13 @@ impl Reducer {
     fn reduce_platform(&mut self, raw: RawSample<'_>) -> Metrics {
         match raw.platform {
             Platform::Linux => self.reduce_linux(raw),
-            Platform::Windows => windows::reduce_windows(&mut self.windows, raw),
+            Platform::Windows => {
+                // Mirror reduce_linux: the other platform's baselines never survive a switch.
+                let windows = std::mem::take(&mut self.windows);
+                self.reset();
+                self.windows = windows;
+                windows::reduce_windows(&mut self.windows, raw)
+            }
             _ => {
                 self.reset();
                 let reason = raw.platform.unavailable_reason().expect("unsupported platform");

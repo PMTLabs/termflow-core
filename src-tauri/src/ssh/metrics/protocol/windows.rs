@@ -12,9 +12,10 @@ pub(super) fn populate(sample: &mut RawSample<'_>) {
     let sections = &sample.sections;
     sample.hostname = metadata(&sections["hostname"]);
     sample.architecture = metadata(&sections["architecture"]);
-    sample.os = os_fields(&sections["winOs"]).and_then(|fields| {
-        let (caption, version) = (value(&fields, "caption")?, value(&fields, "version")?);
-        Ok(display(&format!("{caption} {version}")))
+    let os = &sections["winOs"];
+    sample.os = os_fields(os).and_then(|fields| {
+        let field = |key| value(&fields, key).map_err(|_| os_error(os, BAD));
+        Ok(display(&format!("{} {}", field("caption")?, field("version")?)))
     });
     sample.local = disks(section_rows(&sections["winDisks"]), false);
     let drives = &sections["winNetDrives"];
@@ -128,8 +129,22 @@ pub(in crate::ssh::metrics) fn os_fields<'a>(
     fields(rows)
 }
 
+/// Why a `winOs` field is missing: the section's own failure outranks a parse error,
+/// because `os_fields` keeps the rows a failed or blocked section emitted before stopping.
+pub(in crate::ssh::metrics) fn os_error(section: &Section<'_>, invalid: &'static str) -> &'static str {
+    if blocked(section) {
+        BLOCKED
+    } else if section.exit == 1 {
+        "Collection command failed"
+    } else {
+        invalid
+    }
+}
+
 pub(in crate::ssh::metrics) fn users_section(section: &Section<'_>) -> Reading<Users> {
-    if matches!(section.exit, 1 | 126) {
+    if blocked(section) {
+        Err(BLOCKED)
+    } else if matches!(section.exit, 1 | 126) {
         Err(USERS_DENIED)
     } else {
         users(section.rows())

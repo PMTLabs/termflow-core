@@ -31,6 +31,8 @@ const clock = (): MetricsClock => ({ wall: Date.now(), mono: performance.now() }
 const HEARTBEAT_MS = 250;
 // Leave room for an in-flight collection and the following collection to finish
 // before the admitting fence expires, even when their durations differ.
+// Independent of the 10 s collection cadence: renewal lag eats into the fence's
+// CADENCE + DEADLINE lifetime, so it stays small rather than scaling with cadence.
 const RENEW_AFTER_MS = 1000;
 const SUSPENDED_MS = 1000;
 const noop = () => {};

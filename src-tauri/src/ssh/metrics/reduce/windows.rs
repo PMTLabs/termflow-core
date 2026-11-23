@@ -21,15 +21,7 @@ pub(super) fn reduce_windows(rates: &mut WindowsRates, raw: RawSample<'_>) -> Me
     let os = section("winOs");
     let os_data = os_fields(os);
     let fields_ref = os_data.as_ref().map_err(|&reason| reason);
-    let os_error = |invalid| {
-        if blocked(os) {
-            BLOCKED
-        } else if os.exit == 1 {
-            "Collection command failed"
-        } else {
-            invalid
-        }
-    };
+    let os_error = |invalid| os_error(os, invalid);
     let clock = fields_ref.and_then(|f| {
         let ticks: u64 = number(f, "uptimeTicks").map_err(|_| os_error(BAD_UPTIME))?;
         let frequency: u64 = number(f, "tickFrequency").map_err(|_| os_error(BAD_UPTIME))?;
