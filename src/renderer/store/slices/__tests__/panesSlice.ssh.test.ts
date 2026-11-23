@@ -104,7 +104,7 @@ test('toggle_targets_background_terminal_not_active_pane', () => {
 });
 
 test('toggle_preserves_concurrent_browser_path_and_follow_cd', () => {
-  const patch = { browserPath: '/new', followCd: false, browserCollapsed: false };
+  const patch = { browserPath: '/new', followCd: false, browserCollapsed: false, browserWidth: 410 };
   const state = reducer(seeded(), patchSshPaneTag({ terminalId: 'tm-ssh', patch }));
   const action = setSshHiddenMetrics({ terminalId: 'tm-ssh', hiddenMetrics: ['ram'] });
   const next = reducer(state, { ...action, payload: {

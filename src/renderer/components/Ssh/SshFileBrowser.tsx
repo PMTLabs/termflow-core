@@ -14,6 +14,7 @@ import { SshFileList, type SshFileListProps } from './SshFileList';
 import { SshNameDialog } from './SshNameDialog';
 import { SshPathBar } from './SshPathBar';
 import { useSshFileBrowser, type CreateKind, type SshBrowserControllerProps, type SshRowScope } from './useSshFileBrowser';
+import { SshIcon } from './SshIcons';
 import './SshFileBrowser.css';
 import '../Settings/Automations/AutomationsPanel.css';
 
@@ -107,12 +108,12 @@ function Browser(props: SshFileBrowserProps & { browser: SshBrowserController })
   };
   return <div className="ssh-file-browser">
     <div className="ssh-file-toolbar" role="group" aria-label="Remote file actions">
-      <button type="button" className="au-btn" title={reason ?? 'Refresh remote directory'} disabled={!!reason}
-        onClick={browser.refresh}>Refresh</button>
-      <button type="button" className="au-btn" title={reason ?? 'Create a remote folder'} disabled={!browser.canUseRows}
-        onClick={event => open('folder', event.currentTarget)}>New folder</button>
-      <button type="button" className="au-btn" title={reason ?? 'Create a remote file'} disabled={!browser.canUseRows}
-        onClick={event => open('file', event.currentTarget)}>New file</button>
+      <button type="button" className="au-btn" aria-label="Refresh" title={reason ?? 'Refresh remote directory'} disabled={!!reason}
+        onClick={browser.refresh}><SshIcon name="refresh" /></button>
+      <button type="button" className="au-btn" aria-label="New folder" title={reason ?? 'Create a remote folder'} disabled={!browser.canUseRows}
+        onClick={event => open('folder', event.currentTarget)}><SshIcon name="folder" /></button>
+      <button type="button" className="au-btn" aria-label="New file" title={reason ?? 'Create a remote file'} disabled={!browser.canUseRows}
+        onClick={event => open('file', event.currentTarget)}><SshIcon name="file" /></button>
     </div>
     <SshPathBar draft={browser.draft} setDraft={browser.setDraft} path={browser.path} navigate={browser.navigate}
       followCd={props.sshTag.followCd} disabled={!!reason} reason={reason}

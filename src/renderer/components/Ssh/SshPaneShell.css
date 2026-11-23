@@ -8,7 +8,11 @@
 .ssh-browser { flex:0 1 260px; width:260px; max-width:40%; min-width:0; box-sizing:border-box; overflow:auto; border-right:1px solid var(--border-color); }
 .ssh-browser.collapsed { flex:0 1 30px; width:30px; max-width:min(30px, 40%); overflow:hidden; }
 .ssh-browser-toggle.au-btn { max-width:100%; padding:2px 4px; }
-.ssh-browser.collapsed .ssh-browser-toggle { writing-mode:vertical-rl; }
+.ssh-browser-toggle span { font-size:18px; line-height:1; }
+.ssh-browser-grip { position:relative; z-index:1; flex:0 0 6px; margin:0 -3px; /* straddles the border; nets 0px of flow */ cursor:col-resize; touch-action:none; }
+.ssh-browser-grip:hover, .ssh-browser-grip:focus-visible,
+.ssh-pane-body[data-resizing] .ssh-browser-grip { background:var(--accent-color, #007acc); }
+.ssh-pane-body[data-resizing] { overflow:clip; user-select:none; cursor:col-resize; }
 .ssh-browser-unavailable { opacity:.55; }
 /* Not live (any non-connected session or ended launch): dim everything but the collapse toggle. */
 .ssh-browser.offline > :not(.ssh-browser-toggle) { opacity:.55; }

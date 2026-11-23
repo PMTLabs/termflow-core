@@ -1,4 +1,6 @@
 import React from 'react';
+import { AuCheck } from '../Automation/panels/AuFields';
+import { SshIcon } from './SshIcons';
 
 interface Props {
   draft: string;
@@ -18,12 +20,11 @@ export function SshPathBar({ draft, setDraft, path, navigate, followCd, onFollow
     if (!disabled) navigate(draft);
   }}>
     <button type="button" className="au-btn" disabled={disabled || !parent}
-      title={reason ?? 'Up one folder'} onClick={() => parent && navigate(parent)}>Up</button>
+      aria-label="Up one folder" title={reason ?? 'Up one folder'} onClick={() => parent && navigate(parent)}><SshIcon name="up" /></button>
     <input aria-label="Remote path" title={reason ?? 'Enter an absolute remote path and press Enter'}
       value={draft} onChange={event => setDraft(event.target.value)} disabled={disabled} spellCheck={false} />
-    <label title={reason ?? 'Follow the remote shell’s reported directory'}>
-      <input className="setting-checkbox" type="checkbox" checked={followCd} disabled={disabled}
-        onChange={event => onFollowChange(event.target.checked)} /> Follow cd
-    </label>
+    <span className="ssh-follow-cd" title={reason ?? 'Follow the remote shell’s reported directory'}>
+      <AuCheck label="Follow cd" on={followCd} onToggle={() => onFollowChange(!followCd)} disabled={disabled} />
+    </span>
   </form>;
 }

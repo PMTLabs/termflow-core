@@ -1,4 +1,6 @@
 import React from 'react';
+import { clampSshBrowserWidth, SSH_BROWSER_DEFAULT_WIDTH, SSH_BROWSER_MIN_WIDTH,
+  SSH_BROWSER_MAX_WIDTH, SSH_BROWSER_MAX_FRACTION } from '../../types/sshBrowserWidth';
 import type { SshSessionView, SshPromptReceipt } from '../../types/ssh';
 import { SshSecretPrompt } from './SshSecretPrompt';
 import { SshHostKeyPrompt } from './SshHostKeyPrompt';
@@ -34,6 +36,8 @@ export interface SshPaneShellProps {
   /** An explicit browser column allocation in CSS px. Canvas passes the frozen allocation so the
    *  terminal slot is the exact remainder of its envelope; panes omit it and keep the CSS sizing. */
   browserWidth?: number;
+  preferredBrowserWidth?: number;
+  onBrowserWidthChange?(width: number): void;
 }
 function SshPaneChrome({ interactive, summaries, children }: {
   interactive: boolean; summaries: string[]; children: React.ReactNode;
@@ -108,8 +112,51 @@ export function SshPaneShell(props: SshPaneShellProps) {
   // host, so `interactive` alone is still true when the pane's dialog closes on deactivation.
   const owner = interactive && (props.surfaceActive ?? true);
   const prompts = props.sessionPrompts ?? true;
-  const browserStyle: React.CSSProperties | undefined = props.browserWidth === undefined ? undefined
-    : { flex: `0 0 ${props.browserWidth}px`, width: props.browserWidth, maxWidth: 'none' };
+  const aside = React.useRef<HTMLElement>(null);
+  const body = React.useRef<HTMLDivElement>(null);
+  const host = React.useRef<HTMLDivElement>(null);
+  const [preview, setPreview] = React.useState<{ width: number; terminalWidth: number }>();
+  const drag = React.useRef<{
+    id: number; scale: number; cap: number; terminalWidth: number;
+    width?: number; commit(width: number): void;
+  } | null>(null);
+  React.useEffect(() => {
+    const cancel = () => { drag.current = null; setPreview(undefined); };
+    const move = (event: PointerEvent) => {
+      const current = drag.current;
+      if (!current || current.id !== event.pointerId || !aside.current) return;
+      if (event.buttons === 0) { cancel(); return; }
+      const x = (event.clientX - aside.current.getBoundingClientRect().left) / current.scale;
+      current.width = clampSshBrowserWidth(Math.floor(Math.min(x, current.cap)));
+      setPreview({ width: current.width, terminalWidth: current.terminalWidth });
+    };
+    const end = (event: PointerEvent) => {
+      const current = drag.current;
+      if (!current || current.id !== event.pointerId) return;
+      cancel();
+      if (current.width !== undefined) current.commit(current.width);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', cancel);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', cancel);
+    };
+  }, []);
+  const resizable = owner && !props.browserCollapsed && !!props.onBrowserWidthChange;
+  React.useLayoutEffect(() => {
+    if (!resizable) { drag.current = null; setPreview(undefined); }
+  }, [resizable]);
+  const preferred = props.preferredBrowserWidth ?? SSH_BROWSER_DEFAULT_WIDTH;
+  const allocation = props.browserWidth;
+  const width = preview?.width ?? allocation ?? (!props.browserCollapsed ? props.preferredBrowserWidth : undefined);
+  const browserStyle: React.CSSProperties | undefined = width === undefined ? undefined
+    : { flex: `${preview || allocation !== undefined ? '0 0' : '0 1'} ${width}px`, width, maxWidth: allocation !== undefined && !preview ? 'none' : undefined };
+  const toggleLabel = props.browserCollapsed ? 'Expand file browser' : 'Collapse file browser';
   const secret = prompts && view.state === 'needs-secret';
   const hostKey = prompts && (view.state === 'needs-hostkey' || (view.state === 'error' && view.hostKey?.changed));
   const disconnected = prompts && showDisconnected;
@@ -139,14 +186,44 @@ export function SshPaneShell(props: SshPaneShellProps) {
           {(summaries, details) => renderChrome(summaries, details)}
         </SshEditWarning>
       : renderChrome([], null)}
-    <div className="ssh-pane-body">
-      <aside className={`ssh-browser${props.browserCollapsed ? ' collapsed' : ''}${live ? '' : ' offline'}`} aria-label="Remote browser"
+    <div className="ssh-pane-body" ref={body} data-resizing={preview ? '' : undefined}>
+      <aside ref={aside} className={`ssh-browser${props.browserCollapsed ? ' collapsed' : ''}${live ? '' : ' offline'}`} aria-label="Remote browser"
         style={browserStyle} data-canvas-passthrough="scroll" data-ssh-keyboard-owner="">
-        <button type="button" className="au-btn ssh-browser-toggle" title={props.browserCollapsed ? 'Expand file browser' : 'Collapse file browser'} onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}>{props.browserCollapsed ? 'Expand' : 'Collapse'}</button>
+        <button type="button" className="au-btn ssh-browser-toggle" aria-label={toggleLabel} title={toggleLabel} onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}><span aria-hidden="true">{props.browserCollapsed ? '›' : '‹'}</span></button>
         {props.browserHandlesOffline ? <div hidden={props.browserCollapsed}>{props.browser}</div>
           : !props.browserCollapsed && (live ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
       </aside>
-      <div className="ssh-terminal-host">{props.terminal}</div>
+      {resizable && <div className="ssh-browser-grip" role="separator" tabIndex={0}
+        aria-label="Resize file browser" aria-orientation="vertical"
+        aria-valuemin={SSH_BROWSER_MIN_WIDTH} aria-valuemax={SSH_BROWSER_MAX_WIDTH}
+        aria-valuenow={preview?.width ?? preferred}
+        data-canvas-passthrough="scroll" data-ssh-keyboard-owner=""
+        onPointerDown={event => {
+          if (event.button !== 0 || drag.current || !body.current || !host.current) return;
+          event.stopPropagation();
+          const layoutWidth = body.current.clientWidth;
+          const scale = layoutWidth ? body.current.getBoundingClientRect().width / layoutWidth || 1 : 1;
+          drag.current = {
+            id: event.pointerId, scale, cap: layoutWidth ? layoutWidth * SSH_BROWSER_MAX_FRACTION : Infinity,
+            terminalWidth: host.current.getBoundingClientRect().width / scale,
+            commit: props.onBrowserWidthChange!,
+          };
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+        }}
+        onKeyDown={event => {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+          event.preventDefault();
+          event.stopPropagation();
+          // Same cap as the drag: never step the preference past what the body can show.
+          const cap = body.current?.clientWidth ? body.current.clientWidth * SSH_BROWSER_MAX_FRACTION : Infinity;
+          const shown = Math.min(preferred, cap);
+          props.onBrowserWidthChange!(clampSshBrowserWidth(Math.floor(Math.min(shown + (event.key === 'ArrowRight' ? 16 : -16), cap))));
+        }}
+        onDoubleClick={() => props.onBrowserWidthChange!(SSH_BROWSER_DEFAULT_WIDTH)} />}
+      {/* Keep the fit host's layout width stable throughout preview; releasing the lock lets its
+          existing ResizeObserver fit the final width, without resizing the PTY on each move. */}
+      <div className="ssh-terminal-host" ref={host}
+        style={preview ? { flex: `0 0 ${preview.terminalWidth}px` } : undefined}>{props.terminal}</div>
     </div>
     {/* D66: the ONE bottom row. The shell's truthful marker on the left ("—" whenever not live),
         and the `status` slot (069's SshMetricsStatusBar, which owns its own unavailable/ended states,

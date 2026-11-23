@@ -1,12 +1,15 @@
 import type { PaneNode } from '../store/slices/panesSlice';
 import { normalizeHiddenMetrics, type SshPaneTag } from '../types/ssh';
 
+import { clampSshBrowserWidth } from '../types/sshBrowserWidth';
+
 function readTag(value: unknown): SshPaneTag | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-  const { connectionId, browserCollapsed, browserPath, followCd, hiddenMetrics } = value as Record<string, unknown>;
+  const { connectionId, browserCollapsed, browserWidth, browserPath, followCd, hiddenMetrics } = value as Record<string, unknown>;
   if (typeof connectionId !== 'string' || !connectionId || connectionId !== connectionId.trim()
       || /[\x00-\x1f\x7f]/.test(connectionId)
       || (browserCollapsed !== undefined && typeof browserCollapsed !== 'boolean')
+      || (browserWidth !== undefined && (typeof browserWidth !== 'number' || !Number.isFinite(browserWidth)))
       || (followCd !== undefined && typeof followCd !== 'boolean')
       || (browserPath !== undefined && typeof browserPath !== 'string')) return;
 
@@ -15,6 +18,7 @@ function readTag(value: unknown): SshPaneTag | undefined {
   return {
     connectionId,
     browserCollapsed: browserCollapsed === true,
+    ...(typeof browserWidth === 'number' ? { browserWidth: clampSshBrowserWidth(browserWidth) } : {}),
     ...(typeof browserPath === 'string' ? { browserPath } : {}),
     followCd: followCd === true,
     hiddenMetrics: normalizeHiddenMetrics(hiddenMetrics),

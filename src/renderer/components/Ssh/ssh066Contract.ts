@@ -9,7 +9,7 @@ export type { SshPaneTag };
 
 /** The tag fields the browser may change. The mount wires this to 066's
  *  `patchSshPaneTag({ terminalId, patch })` (store/slices/panesSlice.ts). */
-export type SshBrowserTagPatch = Partial<Pick<SshPaneTag, 'browserCollapsed' | 'browserPath' | 'followCd'>>;
+export type SshBrowserTagPatch = Partial<Pick<SshPaneTag, 'browserCollapsed' | 'browserWidth' | 'browserPath' | 'followCd'>>;
 
 /** 066's per-terminal launch state (`sshLaunch` slice). */
 export type LaunchSnapshot = SshLaunchState;

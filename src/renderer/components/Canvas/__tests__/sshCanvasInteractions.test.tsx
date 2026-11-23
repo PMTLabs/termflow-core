@@ -406,7 +406,7 @@ describe('068 F5 focus restore', () => {
     const spies = nodeSpies();
     await liveScene(spies, false, [A]);
     const pane = paneShell(A);
-    const newFolder = [...pane.querySelectorAll<HTMLButtonElement>('.ssh-file-toolbar button')].find(b => b.textContent === 'New folder')!;
+    const newFolder = [...pane.querySelectorAll<HTMLButtonElement>('.ssh-file-toolbar button')].find(b => b.getAttribute('aria-label') === 'New folder')!;
     expect(newFolder.disabled).toBe(false);
     await clickAsync(newFolder);
     expect(document.querySelector('[role=dialog]')).not.toBeNull();

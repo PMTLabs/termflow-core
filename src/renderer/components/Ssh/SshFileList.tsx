@@ -1,5 +1,6 @@
 import React from 'react';
 import type { RemoteEntry } from './sshFileTypes';
+import { SshIcon } from './SshIcons';
 
 export interface SshFileListProps {
   entries: RemoteEntry[];
@@ -52,9 +53,9 @@ export function SshFileList(props: SshFileListProps) {
             // The gesture was handled on mousedown (even if the listing changed since).
             event.preventDefault(); event.stopPropagation();
           }}>
-          {folder ? <button type="button" className="au-btn ssh-file-expander" disabled={disabled}
+          {folder ? <button type="button" className="ssh-file-expander" disabled={disabled}
             title={expanded ? 'Collapse folder' : 'Expand folder'} aria-label={`${expanded ? 'Collapse' : 'Expand'} ${entry.name}`}
-            aria-expanded={expanded} onClick={() => props.onToggle(entry)}>{expanded ? '▾' : '▸'}</button>
+            aria-expanded={expanded} onClick={() => props.onToggle(entry)}><SshIcon name="chevron" size={12} /></button>
             : <span className="ssh-file-expander" aria-hidden="true" />}
           <button type="button" className="ssh-file-name" title={entry.path || entry.name} disabled={disabled}
             aria-pressed={props.selected === entry.path}

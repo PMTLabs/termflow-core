@@ -153,10 +153,10 @@ export function measureHostBox(terminalId: string, fallback: HostBox): HostBox {
  *
  * @param collapsed the leaf's current `browserCollapsed`, used only to build the fallback.
  */
-export function measureSshSurfaceBox(terminalId: string, fallbackTerminal: HostBox, collapsed: boolean): SshSurfaceBox {
+export function measureSshSurfaceBox(terminalId: string, fallbackTerminal: HostBox, collapsed: boolean, preferredBrowserWidth?: number): SshSurfaceBox {
   const cached = sshBoxes.get(terminalId);
   if (cached) return cached;
-  const fallback = () => sshFallbackSurfaceBox(fallbackTerminal, collapsed);
+  const fallback = () => sshFallbackSurfaceBox(fallbackTerminal, collapsed, preferredBrowserWidth);
 
   const host = terminalCache.get(terminalId)?.terminal?.element?.parentElement ?? null;
   if (!host || isOurOwnReplica(host)) return fallback();
@@ -177,6 +177,7 @@ export function measureSshSurfaceBox(terminalId: string, fallbackTerminal: HostB
   const box = sshSurfaceBoxFrom({
     terminal: { w: t.width, h: t.height },
     browserW: b.width,
+    preferredBrowserWidth,
     collapsed: browser.classList.contains('collapsed'),
     statusH: st.height,
     columnGap: Number.isFinite(gap) ? gap : 0,

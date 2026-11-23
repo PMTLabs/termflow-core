@@ -73,7 +73,7 @@ const render = (surfaceActive = true) => root.render(<Provider store={store}>
   <SshFileBrowser terminalId={terminalId} sshTag={tag} surfaceActive={surfaceActive} onPatchTag={patch} />
 </Provider>);
 const button = (label: string, parent: ParentNode = container) => [...parent.querySelectorAll('button')]
-  .find(button => button.textContent === label)!;
+  .find(button => button.getAttribute('aria-label') === label || button.textContent === label)!;
 const pathBox = () => container.querySelector<HTMLInputElement>('[aria-label="Remote path"]')!;
 const input = (el: HTMLInputElement, value: string) => {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(el, value);
@@ -130,10 +130,10 @@ test('real_shell_composition_has_one_host_one_reconnect', async () => {
     expect([...container.querySelectorAll('button')].filter(b => b.textContent === 'Reconnect')).toHaveLength(session.state === 'disconnected' ? 1 : 0);
   }
   expect(container.textContent).toContain('Stale');
-  act(() => button('Collapse').click());
+  act(() => button('Collapse file browser').click());
   tag = { ...tag, browserCollapsed: true };
   act(() => shell(view('disconnected', 1, 3)));
-  expect(button('Expand').closest('aside')?.classList.contains('collapsed')).toBe(true);
+  expect(button('Expand file browser').closest('aside')?.classList.contains('collapsed')).toBe(true);
   expect(container.querySelector('.terminal-display')).toBe(host);
   act(() => button('Details').click());
   expect([...container.querySelectorAll('button')].filter(b => b.textContent === 'Reconnect')).toHaveLength(1);
@@ -205,7 +205,7 @@ test('collapse_only_patches_target_tag_and_never_hidden_metrics', async () => {
   tag = { ...tag, browserCollapsed: true, browserPath: '/saved', followCd: true };
   await act(async () => shell(view('connected')));
   expect(api.fsList).not.toHaveBeenCalled(); expect(api.onFsCwd).toHaveBeenCalledTimes(1); // shell edit-warning subscription only
-  act(() => button('Expand').click());
+  act(() => button('Expand file browser').click());
   expect(patch.mock.calls).toEqual([[{ browserCollapsed: false }]]);
   tag = { ...tag, browserCollapsed: false };
   await act(async () => shell(view('connected')));

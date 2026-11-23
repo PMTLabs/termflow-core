@@ -2,7 +2,7 @@ import type { PaneNode } from '../store/slices/panesSlice';
 import type { SshPaneTag } from '../types/ssh';
 
 export const sentinel: SshPaneTag = {
-  connectionId: 'saved', browserCollapsed: true, browserPath: '/srv/a b',
+  connectionId: 'saved', browserWidth: 340, browserCollapsed: true, browserPath: '/srv/a b',
   followCd: true, hiddenMetrics: ['nfs', 'cpu'],
 };
 export const other: SshPaneTag = {
