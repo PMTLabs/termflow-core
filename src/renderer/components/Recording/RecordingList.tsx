@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useDispatch } from 'react-redux';
 import { addToast } from '../../store/slices/uiSlice';
 import { getStoredApiToken } from '../../services/profileScope';
+import { formatBytes } from '../../utils/formatBytes';
 // import { TerminalRecording } from '../../../types/recording';
 import './RecordingList.css';
 
@@ -123,19 +124,6 @@ export const RecordingList: React.FC<RecordingListProps> = ({ onPlayRecording, o
         type: 'error'
       }));
     }
-  };
-
-  const formatFileSize = (bytes: number): string => {
-    const units = ['B', 'KB', 'MB', 'GB'];
-    let size = bytes;
-    let unitIndex = 0;
-
-    while (size >= 1024 && unitIndex < units.length - 1) {
-      size /= 1024;
-      unitIndex++;
-    }
-
-    return `${size.toFixed(1)} ${units[unitIndex]}`;
   };
 
   const formatDuration = (ms: number | null): string => {
@@ -319,7 +307,7 @@ export const RecordingList: React.FC<RecordingListProps> = ({ onPlayRecording, o
                     <span>Terminal: {recording.terminalId}</span>
                     <span>Started: {formatDate(recording.startTime)}</span>
                     <span>Duration: {formatDuration(recording.duration)}</span>
-                    <span>Size: {formatFileSize(recording.size)}</span>
+                    <span>Size: {formatBytes(recording.size)}</span>
                     <span>Events: {recording.eventCount}</span>
                   </div>
                 </div>

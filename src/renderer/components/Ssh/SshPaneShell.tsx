@@ -7,6 +7,7 @@ import { SshHostKeyPrompt } from './SshHostKeyPrompt';
 import { SshDisconnectedBanner } from './SshDisconnectedBanner';
 import { SshEditWarning } from './SshEditWarning';
 import type { EditOpen } from './sshFileTypes';
+import { sshStatusMarkerVisible } from './sshStatusLiveness';
 import './SshPaneShell.css';
 import '../Settings/Automations/AutomationsPanel.css'; // house .au-btn styles for prompt and banner buttons
 export const SSH_PANE_CHROME_H = 36;
@@ -17,6 +18,8 @@ export interface SshPaneShellProps {
   // Only slots that fence their own actions may render a stale listing.
   browserHandlesOffline?: boolean;
   launchDisconnected?: boolean;
+  /** The rendered status slot already signals that the session is not live. */
+  statusShowsNotLive?: boolean;
   browserCollapsed: boolean; onBrowserCollapsedChange(collapsed: boolean): void;
   onSecret(secret: string, remember: boolean, receipt: SshPromptReceipt): Promise<void>; onTrust(receipt: SshPromptReceipt): Promise<void>; onCancel(): void;
   // 066 owns the real end-old-login/relaunch coordinator, not a bare IPC retry.
@@ -225,12 +228,13 @@ export function SshPaneShell(props: SshPaneShellProps) {
       <div className="ssh-terminal-host" ref={host}
         style={preview ? { flex: `0 0 ${preview.terminalWidth}px` } : undefined}>{props.terminal}</div>
     </div>
-    {/* D66: the ONE bottom row. The shell's truthful marker on the left ("—" whenever not live),
-        and the `status` slot (069's SshMetricsStatusBar, which owns its own unavailable/ended states,
-        D57) on the right. The row height is fixed in CSS. The bar is focusable and has its own menu,
+    {/* D66: the ONE bottom row. The shell shows "—" when the terminal is not live unless
+        the rendered metrics state already reports that the app session is not connected.
+        The row height is fixed in CSS. The bar is focusable and has its own menu,
         so on the interactive presentation the row owns its keys like the chrome row (review 349 F6). */}
     <div className="ssh-status" aria-label="SSH status" data-ssh-keyboard-owner={owner ? '' : undefined}>
-      {!live && <span className="ssh-status-text">—</span>}
+      {sshStatusMarkerVisible({ terminalLive: live, barShown: !!props.status, barConnected: !props.statusShowsNotLive })
+        && <span className="ssh-status-text">—</span>}
       {props.status}
     </div>
   </section>;

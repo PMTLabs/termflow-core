@@ -2,12 +2,15 @@ import React, { useState } from 'react';
 import type { EditOpen } from './sshFileTypes';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../../store';
+import { selectSshHiddenMetrics } from '../../store/slices/panesSlice';
+import { SSH_METRIC_KEYS } from './sshMetricKeys';
+import { launchStageLive, selectSshMetricsRowConnected } from './sshStatusLiveness';
 import { SshFileBrowser, SshFileBrowserView, type SshBrowserController, type SshFileBrowserProps } from './SshFileBrowser';
 import { SshPaneShell, type SshPaneShellProps } from './SshPaneShell';
 import { readReconnectCoordinator, readSshLaunchState } from './ssh066Contract';
 
 type Props = SshFileBrowserProps & Omit<SshPaneShellProps,
-  'browser' | 'browserHandlesOffline' | 'launchDisconnected' | 'browserCollapsed' | 'onBrowserCollapsedChange' | 'onBrowserWidthChange' | 'preferredBrowserWidth'> & {
+  'statusShowsNotLive' | 'browser' | 'browserHandlesOffline' | 'launchDisconnected' | 'browserCollapsed' | 'onBrowserCollapsedChange' | 'onBrowserWidthChange' | 'preferredBrowserWidth'> & {
   /**
    * The terminal's one file controller, owned by the pane composition (plan 070 §4.1 A).
    * `undefined` (only standalone tests) owns a controller here; `null` means this presentation
@@ -21,8 +24,10 @@ type Props = SshFileBrowserProps & Omit<SshPaneShellProps,
 export function SshBrowserPaneShell({ terminalId, sshTag, surfaceActive, onPatchTag, onEntryContextMenu, onEditOpen, browserController, ...shell }: Props) {
   const [opened, setOpened] = useState<{ terminalId: string; result: EditOpen }>();
   const stage = useSelector((state: RootState) => readSshLaunchState(state, terminalId)?.stage);
-  const launchDisconnected = stage === undefined || stage === 'ended' || stage === 'blocked'
-    || stage === 'cancelled' || stage === 'error';
+  const launchDisconnected = !launchStageLive(stage);
+  const barConnected = useSelector((state: RootState) => selectSshMetricsRowConnected(state, terminalId));
+  const hidden = useSelector((state: RootState) => selectSshHiddenMetrics(state, terminalId));
+  const barShown = !!shell.status && SSH_METRIC_KEYS.some(key => !hidden.includes(key));
   const reconnect = readReconnectCoordinator();
   const editOpened = (result: EditOpen) => {
     setOpened({ terminalId, result });
@@ -31,7 +36,7 @@ export function SshBrowserPaneShell({ terminalId, sshTag, surfaceActive, onPatch
   const browserProps = { terminalId, sshTag, surfaceActive, onPatchTag, onEntryContextMenu };
   return <SshPaneShell {...shell} surfaceActive={surfaceActive} editOpenResult={opened?.terminalId === terminalId ? opened.result : shell.editOpenResult}
     browserCollapsed={sshTag.browserCollapsed} browserHandlesOffline={browserController !== null}
-    launchDisconnected={launchDisconnected}
+    launchDisconnected={launchDisconnected} statusShowsNotLive={barShown && !barConnected}
     preferredBrowserWidth={sshTag.browserWidth}
     onBrowserWidthChange={browserWidth => onPatchTag({ browserWidth })}
     onBrowserCollapsedChange={browserCollapsed => onPatchTag({ browserCollapsed })}
