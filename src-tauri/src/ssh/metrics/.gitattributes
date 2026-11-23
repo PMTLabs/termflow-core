@@ -1,1 +1,3 @@
 collect.sh text eol=lf
+collect.ps1 text eol=lf
+collect-clm.ps1 text eol=lf

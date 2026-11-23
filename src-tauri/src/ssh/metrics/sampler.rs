@@ -3,8 +3,9 @@
 use super::{
     check_collector_exit, collector_command,
     model::{Metrics, MetricsSnapshot},
-    protocol::{self, RawSample},
+    protocol::{self, Platform, RawSample},
     reduce::Reducer,
+    windows_command::windows_collector_command,
 };
 use crate::ssh::{
     auth::BoxFuture,
@@ -21,7 +22,11 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
-pub(super) const CADENCE: Duration = Duration::from_secs(2);
+mod latch;
+use latch::Collector;
+
+pub(super) const CADENCE: Duration = Duration::from_secs(10);
+pub(super) const ELIGIBILITY_WAKE: Duration = Duration::from_secs(2);
 const DEADLINE: Duration = Duration::from_secs(5);
 const STDOUT_CAP: usize = 1024 * 1024;
 const STDERR_CAP: usize = 16 * 1024;
@@ -29,6 +34,7 @@ const SAMPLE: &str = "ssh-metrics:sample";
 const CONTROL: &str = "ssh-metrics:control";
 const TIMEOUT: &str = "Metrics paused: host didn't answer in 5 s";
 const WATCHDOG: &str = "Metrics paused: NFS usage watchdog expired";
+const WINDOWS_WATCHDOG: &str = "Metrics paused: Network drive usage watchdog expired";
 const CLEANUP: &str = "Metrics paused: could not clean up metrics exec";
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -122,7 +128,11 @@ impl SamplerRegistry {
     pub(crate) fn status(&self, id: &str) -> Option<(Option<u64>, bool, bool)> {
         let worker = self.existing(id)?;
         let state = worker.state.lock();
-        Some((state.generation, state.eligible && !state.retired, state.in_flight))
+        Some((
+            state.generation,
+            state.eligible && !state.retired,
+            state.in_flight,
+        ))
     }
 
     /// Apply the authoritative eligibility decision for this terminal. Callers
@@ -180,7 +190,12 @@ impl SamplerRegistry {
         let observer = self.observer.clone();
         engine_runtime().spawn(async move {
             running
-                .run(&sessions, &*events, observer.as_deref(), |lease| collect(&sessions, &running.id, lease))
+                .run(
+                    &sessions,
+                    &*events,
+                    observer.as_deref(),
+                    |lease, collector| collect(&sessions, &running.id, lease, collector),
+                )
                 .await;
             if let Some(workers) = workers.upgrade() {
                 workers.lock().remove(&running.id);
@@ -207,6 +222,7 @@ struct State {
     in_flight: bool,
     disarmed: bool,
     generation: Option<u64>,
+    collector: Collector,
     pause_seq: u64,
     paused_reason: Option<&'static str>,
     // Changing eligibility or resuming invalidates telemetry from a draining
@@ -233,6 +249,7 @@ impl State {
             return;
         }
         let reconnect = self.generation.replace(generation).is_some();
+        self.collector = Collector::default();
         self.forget_telemetry();
         self.disarmed = false;
         self.pause_seq = 0;
@@ -256,7 +273,10 @@ impl State {
 
     fn warn(&mut self, id: &str, reason: &'static str) {
         let now = Instant::now();
-        if self.last_warning.is_none_or(|last| now - last >= Duration::from_secs(30)) {
+        if self
+            .last_warning
+            .is_none_or(|last| now - last >= Duration::from_secs(30))
+        {
             self.last_warning = Some(now);
             log::warn!("[SSH-METRICS] {id}: {reason}");
         }
@@ -272,6 +292,7 @@ struct Terminal {
 struct Tick {
     generation: u64,
     lease: Arc<SshSession>,
+    collector: Collector,
     telemetry_epoch: u64,
     sampled_at: u64,
     started: Instant,
@@ -387,6 +408,7 @@ impl Terminal {
                 .then(|| Tick {
                     generation,
                     lease: lease.clone(),
+                    collector: state.collector,
                     telemetry_epoch: state.telemetry_epoch,
                     sampled_at: state.reserve(wall_ms()),
                     started,
@@ -397,16 +419,18 @@ impl Terminal {
         match result {
             Ok(Some(tick)) => {
                 #[cfg(test)]
-                { state.in_flight = true; }
+                {
+                    state.in_flight = true;
+                }
                 Action::Collect(tick)
             }
             Ok(None) if waking && (!visibility_checked || not_before > now) => {
                 Action::Wait(Some(not_before.max(now)))
             }
-            Ok(None) => Action::Wait(waking.then(|| now + CADENCE)),
+            Ok(None) => Action::Wait(waking.then(|| now + ELIGIBILITY_WAKE)),
             Err(_) => {
                 state.forget_telemetry();
-                Action::Wait(waking.then(|| now + CADENCE))
+                Action::Wait(waking.then(|| now + ELIGIBILITY_WAKE))
             }
         }
     }
@@ -417,11 +441,13 @@ impl Terminal {
     }
 
     async fn run<F, Fut>(
-        &self, sessions: &SessionRegistry, events: &dyn EventSink,
-        observer: Option<&dyn EligibilityObserver>, collect: F,
-    )
-    where
-        F: Fn(Arc<SshSession>) -> Fut,
+        &self,
+        sessions: &SessionRegistry,
+        events: &dyn EventSink,
+        observer: Option<&dyn EligibilityObserver>,
+        collect: F,
+    ) where
+        F: Fn(Arc<SshSession>, Collector) -> Fut,
         Fut: Future<Output = (ExecOutcome, String)>,
     {
         let mut next = Instant::now();
@@ -465,11 +491,11 @@ impl Terminal {
                 Action::Collect(tick) => {
                     // No select/drop here. Even when losing all owners, await
                     // the real reader and feed its outcome to the pause latch.
-                    let (outcome, nonce) = collect(tick.lease.clone()).await;
+                    let (outcome, nonce) = collect(tick.lease.clone(), tick.collector).await;
                     if let Some(observer) = observer.filter(|_| self.observing()) {
                         observer.refresh(&self.id).await;
                     }
-                    let _ = self.finish(sessions, events, &tick, classify(&outcome, &nonce));
+                    let _ = self.finish(sessions, events, &tick, &outcome, &nonce);
                     next = next_start(tick.started, Instant::now());
                 }
             }
@@ -481,11 +507,15 @@ impl Terminal {
         sessions: &SessionRegistry,
         events: &dyn EventSink,
         tick: &Tick,
-        result: Reading<'_>,
+        outcome: &ExecOutcome,
+        nonce: &str,
     ) -> Result<(), SessionError> {
+        let (result, next_collector) = tick.collector.read(outcome, nonce);
         let mut state = self.state.lock();
         #[cfg(test)]
-        { state.in_flight = false; }
+        {
+            state.in_flight = false;
+        }
         if state.retired {
             return Err(SessionError::OwnerRetired);
         }
@@ -504,7 +534,9 @@ impl Terminal {
                 (eligible.then(|| Metrics::unavailable(reason)), None)
             }
             Reading::IndeterminateRemoteWork { reason, completed } => {
-                let metrics = completed.filter(|_| eligible).map(|raw| state.reducer.reduce_at(raw, tick.started.into_std()));
+                let metrics = completed
+                    .filter(|_| eligible)
+                    .map(|raw| state.reducer.reduce_at(raw, tick.started.into_std()));
                 state.reducer.reset();
                 (metrics, Some(reason))
             }
@@ -518,6 +550,7 @@ impl Terminal {
             if generation != tick.generation || !Arc::ptr_eq(lease, &tick.lease) {
                 return Err(SessionError::NotConnected);
             }
+            state.collector = next_collector;
             if let Some(reason) = pause {
                 state.pause_seq += 1;
                 state.paused_reason = Some(reason);
@@ -551,15 +584,23 @@ fn next_start(start: Instant, finished: Instant) -> Instant {
 }
 
 fn wall_now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 async fn collect(
     sessions: &SessionRegistry,
     terminal_id: &str,
     admitted: Arc<SshSession>,
+    collector: Collector,
 ) -> (ExecOutcome, String) {
-    let (command, nonce) = collector_command();
+    let (command, nonce) = if collector.uses_windows() {
+        windows_collector_command()
+    } else {
+        collector_command()
+    };
     let result = with_session(sessions, terminal_id, |lease| async move {
         // with_session may have acquired a replacement since tick admission.
         if !Arc::ptr_eq(&lease, &admitted) {
@@ -588,7 +629,9 @@ enum Reading<'a> {
         reason: &'static str,
         completed: Option<RawSample<'a>>,
     },
-    Discard { disarm: bool },
+    Discard {
+        disarm: bool,
+    },
 }
 
 fn classify<'a>(outcome: &'a ExecOutcome, nonce: &str) -> Reading<'a> {
@@ -610,7 +653,11 @@ fn classify<'a>(outcome: &'a ExecOutcome, nonce: &str) -> Reading<'a> {
     }
     match protocol::parse(&output.stdout, nonce) {
         Ok(raw) if raw.nfs_watchdog_expired => Reading::IndeterminateRemoteWork {
-            reason: WATCHDOG,
+            reason: if raw.platform == Platform::Windows {
+                WINDOWS_WATCHDOG
+            } else {
+                WATCHDOG
+            },
             completed: Some(raw),
         },
         Ok(raw) => Reading::Sample(raw),
@@ -619,7 +666,10 @@ fn classify<'a>(outcome: &'a ExecOutcome, nonce: &str) -> Reading<'a> {
 }
 
 fn paused(reason: &'static str) -> Reading<'static> {
-    Reading::IndeterminateRemoteWork { reason, completed: None }
+    Reading::IndeterminateRemoteWork {
+        reason,
+        completed: None,
+    }
 }
 
 fn classify_error(error: &SessionError) -> Reading<'static> {
@@ -631,10 +681,25 @@ fn classify_error(error: &SessionError) -> Reading<'static> {
         TransportClosed => Reading::Unavailable("Metrics transport closed"),
         MissingExitStatus => Reading::Unavailable("Metrics exit status missing"),
         Cancelled => Reading::Discard { disarm: false },
-        NotConnected | NotFound | StaleAttempt | OwnerRetired | AdmissionClosed | InvalidTarget
-        | HostKeyChanged | HostKeyRevoked | HostCertificateUnsupported | KnownHostsMalformed { .. }
-        | KnownHostsUnreadable | TrustWriteFailed | TrustAlreadyPinned | AuthRejected
-        | AgentUnavailable | IdentityUnreadable | IdentityEncryptionUnsupported | UnsupportedAuthentication | RememberUnavailable
+        NotConnected
+        | NotFound
+        | StaleAttempt
+        | OwnerRetired
+        | AdmissionClosed
+        | InvalidTarget
+        | HostKeyChanged
+        | HostKeyRevoked
+        | HostCertificateUnsupported
+        | KnownHostsMalformed { .. }
+        | KnownHostsUnreadable
+        | TrustWriteFailed
+        | TrustAlreadyPinned
+        | AuthRejected
+        | AgentUnavailable
+        | IdentityUnreadable
+        | IdentityEncryptionUnsupported
+        | UnsupportedAuthentication
+        | RememberUnavailable
         | StoreUnavailable => Reading::Discard { disarm: true },
     }
 }

@@ -1,5 +1,5 @@
 import type { MetricKey, MountUsage, SshMetrics, SshMetricsSample } from '../../types/ssh';
-import { SSH_METRIC_KEYS, SSH_METRIC_LABELS } from './sshMetricKeys';
+import { SSH_METRIC_KEYS, sshMetricLabel } from './sshMetricKeys';
 
 const GIB = 1024 ** 3;
 const LOADING = '…';
@@ -96,9 +96,12 @@ export function formatSshMetricsCopy(sample: SshMetricsSample, offsetMinutes = -
   const absolute = Math.abs(offsetMinutes);
   const pad = (value: number) => String(value).padStart(2, '0');
   const offset = `${offsetMinutes < 0 ? '-' : '+'}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
-  const line = (label: string, value: string) => `${`${label}:`.padEnd(13)}${value}`;
+  const line = (label: string, value: string) => `${`${label}:`.padEnd(13)}${label.length >= 12 ? ' ' : ''}${value}`;
   return [
-    ...SSH_METRIC_KEYS.map(key => line(COPY_LABELS[key] ?? SSH_METRIC_LABELS[key], formatSshMetric(sample.metrics, key).detail)),
+    ...SSH_METRIC_KEYS.map(key => line(
+      (key === 'nfs' && sample.metrics.platform === 'Windows' ? undefined : COPY_LABELS[key]) ?? sshMetricLabel(key, sample.metrics.platform),
+      formatSshMetric(sample.metrics, key).detail,
+    )),
     line('Sampled', `${local} (${offset})`),
   ].join('\n');
 }

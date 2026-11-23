@@ -10,7 +10,7 @@ import { sanitizePaneTreeSshFields } from '../../../services/sshPanePersistence'
 import { installSshSessionStartup } from '../../../services/sshSessionEvents';
 import { useSshMetricsWatch } from '../../../services/sshMetricsWatch';
 import panes, { selectSshHiddenMetrics, setActiveTabId, setPaneTree, type PaneNode } from '../../../store/slices/panesSlice';
-import sshSession, { selectSshMetricsSample, sshLaunchReducer as sshLaunch } from '../../../store/slices/sshSessionSlice';
+import sshSession, { selectSshMetricsSample, SSH_METRICS_CADENCE_MS, SSH_METRICS_MAX_AGE, sshLaunchReducer as sshLaunch } from '../../../store/slices/sshSessionSlice';
 import ssh from '../../../store/slices/sshSlice';
 import ui from '../../../store/slices/uiSlice';
 import type { SshMetricsSample, SshSessionView } from '../../../types/ssh';
@@ -98,7 +98,7 @@ afterEach(async () => {
 });
 
 test.each([50, 900, 1500].flatMap(duration => [0, 300].map(latency => [duration, latency])))
-('steady_two_second_samples_never_blank_across_fence_renewals (%d ms collection, %d ms IPC)', async (duration, latency) => {
+('steady_cadence_samples_never_blank_across_fence_renewals (%d ms collection, %d ms IPC)', async (duration, latency) => {
   jest.useFakeTimers({ doNotFake: ['performance', 'Date'] });
   try {
     const [baseline, rates] = snapshots();
@@ -121,11 +121,11 @@ test.each([50, 900, 1500].flatMap(duration => [0, 300].map(latency => [duration,
       await act(async () => {
         advance(50);
         jest.advanceTimersByTime(50);
-        if ((elapsed - duration) % 2000 === 0 && elapsed >= duration) {
+        if ((elapsed - duration) % SSH_METRICS_CADENCE_MS === 0 && elapsed >= duration) {
           publish({ ...(elapsed === duration ? baseline : rates), sampledAt: initialWall + elapsed - duration + 1 });
         }
       });
-      if (elapsed < 2000 + duration) continue;
+      if (elapsed < SSH_METRICS_CADENCE_MS + duration) continue;
       expect({ elapsed, live: !!selectSshMetricsSample(store.getState().sshSession, terminalId) }).toEqual({ elapsed, live: true });
       expect(bar.textContent).not.toContain('Metrics delayed');
       expect([...host.querySelectorAll('[data-metric]')].map(el => el.textContent).join(' ')).not.toMatch(/[—…]/);
@@ -151,8 +151,8 @@ test('ssh_metrics_fixture_to_bar_to_clipboard_roundtrip', async () => {
   act(() => { advance(1); publish(rates); });
   // D101: each value leads with an aria-hidden glyph, so textContent is the value alone.
   expect([...host.querySelectorAll('[data-metric]')].map(el => el.textContent)).toEqual([
-    'sample-host', '25%', '0.0/0.0 GiB', '30B/s',
-    '15B/s', '0m 12s', '3', '/ 22%', 'none mounted',
+    'sample-host', '25%', '0.0/0.0 GiB', '6B/s',
+    '3B/s', '0m 20s', '3', '/ 22%', 'none mounted',
   ]);
   await menuClick('Uptime');
   await menuClick('Connected users');
@@ -164,9 +164,9 @@ test('ssh_metrics_fixture_to_bar_to_clipboard_roundtrip', async () => {
     'Host:        sample-host (Test Linux 12, arm64)',
     'CPU:         25% · 4 cores · load 1.25',
     'RAM:         0.0 / 0.0 GiB (25%)',
-    'Upload:      30 B/s',
-    'Download:    15 B/s',
-    'Uptime:      0m 12s',
+    'Upload:      6 B/s',
+    'Download:    3 B/s',
+    'Uptime:      0m 20s',
     'Users:       3 (alex, zoe)',
     'Partitions:  / 22% of 100 K',
     'NFS:         none mounted',
@@ -199,7 +199,7 @@ test.each([8, 7])('exec_inflight_disconnect_reconnect_flow_never_resurrects_snap
   expect(store.getState().sshSession.byTerminal[terminalId].metricsReading).toBeUndefined();
   expect(reading('host')).not.toContain('sample-host');
   // F2: even a delayed sample above the floor must not start a new lifetime on receipt.
-  await act(async () => { advance(5001); publish({ ...rates, sampledAt: floor + 1 }); });
+  await act(async () => { advance(SSH_METRICS_MAX_AGE + 1); publish({ ...rates, sampledAt: floor + 1 }); });
   expect(store.getState().sshSession.byTerminal[terminalId].metricsReading).toBeUndefined();
   act(() => { advance(1); publish({ ...baseline, sampledAt: wall }); });
   expect(reading('host')).toBe('sample-host');
@@ -207,8 +207,8 @@ test.each([8, 7])('exec_inflight_disconnect_reconnect_flow_never_resurrects_snap
   expect(reading('netUp')).toBe('…');
   act(() => { advance(1); publish({ ...rates, sampledAt: wall }); });
   expect(reading('cpu')).toBe('25%');
-  expect(reading('netUp')).toBe('30B/s');
-  expect(reading('netDown')).toBe('15B/s');
+  expect(reading('netUp')).toBe('6B/s');
+  expect(reading('netDown')).toBe('3B/s');
 });
 
 test('page_hide_is_a_pause_not_a_delay_and_restore_shows_a_fresh_baseline', async () => {
@@ -223,7 +223,7 @@ test('page_hide_is_a_pause_not_a_delay_and_restore_shows_a_fresh_baseline', asyn
     };
     await run(50);
     await act(async () => { publish({ ...baseline, sampledAt: wall - 10 }); });
-    await run(2000);
+    await run(SSH_METRICS_CADENCE_MS);
     await act(async () => { publish({ ...rates, sampledAt: wall - 10 }); });
     expect(status()).toContain('Connected');
     const hidden = jest.spyOn(document, 'hidden', 'get').mockReturnValue(true);
@@ -231,7 +231,7 @@ test('page_hide_is_a_pause_not_a_delay_and_restore_shows_a_fresh_baseline', asyn
     expect(selectSshMetricsSample(store.getState().sshSession, terminalId)).toBeUndefined();
     expect(store.getState().sshSession.byTerminal[terminalId].metricsDelayed).toBeUndefined();
     expect(status()).not.toContain('Metrics delayed');
-    await run(15_000);
+    await run(SSH_METRICS_MAX_AGE);
     expect(status()).not.toContain('Metrics delayed');
     hidden.mockReturnValue(false);
     await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
@@ -257,7 +257,7 @@ test('renewal_landing_after_the_page_hides_but_before_visibilitychange_is_still_
     };
     await run(50);
     await act(async () => { publish({ ...baseline, sampledAt: wall - 10 }); });
-    await run(2000);
+    await run(SSH_METRICS_CADENCE_MS);
     await act(async () => { publish({ ...rates, sampledAt: wall - 10 }); });
     expect(status()).toContain('Connected');
     // Hold the next renewal receipt so it is in flight when the page hides.

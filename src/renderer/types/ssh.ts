@@ -141,7 +141,8 @@ export type MetricPayloadKeysMatch = Assert<
 >;
 // `unsupportedPlatform` names a host platform with no collector (e.g. "FreeBSD"); absent otherwise.
 // `unavailableReason` is set when the sample measured nothing (whole-exec failure or every metric n/a).
-export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> } & { unsupportedPlatform?: string; unavailableReason?: string };
+// `platform` is set only on Windows samples; the renderer labels the `nfs` slot from it.
+export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> } & { platform?: 'Windows'; unsupportedPlatform?: string; unavailableReason?: string };
 export interface SshMetricsSample { terminalId: string; sampledAt: number; metrics: SshMetrics }
 export interface SshMetricsResumeReceipt { sampleFloor: number; generation: number; pauseSeq: number }
 export interface SshMetricsWatchReceipt extends SshMetricsResumeReceipt { pausedReason: string | null }

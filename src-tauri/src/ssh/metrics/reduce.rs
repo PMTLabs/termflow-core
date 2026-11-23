@@ -1,10 +1,12 @@
 //! Pure reduction of one parsed sample and consecutive per-terminal baselines.
 use super::model::*;
-use super::protocol::{decimal, RawSample, Reading};
+use super::protocol::{decimal, Platform, RawSample, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use uuid::Uuid;
 mod darwin;
+
+mod windows;
 
 const CPU_INVALID: &str = "Invalid CPU counters";
 const CPU_STALLED: &str = "CPU counters did not advance";
@@ -18,6 +20,7 @@ pub struct Reducer {
     boot: Boot,
     cpu: Option<[u64; 8]>,
     net: Option<Interfaces>,
+    windows: windows::WindowsRates,
 }
 
 #[derive(Default)]
@@ -47,17 +50,30 @@ impl Reducer {
         self.reduce_platform(raw, started).flag_unmeasured()
     }
 
+    // A platform switch never carries another platform's baselines across.
     fn reduce_platform(&mut self, raw: RawSample<'_>, started: std::time::Instant) -> Metrics {
-        if raw.platform == super::protocol::Platform::Darwin { return darwin::reduce(self, raw, started); }
-        if let Some(reason) = raw.platform.unavailable_reason() {
-            self.reset();
-            let host = host(&raw);
-            return Metrics::unsupported(&reason, host, raw.platform.unsupported_label());
+        match raw.platform {
+            Platform::Linux => self.linux(raw),
+            Platform::Darwin => {
+                self.windows = windows::WindowsRates::default();
+                darwin::reduce(self, raw, started)
+            }
+            Platform::Windows => {
+                let windows = std::mem::take(&mut self.windows);
+                self.reset();
+                self.windows = windows;
+                windows::reduce_windows(&mut self.windows, raw)
+            }
+            _ => {
+                self.reset();
+                let reason = raw.platform.unavailable_reason().expect("unsupported platform");
+                Metrics::unsupported(&reason, host(&raw), raw.platform.unsupported_label())
+            }
         }
-        self.linux(raw)
     }
 
     fn linux(&mut self, raw: RawSample<'_>) -> Metrics {
+        self.windows = windows::WindowsRates::default();
         let stat = rows(&raw, "stat");
         let uptime = rows(&raw, "uptime").and_then(parse_uptime);
         let boot = Boot {
@@ -108,6 +124,7 @@ impl Reducer {
             users,
             partitions: raw.local.map(|mounts| Partitions { mounts }).into(),
             nfs: raw.nfs.map(|mounts| Partitions { mounts }).into(),
+            platform: None,
             unsupported_platform: None,
             unavailable_reason: None,
         }

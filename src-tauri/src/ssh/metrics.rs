@@ -4,6 +4,7 @@ pub mod protocol;
 pub mod reduce;
 pub mod sampler;
 pub(crate) mod watch;
+mod windows_command;
 
 const COLLECT: &str = include_str!("metrics/collect.sh");
 const UNAVAILABLE_EXIT: u32 = 125;

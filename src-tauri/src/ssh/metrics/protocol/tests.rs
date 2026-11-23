@@ -189,7 +189,7 @@ fn freebsd_capture_marks_metrics_unsupported() {
 
 fn assert_freebsd(s: &RawSample<'_>, hostname: &str, architecture: &str) {
     assert_eq!(s.platform, Platform::Unsupported("FreeBSD".into()));
-    assert_eq!(s.platform.unavailable_reason().as_deref(), Some("Metrics are supported only on Linux and macOS (FreeBSD)"));
+    assert_eq!(s.platform.unavailable_reason().as_deref(), Some("Metrics are supported only on Linux, macOS and Windows (FreeBSD)"));
     assert_eq!(s.platform.unsupported_label().as_deref(), Some("FreeBSD"));
     // T1 is raw: one platform gate supplies the same reason for the eight Linux
     // metrics; all Linux dependencies must be absent rather than zero-filled.

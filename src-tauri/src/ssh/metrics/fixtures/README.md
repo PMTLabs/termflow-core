@@ -60,6 +60,47 @@ the sanitized bytes independently and fill the literal oracles
 `UBUNTU_FIELDS`, `ALPINE_MEM_TOTAL`, `NFS_LOCAL_IDENTITIES`, and
 `NFS_REMOTE_IDENTITIES`; do not derive expected values from parser output.
 
+## Windows
+
+`windows.txt`: **local console capture**. For the sshd capture, see
+`windows-sshd-nonadmin.txt` below.
+Windows 11 Pro 10.0.26300.9974, Windows PowerShell 5.1, local console.
+The WMI-free collector ran through the production UTF-16LE bootstrap under
+`cmd.exe /d /c` (6,886 command bytes). Stdout was
+captured with LF line endings. Host, users, adapter names (including the
+spaces and numbered suffixes), and the UNC host/share were pseudonymized;
+the measurements and section statuses were not changed. A mapped network
+drive in the console is not evidence of a mapping in the sshd logon session.
+
+`windows-sshd-nonadmin.txt`: **captured over sshd**. One exec of the production
+command, using the WMI-free collector before its exit path changed, as the local
+non-admin account `tf-sshtest`, which is a member of Users only. The command ran
+over Win32-OpenSSH 9.5 with DefaultShell = Windows PowerShell 5.1, on the same
+host, on 2026-11-23. Stdout only, with LF endings. The nonce became the fixture
+nonce and the hostname became `WINHOST`. Adapter names are the host's generic
+ones and were kept. `winUsers` ends 1 because quser refuses non-admin network
+logons; WMI was refused the same way, which is why the collector does not use it.
+Wall time over sshd, from exec start to exit, was 0.9–1.7 s per run. The process
+used 0.45–0.52 s of CPU, and defining the native type took 43–52 ms.
+`[Environment]::Exit` added about 2.5 s under sshd, so the script ends with a
+plain `exit 0`, and the hung-share path uses `TerminateProcess`.
+
+`windows-clm.txt` is a separate local capture: the child used
+`__PSLockdownPolicy=4` and explicitly entered Constrained Language Mode when
+retail PowerShell ignored that variable. Output was ASCII with LF endings;
+host, architecture, registry OS and available quser data survived.
+
+The other variants are derived: CRLF, no quser (127), users denied (126),
+an empty Size drive, watchdog (137), and an escaped Unicode hostname (including
+a UTF-16 surrogate pair).
+
+Windows collection uses the same ten-second cadence and five-second deadline.
+The first tick tries POSIX; a framing-free command failure can move Windows
+detection to the next tick. The bootstrap assumes `powershell` is on the outer
+shell's PATH and is not shadowed by a profile alias or function. Outer profile
+startup counts against the deadline. Encoded commands may be blocked by
+endpoint policy; load average is unavailable, and quser excludes SSH sessions.
+
 `derived-malformed.txt` is a handwritten malformed section fragment.
 `derived-who-permission.txt` is a handwritten partial stdout fragment inserted
 under a nonzero permission status. In-memory protocol variants and recording

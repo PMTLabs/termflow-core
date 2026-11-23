@@ -91,7 +91,7 @@ pub(super) fn reduce(reducer: &mut Reducer, raw: RawSample<'_>, started: std::ti
         uptime: scalar(&raw, "now").and_then(|now| now.checked_sub(boot.ok_or("Invalid boot time")?.0).map(|seconds| Uptime { seconds: seconds as f64 }).ok_or("Invalid uptime")).into(),
         users: rows(&raw, "who").and_then(users).into(),
         partitions: raw.local.map(|mounts| Partitions { mounts }).into(), nfs: raw.nfs.map(|mounts| Partitions { mounts }).into(),
-        unsupported_platform: None, unavailable_reason: None,
+        platform: None, unsupported_platform: None, unavailable_reason: None,
     };
     if raw.nfs_watchdog_expired { reducer.reset(); }
     result

@@ -133,6 +133,26 @@ const row = (label: string) => [...document.querySelectorAll<HTMLButtonElement>(
 const click = async (label: string) => { await act(async () => { row(label).click(); }); };
 const flush = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); };
 
+test('Windows samples render as connected and name the NFS slot Network drives', async () => {
+  const h = setup();
+  const reading = sample(48);
+  reading.metrics.platform = 'Windows';
+  reading.metrics.host = { available: true, hostname: 'WINHOST', os: { available: true, name: 'Microsoft Windows 11 Pro' }, architecture: { available: true, name: 'AMD64' } };
+  reading.metrics.users = { available: true, count: 1, names: ['user1'] };
+  reading.metrics.nfs = { available: true, mounts: [] };
+  h.publish(reading); h.render(); open();
+  expect(bar().querySelector('.ssh-metrics-state')?.textContent).toBe('● Connected');
+  const nfs = bar().querySelector('[data-metric="nfs"]');
+  expect(bar().querySelector('[data-metric="host"]')?.textContent).toBe('WINHOST');
+  expect(bar().querySelector('[data-metric="cpu"]')?.textContent).toBe('48%');
+  expect(nfs?.textContent).toBe('none mounted');
+  expect(nfs?.getAttribute('title')).toBe('Network drives: none mounted');
+  expect(bar().querySelector('[data-metric="users"]')?.getAttribute('title')).toContain('SSH sessions are not listed');
+  expect(row('Network drives')).toBeDefined();
+  await click('Copy all metrics');
+  expect(write).toHaveBeenCalledWith(expect.stringContaining('Network drives: none mounted'));
+});
+
 const states = ['connecting', 'needs-secret', 'needs-hostkey', 'disconnected', 'error', 'ended', 'delayed'] as const;
 test.each(states)('connected_values_disappear_on_disconnect_before_next_sample (%s)', state => {
   const h = setup(); h.publish(sample(61)); h.render(); open();
@@ -379,7 +399,7 @@ test('D101: every value leads with its own aria-hidden glyph and no text label; 
 });
 
 test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', async () => {
-  const reason = 'Metrics are supported only on Linux and macOS (FreeBSD)';
+  const reason = 'Metrics are supported only on Linux, macOS and Windows (FreeBSD)';
   const freebsd: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
     host: { available: true, hostname: 'bsdbox', os: { available: true, name: 'FreeBSD' }, architecture: { available: true, name: 'amd64' } },
     cpu: na(reason), ram: na(reason), netUp: na(reason), netDown: na(reason), uptime: na(reason),

@@ -2,6 +2,8 @@
 pub use super::model::MountUsage;
 use std::collections::BTreeMap;
 
+pub(super) mod windows;
+
 const FIELD_LIMIT: usize = 4096;
 const ROW_LIMIT: usize = 4096;
 const CAP: usize = 1024 * 1024;
@@ -11,11 +13,16 @@ const LINUX: &[&str] = &[
     "dfLocal", "dfNfs", "mounts", "fileMounts", "osRelease",
 ];
 
+pub(super) const WINDOWS: &[&str] = &[
+    "winOs", "winCpu", "winNet", "winUsers", "winDisks", "winNetDrives",
+];
+
 mod darwin;
 struct PlatformSpec { name: &'static str, sections: &'static [&'static str] }
 const PLATFORMS: &[PlatformSpec] = &[
     PlatformSpec { name: "Linux", sections: LINUX },
     PlatformSpec { name: "Darwin", sections: darwin::SECTIONS },
+    PlatformSpec { name: "Windows", sections: WINDOWS },
 ];
 
 pub type Reading<T> = Result<T, &'static str>;
@@ -43,6 +50,7 @@ impl<'a> Section<'a> {
 pub enum Platform {
     Linux,
     Darwin,
+    Windows,
     Unsupported(String),
     Unknown,
 }
@@ -51,18 +59,18 @@ impl Platform {
     /// A shared reason for every metric when this platform has no collector.
     pub fn unavailable_reason(&self) -> Option<String> {
         match self {
-            Self::Linux | Self::Darwin => None,
-            Self::Unsupported(name) => Some(format!("Metrics are supported only on Linux and macOS ({name})")),
+            Self::Linux | Self::Darwin | Self::Windows => None,
+            Self::Unsupported(name) => Some(format!("Metrics are supported only on Linux, macOS and Windows ({name})")),
             Self::Unknown => Some("Remote platform unavailable".into()),
         }
     }
 
     /// How the status bar names a platform that has no collector: the `uname -s` value as
-    /// reported. `None` for the collected platforms (Linux, Darwin) and for an unknown platform.
+    /// reported. `None` for the collected platforms (Linux, Darwin, Windows) and for an unknown platform.
     pub fn unsupported_label(&self) -> Option<String> {
         match self {
             Self::Unsupported(name) => Some(name.clone()),
-            Self::Linux | Self::Darwin | Self::Unknown => None,
+            Self::Linux | Self::Darwin | Self::Windows | Self::Unknown => None,
         }
     }
 }
@@ -88,6 +96,17 @@ impl<'a> RawSample<'a> {
 
 pub(super) fn valid_nonce(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Recognize a begin marker even if its nonce differs or the rest of stdout is malformed.
+pub(super) fn has_frame_begin(bytes: &[u8]) -> bool {
+    bytes.split(|&byte| byte == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        line.strip_prefix(b"__TFM_")
+            .and_then(|rest| rest.strip_suffix(b"_V1_BEGIN__"))
+            .and_then(|nonce| std::str::from_utf8(nonce).ok())
+            .is_some_and(valid_nonce)
+    })
 }
 
 pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
@@ -116,6 +135,7 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         }
     }
     let mut sections = BTreeMap::new();
+    let mut ascii_sections = true;
     loop {
         let (line, lf) = lines.next().ok_or(FRAME)?;
         if !lf {
@@ -142,6 +162,7 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
             if line.starts_with("__TFM_") || line.contains(terminator.as_str()) {
                 return Err(FRAME);
             }
+            ascii_sections &= line.is_ascii();
             // One spare slot for the collector's separator blank line.
             if rows.len() <= ROW_LIMIT + 1 {
                 rows.push(line);
@@ -165,14 +186,18 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
     let platform = match single(&sections["platform"]) {
         Ok(name) if name == "Linux" => Platform::Linux,
         Ok(name) if name == "Darwin" => Platform::Darwin,
+        Ok(name) if name == "Windows" => Platform::Windows,
         Ok(name) => Platform::Unsupported(name),
         Err(_) => Platform::Unknown,
     };
     let linux = platform == Platform::Linux;
-    let selected = match platform { Platform::Linux => Some("Linux"), Platform::Darwin => Some("Darwin"), _ => None };
+    let selected = match platform { Platform::Linux => Some("Linux"), Platform::Darwin => Some("Darwin"), Platform::Windows => Some("Windows"), _ => None };
     let expected: std::collections::BTreeSet<_> = PLATFORMS.iter().filter(|p| Some(p.name) == selected)
         .flat_map(|p| p.sections.iter().copied()).collect();
     if PLATFORMS.iter().flat_map(|p| p.sections.iter()).any(|k| sections.contains_key(k) != expected.contains(k)) {
+        return Err(FRAME);
+    }
+    if platform == Platform::Windows && !ascii_sections {
         return Err(FRAME);
     }
     let mut sample = RawSample {
@@ -185,7 +210,11 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         nfs_watchdog_expired: false,
         sections,
     };
-    // uname -n and -m run on every platform; only the OS name needs Linux's os-release.
+    if sample.platform == Platform::Windows {
+        windows::populate(&mut sample);
+        return Ok(sample);
+    }
+    // POSIX metadata uses uname -n and -m; Linux gets its OS name from os-release.
     sample.hostname = single(&sample.sections["hostname"]);
     sample.architecture = single(&sample.sections["architecture"]);
     if let Platform::Unsupported(name) = &sample.platform {
