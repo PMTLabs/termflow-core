@@ -15,11 +15,10 @@ const SESSION_LABELS = {
 const RESTORED_REASON = 'Not available for a session restored from before TermFlow restarted';
 
 export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { terminalId: string; isTabActive?: boolean }) {
-  const { identity, hidden, sample, session, ended, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect } =
+  const { identity, hidden, sample, session, ended, connected, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect } =
     useSshMetrics(terminalId);
   const [menu, setMenu] = useState<{ x: number; y: number; terminalId: string } | null>(null);
   const bar = useRef<HTMLDivElement>(null);
-  const connected = !ended && session?.state === 'connected';
   const canResume = connected && paused !== null;
   const canReconnect = ended || canResume || session?.state === 'disconnected' || session?.state === 'error';
   // A host with no collector answers every sample, so "Connected" over a row of n/a would hide why (D95).
