@@ -227,6 +227,9 @@ impl<R: Runtime> AppState<R> {
             spawned_record = crate::pty_host_client::read_advertised_record();
             spawned_record.as_ref()
         } else { candidate.record.as_ref() };
+        if let Some(error) = crate::pty_host_client::spawned_host_capability_error(origin, ssh_record, client.server_pid()) {
+            log::error!("{error}");
+        }
         client.set_ssh_prompt_registration(ssh_registration_advertised(ssh_record, client.server_pid()));
         client.set_lifecycle(plan.retention_for(origin));
         client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));

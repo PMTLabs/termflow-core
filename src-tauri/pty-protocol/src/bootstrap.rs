@@ -74,6 +74,16 @@ pub const CAP_PERMISSIONS: u32 = 1 << 6;
 /// Spawn consumes SSH prompt registration metadata without exporting it.
 pub const CAP_SSH_PROMPT_REGISTRATION: u32 = 1 << 7;
 
+/// The bits every primary host built from this tree advertises on this platform, whatever its
+/// ConPTY (`CAP_INHERIT_CURSOR` depends on that, so it is not here). The host builds its record
+/// from this; the GUI uses it to tell that a host it just launched is an older binary than itself.
+pub const HOST_BASE_CAPABILITIES: u32 = CAP_ATTACH_ACK
+    | CAP_LIFECYCLE_CONTRACT
+    | CAP_SHUTDOWN_CONTROL
+    | CAP_MCP_HOLD
+    | CAP_SSH_PROMPT_REGISTRATION
+    | if cfg!(target_os = "macos") { CAP_PERMISSIONS } else { 0 };
+
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelloKind {
