@@ -197,7 +197,7 @@ test('Test dialog and prompt pick copy from errorCode, never from the reason tex
   };
   const failed = (errorCode?: string): SshSessionView => ({ ...view('error'), hostKey: undefined, reason: odd, errorCode });
   expect(await dialogFor(failed('host-key-revoked'))).toContain("The host key has been revoked. Contact the server's administrator before trying again.");
-  expect(await dialogFor(failed('cancelled'))).toContain('The SSH attempt was cancelled. Run Test connection again when ready.');
+  expect(await dialogFor(failed('cancelled'))).toContain('The SSH attempt was cancelled. Run Test again when ready.');
   // No prompt was seen in this probe, so the final auth copy is the generic one for the code.
   expect(await dialogFor(failed('auth-rejected'))).toContain("Authentication was not accepted. Check the server's allowed methods and the saved sign-in settings.");
   const fallback = await dialogFor(failed(undefined));
@@ -250,4 +250,44 @@ test('SshPaneShell inactiveSurface_closesChromePopover_withoutTakingFocusOrEscap
     // The status row (069's focusable bar, D66) follows the same rule (review 349 F6).
     expect(container.querySelector('.ssh-status')!.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
   } finally { outside.remove(); }
+});
+
+test('Test dialog success is a green status panel naming the route; Remember-unavailable stays a separate warning', async () => {
+  // D87: the success line mirrors the error panel's shape and names the endpoint the way the failure line does.
+  const target = { id: 'c-a', host: 'target.test', port: 22, user: 'alice', jumpConnectionId: 'jump' };
+  const jumpRow = { id: 'jump', host: 'bastion.test', port: 2222, user: 'alice', jumpConnectionId: null };
+  (window as any).__REDUX_STORE__ = { getState: () => ({ ssh: { view: { connections: [target, jumpRow] } } }), dispatch: jest.fn() };
+  const open = async (errorCode?: string) => {
+    // view() carries a jump-hop promptTarget left over from a prompt: success must still name the whole route.
+    const api = { onSshTestState: async () => () => {}, sshTestConnection: async () => ({ probeId: 'probe-a' }),
+      sshTestState: async () => ({ ...view('connected'), terminalId: undefined, probeId: 'probe-a', errorCode }), sshTestClose: async () => {} } as unknown as SshAPI;
+    await act(async () => { root.render(<SshTestConnectionDialog connectionId="c-a" api={api} onClose={jest.fn()} />); await flush(); });
+    return document.querySelector('.ssh-test-dialog')!;
+  };
+  try {
+    let dialog = await open('remember-unavailable');
+    const panel = dialog.querySelector('.ssh-prompt-success')!;
+    expect(panel.getAttribute('role')).toBe('status');
+    expect(panel.querySelector('strong')!.textContent).toBe('Connected');
+    expect(panel.textContent).toBe('Connected to alice@target.test:22 through jump host alice@bastion.test:2222. File and metric capabilities have not been tested.');
+    expect(panel.querySelector('.ssh-test-muted')!.textContent).toBe('File and metric capabilities have not been tested.');
+    expect(panel.querySelector('svg')!.getAttribute('aria-hidden')).toBe('true');
+    // The warning is its own line outside the green panel, never green itself.
+    const warning = dialog.querySelector('.ssh-prompt-warning')!;
+    expect(warning.textContent).toBe('The credential was not saved. Check access to the system keyring before using Remember again.');
+    expect(panel.contains(warning)).toBe(false);
+    expect(warning.closest('.ssh-prompt-success')).toBeNull();
+    expect(dialog.querySelector('.ssh-prompt-error')).toBeNull();
+    // Focus still lands on the dialog's Close action.
+    expect(document.activeElement).toBe(dialog.querySelector('.ssh-test-actions button'));
+    act(() => root.unmount()); root = createRoot(container);
+    dialog = await open(undefined);
+    expect(dialog.querySelector('.ssh-prompt-success')).not.toBeNull();
+    expect(dialog.querySelector('.ssh-prompt-warning')).toBeNull();
+    // Without the saved row (store unavailable) the line degrades to plain "Connected.".
+    act(() => root.unmount()); root = createRoot(container);
+    delete (window as any).__REDUX_STORE__;
+    dialog = await open(undefined);
+    expect(dialog.querySelector('.ssh-prompt-success')!.textContent).toBe('Connected. File and metric capabilities have not been tested.');
+  } finally { delete (window as any).__REDUX_STORE__; }
 });

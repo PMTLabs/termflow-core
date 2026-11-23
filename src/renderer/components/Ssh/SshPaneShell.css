@@ -43,6 +43,13 @@
 @keyframes ssh-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .ssh-spinner { animation:none; } }
 .ssh-prompt-error { padding:10px 12px; border:1px solid #6b2a24; background:#2b1715; border-radius:4px; color:#f4b4ab; overflow-wrap:anywhere; }
+.ssh-prompt-success { display:flex; align-items:flex-start; gap:8px; margin:1em 0; padding:10px 12px; border:1px solid #2e6b38; background:#16301b; border-radius:4px; color:#b5ebbd; overflow-wrap:anywhere; }
+.ssh-prompt-success > p { margin:0; min-width:0; }
+.ssh-prompt-success strong { color:#d6f7db; }
+.ssh-success-icon { flex:none; margin-top:1px; color:#5cc76b; }
+.ssh-test-muted { color:#93b89a; }
+.ssh-prompt-warning { padding:10px 12px; border:1px solid #6e5317; background:#2e2410; border-radius:4px; color:#f3cf86; overflow-wrap:anywhere; }
+@media (forced-colors:active) { .ssh-prompt-success, .ssh-prompt-warning { border-color:CanvasText; } }
 .ssh-prompt code { overflow-wrap:anywhere; }
 .ssh-prompt-check > .setting-checkbox { appearance:none; display:grid; place-content:center; flex:none; border:1px solid var(--border-color); border-radius:3px; background:var(--bg-primary); }
 .ssh-prompt-check > .setting-checkbox:checked { background:var(--accent-color, #007acc); color:white; }

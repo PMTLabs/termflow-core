@@ -66,7 +66,7 @@ test('a folder dialog or context menu already open closes when the panel becomes
 test('editor destructive dialog is suppressed immediately when the store becomes read-only',async()=>{
   const api={deleteConnection:jest.fn()} as unknown as SshStoreApi;
   const editor=(data:SshView)=>act(()=>root.render(<SshConnectionEditor connectionId="c-one" initialFolder={null} view={data} api={api} onSaved={()=>{}} onClose={()=>{}}/>));
-  editor(view);await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='Delete connection…')!.click());expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  editor(view);await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.getAttribute('aria-label')==='Delete connection')!.click());expect(document.querySelector('[role="dialog"]')).not.toBeNull();
   editor({...view,revision:2,loadError:{code:'bad',message:'corrupt'}});expect(document.querySelector('[role="dialog"]')).toBeNull();expect(api.deleteConnection).not.toHaveBeenCalled();
 });
 test('folder modal is a body portal using the real house header/body/footer and button structure',()=>{

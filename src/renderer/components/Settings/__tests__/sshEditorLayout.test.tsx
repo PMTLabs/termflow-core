@@ -14,39 +14,43 @@ beforeEach(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; host = d
 afterEach(() => { act(() => root.unmount()); host.remove(); });
 const render = (id: string | null = 'c-web', onConnect: (() => void) | null = () => {}) => act(() => root.render(<SshConnectionEditor connectionId={id ?? undefined} initialFolder={null} view={view} api={api} onSaved={() => {}} onClose={() => {}} onConnect={onConnect ?? undefined} />));
 const input = (name:string) => host.querySelector<HTMLElement>(`[name="${name}"]`)!;
-const labels = (el:ParentNode) => [...el.querySelectorAll('button')].map(b => b.textContent);
+const labels = (el:ParentNode) => [...el.querySelectorAll('button')].map(b => b.textContent || b.getAttribute('aria-label'));
 
 describe('editor layout', () => {
-  test('one action row; Test before Save and Save is the last, only primary action', () => {
+  test('one action row; icon Delete first, Test before Save and Save is the last, only primary action', () => {
     render();
     const actions = host.querySelectorAll('.ssh-editor-actions');
     expect(actions).toHaveLength(1);
     const names = labels(actions[0]);
-    expect(names).toEqual(['Connect in new tab', 'Test connection', 'Delete connection…', 'Discard changes', 'Save connection']);
-    expect(names[names.length - 1]).toBe('Save connection');
-    expect(names.indexOf('Test connection')).toBeLessThan(names.indexOf('Save connection'));
-    expect([...actions[0].querySelectorAll('button.au-btn.primary')].map(b => b.textContent)).toEqual(['Save connection']);
-    // Two groups as in the mockup: use actions, then the right-aligned edit group that ends with Save.
+    expect(names).toEqual(['Delete connection', 'Connect', 'Test', 'Discard', 'Save']);
+    expect([...actions[0].querySelectorAll('button.au-btn.primary')].map(b => b.textContent)).toEqual(['Save']);
+    // Two groups: use actions (Delete icon, Connect, Test) left, then the right-aligned edit group ending with Save.
     const groups = [...actions[0].children];
     expect(groups.map(g => g.className)).toEqual(['ssh-actions-group', 'ssh-actions-group ssh-actions-end']);
-    expect(labels(groups[0])).toEqual(['Connect in new tab', 'Test connection']);
-    expect(labels(groups[1])).toEqual(['Delete connection…', 'Discard changes', 'Save connection']);
+    expect(labels(groups[0])).toEqual(['Delete connection', 'Connect', 'Test']);
+    expect(labels(groups[1])).toEqual(['Discard', 'Save']);
     expect((groups[1].lastElementChild as HTMLButtonElement).type).toBe('submit');
-    // Delete is separated from Save by Discard.
-    expect(names.indexOf('Save connection') - names.indexOf('Delete connection…')).toBe(2);
+    // Delete is icon-only: no visible text, a danger house button, and the glyph is hidden from assistive tech.
+    const del = groups[0].firstElementChild as HTMLButtonElement;
+    expect([del.textContent, del.title, del.className]).toEqual(['', 'Delete connection…', 'au-btn icon danger ssh-delete-btn']);
+    expect(del.querySelector('svg')!.getAttribute('aria-hidden')).toBe('true');
+    // The short labels keep their full meaning in the tooltip and the existing help descriptions.
+    const byText = (t:string) => [...actions[0].querySelectorAll('button')].find(x => x.textContent === t)!;
+    expect([byText('Connect').title, byText('Connect').getAttribute('aria-describedby')]).toEqual(['Connect in a new tab', 'ssh-connect-help']);
+    expect([byText('Test').title, byText('Test').getAttribute('aria-describedby')]).toEqual(['Test connection', 'ssh-test-help']);
   });
   test('every action button follows the fields in DOM (Tab) order, Save last of all buttons in the form', () => {
     render();
     const all = [...host.querySelectorAll<HTMLElement>('form input, form select, form button')];
-    const save = all.findIndex(el => el.textContent === 'Save connection');
-    const test = all.findIndex(el => el.textContent === 'Test connection');
+    const save = all.findIndex(el => el.textContent === 'Save');
+    const test = all.findIndex(el => el.textContent === 'Test');
     expect(test).toBeGreaterThan(all.findIndex(el => el.getAttribute('name') === 'extraOptions'));
     expect(test).toBeLessThan(save);
     expect(save).toBe(all.length - 1);
   });
   test('new connection: no Delete or Connect, Save still last', () => {
     render(null, null);
-    expect(labels(host.querySelector('.ssh-editor-actions')!)).toEqual(['Test connection', 'Discard changes', 'Save connection']);
+    expect(labels(host.querySelector('.ssh-editor-actions')!)).toEqual(['Test', 'Discard', 'Save']);
   });
   test('Browse shares a row container with the Identity file input', () => {
     render();

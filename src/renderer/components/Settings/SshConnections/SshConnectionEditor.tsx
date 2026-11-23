@@ -50,6 +50,13 @@ function connectionInput(draft:SshConnectionInput, options:string):SshConnection
   return { ...draft, name:draft.name.trim(), identityFile:draft.auth === 'keyFile' ? draft.identityFile : null, extraOptions:parsed.pairs };
 }
 
+/** Monochrome trash glyph (inherits currentColor, so the danger hover colours it); the codebase uses inline SVGs. */
+function TrashIcon() {
+  return <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4M6.7 6.5v4.5M9.3 6.5v4.5" />
+  </svg>;
+}
+
 export function SshConnectionEditor({ connectionId, initialFolder, view, api, onSaved, onClose, focusName = 0, onConnect }: { connectionId?:string; initialFolder:string | null; view:SshView; api:SshStoreApi; onSaved(reply:SshReply, input:SshConnectionInput):void; onClose():void; focusName?:number; onConnect?(id:string):void }) {
   const nameInput = useRef<HTMLInputElement>(null);
   useEffect(() => { if (!connectionId || focusName) nameInput.current?.focus(); }, [connectionId, focusName]);
@@ -265,17 +272,18 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
         {error && <p role="alert" className="ssh-span-all">{error.message}</p>}
       </div>
     </fieldset>
-    {/* One wrapping action row in two groups, as in the mockup: use actions left, edit actions right. DOM order is
-        Tab order, so Save (primary) is last. The end group wraps as a unit and right-aligns, so Save stays bottom-right. */}
+    {/* ONE non-wrapping action row in two groups: use actions left (Delete as an icon first), edit actions right.
+        DOM order is Tab order, so Save (primary) is last. Short labels keep the row on one line at the narrowest
+        editor width; the full wording stays in the titles and the ssh-*-help descriptions. */}
     <div className="ssh-editor-actions">
       <div className="ssh-actions-group">
-        {canConnect && <button type="button" className="au-btn" disabled={readOnly || removed || busy} aria-describedby="ssh-connect-help" onClick={connect}>Connect in new tab</button>}
-        <button type="button" className="au-btn" disabled={!canTest} aria-describedby="ssh-test-help" onClick={() => { if (canTest) setTestOpen(true); }}>Test connection</button>
+        {connectionId && <button type="button" className="au-btn icon danger ssh-delete-btn" disabled={locked} aria-label="Delete connection" title="Delete connection…" onClick={() => setConfirmDelete(true)}><TrashIcon /></button>}
+        {canConnect && <button type="button" className="au-btn" disabled={readOnly || removed || busy} title="Connect in a new tab" aria-describedby="ssh-connect-help" onClick={connect}>Connect</button>}
+        <button type="button" className="au-btn" disabled={!canTest} title="Test connection" aria-describedby="ssh-test-help" onClick={() => { if (canTest) setTestOpen(true); }}>Test</button>
       </div>
       <div className="ssh-actions-group ssh-actions-end">
-        {connectionId && <button type="button" className="au-btn danger" disabled={locked} onClick={() => setConfirmDelete(true)}>Delete connection…</button>}
-        <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
-        <button type="submit" className="au-btn primary" disabled={locked}>Save connection</button>
+        <button type="button" className="au-btn" disabled={busy} title="Discard changes" onClick={() => { reset(); onClose(); }}>Discard</button>
+        <button type="submit" className="au-btn primary" disabled={locked} title="Save connection">Save</button>
       </div>
     </div>
     <div className="ssh-editor-help">

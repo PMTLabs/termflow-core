@@ -70,8 +70,8 @@ describe('editor controls use house styles', () => {
     const seg = host.querySelector('[role="group"][aria-label="Authentication"]')!;
     expect(seg.classList.contains('au-seg')).toBe(true);
     expect([...seg.querySelectorAll('button.on')].map(b => b.textContent)).toEqual(['SSH agent']);
-    expect([...host.querySelectorAll('button.au-btn.primary')].map(b => b.textContent)).toEqual(['Save connection']);
-    expect([...host.querySelectorAll('button.au-btn.danger')].map(b => b.textContent)).toEqual(['Delete connection…']);
+    expect([...host.querySelectorAll('button.au-btn.primary')].map(b => b.textContent)).toEqual(['Save']);
+    expect([...host.querySelectorAll('button.au-btn.danger')].map(b => b.getAttribute('aria-label'))).toEqual(['Delete connection']);
   });
 });
 
