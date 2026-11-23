@@ -4,6 +4,7 @@ use super::protocol::{decimal, Platform, RawSample, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use uuid::Uuid;
+mod darwin;
 
 mod windows;
 
@@ -15,6 +16,7 @@ const NET_ELAPSED: &str = "Remote uptime did not advance";
 
 #[derive(Default)]
 pub struct Reducer {
+    darwin: darwin::Baseline,
     boot: Boot,
     cpu: Option<[u64; 8]>,
     net: Option<Interfaces>,
@@ -39,15 +41,24 @@ impl Reducer {
     /// One instance per terminal/session. A completed watchdog run can retain
     /// instantaneous readings, but neither uses nor seeds a rate baseline.
     pub fn reduce(&mut self, raw: RawSample<'_>) -> Metrics {
-        // Every platform's reading passes here, so a sample that measured nothing is marked once.
-        self.reduce_platform(raw).flag_unmeasured()
+        self.reduce_at(raw, std::time::Instant::now())
     }
 
-    fn reduce_platform(&mut self, raw: RawSample<'_>) -> Metrics {
+    /// `started` is the exec's reserved start, the Darwin rate clock.
+    pub fn reduce_at(&mut self, raw: RawSample<'_>, started: std::time::Instant) -> Metrics {
+        // Every platform's reading passes here, so a sample that measured nothing is marked once.
+        self.reduce_platform(raw, started).flag_unmeasured()
+    }
+
+    // A platform switch never carries another platform's baselines across.
+    fn reduce_platform(&mut self, raw: RawSample<'_>, started: std::time::Instant) -> Metrics {
         match raw.platform {
-            Platform::Linux => self.reduce_linux(raw),
+            Platform::Linux => self.linux(raw),
+            Platform::Darwin => {
+                self.windows = windows::WindowsRates::default();
+                darwin::reduce(self, raw, started)
+            }
             Platform::Windows => {
-                // Mirror reduce_linux: the other platform's baselines never survive a switch.
                 let windows = std::mem::take(&mut self.windows);
                 self.reset();
                 self.windows = windows;
@@ -61,7 +72,7 @@ impl Reducer {
         }
     }
 
-    fn reduce_linux(&mut self, raw: RawSample<'_>) -> Metrics {
+    fn linux(&mut self, raw: RawSample<'_>) -> Metrics {
         self.windows = windows::WindowsRates::default();
         let stat = rows(&raw, "stat");
         let uptime = rows(&raw, "uptime").and_then(parse_uptime);

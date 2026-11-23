@@ -61,17 +61,14 @@ fn snapshot_json_has_nine_camelcase_metric_keys_plus_only_the_platform_label_and
         }
     }));
 
-    let unsupported = to_value(sample(&mut reducer, "", &[("platform", "Darwin", 0)])).unwrap();
+    let unsupported = to_value(sample(&mut reducer, "", &[("platform", "FreeBSD", 0)])).unwrap();
     assert_eq!(unsupported.as_object().unwrap().len(), 10);
-    assert_eq!(unsupported["unsupportedPlatform"], json!("macOS (Darwin)"));
+    assert_eq!(unsupported["unsupportedPlatform"], json!("FreeBSD"));
     assert_eq!(unsupported["host"], json!({"available": true, "hostname": "derived-host",
-        "os": {"available": true, "name": "Darwin"}, "architecture": {"available": true, "name": "arm64"}}));
+        "os": {"available": true, "name": "FreeBSD"}, "architecture": {"available": true, "name": "arm64"}}));
     for key in ["cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
-        assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are not supported on this platform (Darwin)"}));
+        assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are supported only on Linux, macOS and Windows (FreeBSD)"}));
     }
-    let other = to_value(sample(&mut reducer, "", &[("platform", "FreeBSD", 0)])).unwrap();
-    assert_eq!(other["unsupportedPlatform"], json!("FreeBSD"));
-    assert_eq!(other["ram"], json!({"available": false, "reason": "Metrics are not supported on this platform (FreeBSD)"}));
     // An unknown platform is not "unsupported": nothing names it, and Host keeps its own reading.
     let unknown = to_value(sample(&mut reducer, "", &[("platform", "", 1)])).unwrap();
     assert!(unknown.get("unsupportedPlatform").is_none());
@@ -125,7 +122,7 @@ fn a_parsed_sample_that_measured_nothing_is_flagged_unavailable() {
     assert!(partial.get("unavailableReason").is_none());
 
     // A named unsupported platform keeps its own status even though Host failed too (D95).
-    let darwin = to_value(sample(&mut Reducer::default(), "", &[("platform", "Darwin", 0), ("hostname", "", 1)])).unwrap();
-    assert_eq!(darwin["unsupportedPlatform"], json!("macOS (Darwin)"));
-    assert!(darwin.get("unavailableReason").is_none());
+    let bsd = to_value(sample(&mut Reducer::default(), "", &[("platform", "FreeBSD", 0), ("hostname", "", 1)])).unwrap();
+    assert_eq!(bsd["unsupportedPlatform"], json!("FreeBSD"));
+    assert!(bsd.get("unavailableReason").is_none());
 }

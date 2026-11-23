@@ -2,7 +2,8 @@ import React, { useRef, useState } from 'react';
 import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
 import { ContextMenu, type ContextMenuItem } from '../Terminal/ContextMenu';
 import { formatSshMetric } from './metricFormat';
-import { SSH_METRIC_KEYS, sshMetricLabel, sshMetricShortLabel } from './sshMetricKeys';
+import { SshIcon } from './SshIcons';
+import { SSH_METRIC_ICONS, SSH_METRIC_KEYS, sshMetricLabel } from './sshMetricKeys';
 import { useSshMetrics } from './useSshMetrics';
 import './SshMetricsStatusBar.css';
 
@@ -95,9 +96,8 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
           const detail = identityOnly ? `${identity} (configured) · ${value.detail}`
             : key === 'users' && sample?.metrics.platform === 'Windows' ? `${value.detail} · SSH sessions are not listed`
             : value.detail;
-          const short = sshMetricShortLabel(key, sample?.metrics.platform);
           return <span className="ssh-metrics-value" key={key} data-metric={key} title={`${label}: ${detail}`}
-            aria-label={`${label}: ${detail}`}>{short ? `${short} ${text}` : text}</span>;
+            aria-label={`${label}: ${detail}`}><SshIcon name={SSH_METRIC_ICONS[key]} size={12} />{text}</span>;
         })}
       </>}
       {/* Portalled to body, so it carries the Canvas keyboard-owner marker itself (review 349 F6). */}

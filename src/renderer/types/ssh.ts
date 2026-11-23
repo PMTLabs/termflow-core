@@ -139,7 +139,7 @@ type Assert<T extends true> = T;
 export type MetricPayloadKeysMatch = Assert<
   [keyof MetricPayloads] extends [MetricKey] ? [MetricKey] extends [keyof MetricPayloads] ? true : false : false
 >;
-// `unsupportedPlatform` names a host platform with no collector (e.g. "macOS (Darwin)"); absent otherwise.
+// `unsupportedPlatform` names a host platform with no collector (e.g. "FreeBSD"); absent otherwise.
 // `unavailableReason` is set when the sample measured nothing (whole-exec failure or every metric n/a).
 // `platform` is set only on Windows samples; the renderer labels the `nfs` slot from it.
 export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> } & { platform?: 'Windows'; unsupportedPlatform?: string; unavailableReason?: string };

@@ -60,7 +60,7 @@ pub struct Metrics {
     /// Present when a platform uses different names for the same metric slots.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<&'static str>,
-    /// Set only for a host whose platform has no collector (e.g. `macOS (Darwin)`): the bar says
+    /// Set only for a host whose platform has no collector (e.g. `FreeBSD`): the bar says
     /// so instead of "Connected" over a row of n/a. Absent from the wire otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsupported_platform: Option<String>,

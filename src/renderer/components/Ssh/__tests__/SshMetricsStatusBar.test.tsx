@@ -12,7 +12,9 @@ import { installSshMetricsWatch, useSshMetricsWatch } from '../../../services/ss
 import { writeClipboardText } from '../../../utils/clipboard';
 import type { SshMetricsAPI, SshMetricsSample, SshMetricsControl, SshState } from '../../../types/ssh';
 import { SshMetricsStatusBar } from '../SshMetricsStatusBar';
-import { SSH_METRIC_KEYS, SSH_METRIC_LABELS, SSH_METRIC_SHORT_LABELS } from '../sshMetricKeys';
+import { SSH_METRIC_KEYS, SSH_METRIC_LABELS } from '../sshMetricKeys';
+import { SshIcon, type SshIconName } from '../SshIcons';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { formatSshMetricsCopy } from '../metricFormat';
 
 jest.mock('../../../utils/clipboard', () => ({ writeClipboardText: jest.fn() }));
@@ -59,6 +61,8 @@ function setup() {
   return { store, dispatch, session, publish, render, toasts: () => store.getState().ui.toasts.map(t => t.type) };
 }
 const bar = () => host.querySelector<HTMLElement>('[aria-label="Remote host metrics"]')!;
+// D101: a value is an aria-hidden glyph followed by text, so its textContent is the value alone.
+const metric = (key: string) => bar().querySelector<HTMLElement>(`[data-metric="${key}"]`)!.textContent;
 const key = (value: string, shiftKey = false) => act(() => bar().dispatchEvent(new KeyboardEvent('keydown', { key: value, shiftKey, bubbles: true, cancelable: true })));
 const open = () => act(() => bar().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
 const row = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('.context-menu button')]
@@ -77,8 +81,8 @@ test('Windows samples render as connected and name the NFS slot Network drives',
   expect(bar().querySelector('.ssh-metrics-state')?.textContent).toBe('● Connected');
   const nfs = bar().querySelector('[data-metric="nfs"]');
   expect(bar().querySelector('[data-metric="host"]')?.textContent).toBe('WINHOST');
-  expect(bar().querySelector('[data-metric="cpu"]')?.textContent).toBe('CPU 48%');
-  expect(nfs?.textContent).toBe('Net drives none mounted');
+  expect(bar().querySelector('[data-metric="cpu"]')?.textContent).toBe('48%');
+  expect(nfs?.textContent).toBe('none mounted');
   expect(nfs?.getAttribute('title')).toBe('Network drives: none mounted');
   expect(bar().querySelector('[data-metric="users"]')?.getAttribute('title')).toContain('SSH sessions are not listed');
   expect(row('Network drives')).toBeDefined();
@@ -99,12 +103,12 @@ test.each(states)('connected_values_disappear_on_disconnect_before_next_sample (
     else h.session(state);
   });
   expect(bar().textContent).not.toMatch(/61%|3\.2KB\/s|db-beta/);
-  expect(bar().textContent).toContain('CPU —');
+  expect(metric('cpu')).toBe('—');
   expect(bar().querySelector('.is-live')).toBeNull();
   expect(row('Copy all metrics').disabled).toBe(true);
   act(() => h.session('connected', 2));
   expect(bar().textContent).toContain('Collecting first sample');
-  expect(bar().textContent).toContain('CPU …');
+  expect(metric('cpu')).toBe('…');
   act(() => h.publish(sample(29)));
   expect(bar().textContent).toContain('29%');
   expect(row('Copy all metrics').disabled).toBe(false);
@@ -173,7 +177,7 @@ test('nonlinux_and_partial_failure_tooltips_explain_na', async () => {
   act(() => h.session('connected', 2));
   act(() => h.publish(sample(34)));
   expect(bar().querySelector('[title="RAM: n/a (meminfo failed)"]')).not.toBeNull();
-  expect(bar().querySelector('[title*="n/a (load failed)"]')?.textContent).toBe('CPU 34%');
+  expect(bar().querySelector('[title*="n/a (load failed)"]')?.textContent).toBe('34%');
   expect(bar().querySelector('[title*="n/a (arch failed)"]')?.textContent).toBe('db-beta');
   expect(bar().querySelector('[title="Network upload: 3.2 KB/s"]')).not.toBeNull();
   expect(bar().querySelector('[title*="Linux-only metrics"]')).toBeNull();
@@ -217,7 +221,7 @@ test('F3 resumes via the verified lease, starts with a fresh baseline, and never
   }
   h.render(<Owner copy={1} />); await act(flush);
   expect(bar().textContent).toContain(reason);
-  expect(bar().textContent).toContain('CPU —');
+  expect(metric('cpu')).toBe('—');
   // D93: the Resume action sits right after the status, so overflow drops metric values first.
   expect(bar().querySelector('.ssh-metrics-state')!.nextElementSibling!.tagName).toBe('BUTTON');
   key('ContextMenu'); expect(row('Resume metrics').textContent).toContain('F3');
@@ -234,8 +238,8 @@ test('F3 resumes via the verified lease, starts with a fresh baseline, and never
   act(() => emit(sample(99, B, floor)));
   expect(bar().textContent).not.toContain('99%');
   act(() => emit(sample(null, B, floor + 1)));
-  expect(bar().textContent).toContain('CPU …');
-  expect(bar().textContent).toContain('↑ …');
+  expect(metric('cpu')).toBe('…');
+  expect(metric('netUp')).toBe('…');
   act(() => emit(sample(35, B, floor + 2)));
   expect(bar().textContent).toContain('35%');
   expect(bar().textContent).toContain('3.2KB/s');
@@ -263,7 +267,7 @@ test('restored_reattached_pane_reports_metrics_unavailable_not_disconnected', ()
   const shown = visibleValues().map(v => v.dataset.metric as typeof SSH_METRIC_KEYS[number]);
   expect(shown.length).toBeGreaterThan(1);
   expect(visibleValues().map(v => [v.dataset.metric, v.textContent, v.title])).toEqual(shown.map(k => [k,
-    k === 'host' ? 'saved · n/a' : `${SSH_METRIC_SHORT_LABELS[k]} n/a`,
+    k === 'host' ? 'saved · n/a' : 'n/a',
     k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved (configured) · n/a` : `${SSH_METRIC_LABELS[k]}: n/a`]));
   expect(bar().textContent).not.toMatch(/…|—|Collecting first sample|Disconnected/);
   open();
@@ -275,7 +279,7 @@ test('restored_reattached_pane_reports_metrics_unavailable_not_disconnected', ()
 test('fresh_unconnected_pane_without_reattach_keeps_disconnected_dashes', () => {
   const h = setup(); h.render(<SshMetricsStatusBar terminalId={A} />);
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('○ Disconnected');
-  expect(bar().textContent).toContain('RAM —');
+  expect(metric('ram')).toBe('—');
   expect(bar().textContent).not.toContain('n/a');
 });
 
@@ -286,7 +290,7 @@ test('restored_pane_resumes_normal_flow_once_an_app_session_is_observed', () => 
   expect(bar().textContent).toContain('Metrics unavailable');
   act(() => h.session('connected', 1, A));
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('○ Collecting first sample');
-  expect(bar().textContent).toContain('RAM …');
+  expect(metric('ram')).toBe('…');
   act(() => h.publish(sample(44, A)));
   expect(bar().textContent).toContain('3.2KB/s');
 });
@@ -298,39 +302,66 @@ test('D93: bar items are compact and value-first; the full label stays in title 
   // Overflow drops whole items from the end (wrap onto a hidden line) instead of truncating CPU/RAM.
   expect(css).toMatch(/\.ssh-metrics-status-bar \{[^}]*flex-wrap: wrap;[^}]*overflow: hidden;/);
   expect(css).toContain(".ssh-metrics-value[data-metric='cpu'], .ssh-metrics-value[data-metric='ram'], .ssh-metrics-value[data-metric='netUp'], .ssh-metrics-value[data-metric='netDown'] { flex: none; }");
-  const { SSH_METRIC_KEYS, SSH_METRIC_LABELS, SSH_METRIC_SHORT_LABELS } = require('../sshMetricKeys');
   // Lowest priority last, so it is the first to drop.
   expect(SSH_METRIC_KEYS.slice(-4)).toEqual(['uptime', 'users', 'partitions', 'nfs']);
-  for (const key of SSH_METRIC_KEYS) expect(SSH_METRIC_SHORT_LABELS[key].length).toBeLessThanOrEqual(SSH_METRIC_LABELS[key].length);
+});
+
+test('D101: every value leads with its own aria-hidden glyph and no text label; the full label stays in title and aria-label', () => {
+  const h = setup(); h.dispatch(setSshHiddenMetrics({ terminalId: B, hiddenMetrics: [] })); h.publish(sample(61)); h.render();
+  const values = visibleValues();
+  expect(values.map(v => v.dataset.metric)).toEqual([...SSH_METRIC_KEYS]);
+  // The glyph each metric must draw, by its icon name: a swapped pair (↑/↓) must fail.
+  const expected = { host: 'server', cpu: 'chip', ram: 'memory', netUp: 'up', netDown: 'down',
+    uptime: 'clock', users: 'user', partitions: 'disk', nfs: 'networkDrive' } as const;
+  const pathOf = (name: SshIconName) => /\sd="([^"]+)"/.exec(renderToStaticMarkup(<SshIcon name={name} />))![1];
+  for (const v of values) {
+    const glyph = v.firstElementChild!;
+    expect(glyph.tagName.toLowerCase()).toBe('svg');
+    // Icon first, then the value as text: an icon rendered after the value must fail.
+    expect(v.firstChild).toBe(glyph);
+    expect(v.lastChild!.nodeType).toBe(Node.TEXT_NODE);
+    expect(glyph.querySelector('path')!.getAttribute('d')).toBe(pathOf(expected[v.dataset.metric as keyof typeof expected]));
+    expect(glyph.getAttribute('aria-hidden')).toBe('true');
+    expect(glyph.getAttribute('focusable')).toBe('false');
+    expect(v.children).toHaveLength(1);
+    const label = SSH_METRIC_LABELS[v.dataset.metric as typeof SSH_METRIC_KEYS[number]];
+    expect(v.title.startsWith(`${label}: `)).toBe(true);
+    expect(v.getAttribute('aria-label')).toBe(v.title);
+    expect(v.textContent!.startsWith(label)).toBe(false);
+  }
+  // One distinct glyph per metric, so no two values read the same at a glance.
+  expect(new Set(values.map(v => v.querySelector('path')!.getAttribute('d'))).size).toBe(values.length);
+  expect(metric('cpu')).toBe('61%');
+  expect(metric('host')).toBe('db-beta');
 });
 
 test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', async () => {
-  const reason = 'Metrics are not supported on this platform (Darwin)';
-  const darwin: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
-    host: { available: true, hostname: 'mymac', os: { available: true, name: 'Darwin' }, architecture: { available: true, name: 'arm64' } },
+  const reason = 'Metrics are supported only on Linux, macOS and Windows (FreeBSD)';
+  const freebsd: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
+    host: { available: true, hostname: 'bsdbox', os: { available: true, name: 'FreeBSD' }, architecture: { available: true, name: 'amd64' } },
     cpu: na(reason), ram: na(reason), netUp: na(reason), netDown: na(reason), uptime: na(reason),
-    users: na(reason), partitions: na(reason), nfs: na(reason), unsupportedPlatform: 'macOS (Darwin)',
+    users: na(reason), partitions: na(reason), nfs: na(reason), unsupportedPlatform: 'FreeBSD',
   } };
-  const h = setup(); h.publish(darwin); h.render(); open();
+  const h = setup(); h.publish(freebsd); h.render(); open();
   const state = bar().querySelector<HTMLElement>('.ssh-metrics-state')!;
-  expect(state.textContent).toBe('○ Metrics not supported on macOS (Darwin)');
-  expect(state.title).toBe(`Metrics not supported on macOS (Darwin) — ${reason}`);
+  expect(state.textContent).toBe('○ Metrics not supported on FreeBSD');
+  expect(state.title).toBe(`Metrics not supported on FreeBSD — ${reason}`);
   expect(bar().querySelector('.is-live')).toBeNull();
   expect(state.textContent).not.toContain('Connected');
-  // D93 value-first items: the host item is the bare hostname, the rest lead with the short label.
-  expect(bar().querySelector('[data-metric="host"]')!.textContent).toBe('mymac');
-  expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toBe(`${SSH_METRIC_SHORT_LABELS.cpu} n/a`);
+  // D101 value-first items: a glyph then the bare value.
+  expect(metric('host')).toBe('bsdbox');
+  expect(metric('cpu')).toBe('n/a');
   expect(row('Copy all metrics').disabled).toBe(false);
   await click('Copy all metrics');
   const copied = write.mock.calls[0][0];
-  expect(copied).toBe(formatSshMetricsCopy(darwin));
-  expect(copied).toContain('mymac (Darwin, arm64)');
+  expect(copied).toBe(formatSshMetricsCopy(freebsd));
+  expect(copied).toContain('bsdbox (FreeBSD, amd64)');
   expect(copied).toContain(`n/a (${reason})`);
   expect(copied).not.toContain('unsupportedPlatform');
   open();
 
   // A Linux sample right after goes back to the live, Connected bar.
-  act(() => h.publish(sample(12, B, darwin.sampledAt + 1)));
+  act(() => h.publish(sample(12, B, freebsd.sampledAt + 1)));
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
   expect(bar().querySelector('.is-live')).not.toBeNull();
 });
@@ -353,3 +384,12 @@ test.each(['Metrics collector unavailable', 'Metrics command failed', 'Metrics e
     expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toContain('12');
   },
 );
+
+ test('Darwin measurements render Connected with values', () => {
+    const reading = sample(14);
+    reading.metrics.host = { available: true, hostname: 'mac-host.local', os: { available: true, name: 'macOS 26.5.2' }, architecture: { available: true, name: 'arm64' } };
+    const h = setup(); h.publish(reading); h.render();
+    expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
+    expect(bar().textContent).toContain('14%');
+    expect(bar().textContent).toContain('mac-host.local');
+ });

@@ -526,7 +526,7 @@ impl Terminal {
         // Reduce outside the session-entry lock. If the lease was revoked while
         // reducing, the second admission below discards this result and baseline.
         let (metrics, pause) = match result {
-            Reading::Sample(raw) if eligible => (Some(state.reducer.reduce(raw)), None),
+            Reading::Sample(raw) if eligible => (Some(state.reducer.reduce_at(raw, tick.started.into_std())), None),
             Reading::Sample(_) => (None, None),
             Reading::Unavailable(reason) => {
                 state.reducer.reset();
@@ -536,7 +536,7 @@ impl Terminal {
             Reading::IndeterminateRemoteWork { reason, completed } => {
                 let metrics = completed
                     .filter(|_| eligible)
-                    .map(|raw| state.reducer.reduce(raw));
+                    .map(|raw| state.reducer.reduce_at(raw, tick.started.into_std()));
                 state.reducer.reset();
                 (metrics, Some(reason))
             }
