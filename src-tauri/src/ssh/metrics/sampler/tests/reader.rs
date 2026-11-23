@@ -192,7 +192,7 @@ fn every_session_error_is_classified_without_host_debug_text() {
         (HostKeyChanged, "disarm"), (HostKeyRevoked, "disarm"), (HostCertificateUnsupported, "disarm"),
         (KnownHostsMalformed { line: 31337 }, "disarm"), (KnownHostsUnreadable, "disarm"),
         (TrustWriteFailed, "disarm"), (TrustAlreadyPinned, "disarm"), (AuthRejected, "disarm"),
-        (AgentUnavailable, "disarm"), (IdentityUnreadable, "disarm"), (UnsupportedAuthentication, "disarm"),
+        (AgentUnavailable, "disarm"), (IdentityUnreadable, "disarm"), (IdentityEncryptionUnsupported, "disarm"), (UnsupportedAuthentication, "disarm"),
         (RememberUnavailable, "disarm"), (StoreUnavailable, "disarm"),
     ] {
         let outcome = ExecOutcome::from(error.clone());

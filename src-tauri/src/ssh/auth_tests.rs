@@ -216,12 +216,16 @@ async fn agent_missing_and_connect_timeout_never_authenticate() {
 }
 #[tokio::test]
 async fn encrypted_key_wrong_then_correct_passphrase() {
+    encrypted_key_flow(include_str!("fixtures/client_enc"), "spikepass").await;
+}
+#[tokio::test]
+async fn encrypted_pkcs8_wrong_then_correct_passphrase() {
+    encrypted_key_flow(include_str!("fixtures/key_formats/rsa_pkcs8_enc"), "fixture-pass").await;
+}
+fn key_fixture(fixture: &str, public: ssh_key::PublicKey) -> Fixture {
     let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
-    // Fixture key generated independently by the approved spike; no user key paths.
-    let fixture = include_str!("fixtures/client_enc");
-    let decoded = russh::keys::decode_secret_key(fixture, Some("spikepass")).unwrap();
     let mut server = f.server.clone();
-    server.client = decoded.public_key().clone();
+    server.client = public;
     let identity = f.path.with_file_name("identity");
     std::fs::write(&identity, fixture).unwrap();
     let hop = SessionHop {
@@ -242,6 +246,14 @@ async fn encrypted_key_wrong_then_correct_passphrase() {
             home: f.path.parent().unwrap().into(),
         })
         .unwrap();
+    f
+}
+pub(super) async fn encrypted_key_flow(
+    fixture: &str,
+    pass: &str,
+) -> (super::auth::AuthBinding, String) {
+    let decoded = russh::keys::decode_secret_key(fixture, Some(pass)).unwrap();
+    let f = key_fixture(fixture, decoded.public_key().clone());
     let id = f.registry.probe("c-a").unwrap();
     let a = wait_state(&f.registry, &id, true, SessionState::NeedsSecret).await;
     assert_eq!(a.secret_kind, Some(super::auth::SecretKind::Passphrase));
@@ -266,6 +278,7 @@ async fn encrypted_key_wrong_then_correct_passphrase() {
     })
     .await
     .unwrap();
+    assert_eq!(b.error_code.as_deref(), Some("auth-rejected"));
     assert_eq!(f.secrets.saves.load(Ordering::SeqCst), 0);
     f.registry
         .submit_secret(
@@ -273,12 +286,36 @@ async fn encrypted_key_wrong_then_correct_passphrase() {
             true,
             None,
             b.prompt_id.as_deref(),
-            "spikepass".into(),
+            pass.into(),
             true,
         )
         .unwrap();
     wait_state(&f.registry, &id, true, SessionState::Connected).await;
     assert_eq!(f.secrets.saves.load(Ordering::SeqCst), 1);
+    let path = f.path.with_file_name("identity");
+    let fingerprint = super::identity::read_identity(&path).unwrap().fingerprint();
+    let saved = f.secrets.values.lock()["c-a"].clone();
+    assert_eq!(saved.0.identity_fingerprint.as_deref(), Some(fingerprint.as_str()));
+    f.registry.shutdown().await;
+    saved
+}
+#[tokio::test]
+async fn plain_rsa_pem_connects_without_prompt() {
+    let public = ssh_key::PublicKey::from_openssh(include_str!("fixtures/key_formats/rsa_pem.pub")).unwrap();
+    let f = key_fixture(include_str!("fixtures/key_formats/rsa_pem"), public);
+    let id = f.registry.probe("c-a").unwrap();
+    wait_state(&f.registry, &id, true, SessionState::Connected).await;
+    assert!(!f.events.0.lock().iter().any(|view| view.state == SessionState::NeedsSecret));
+    f.registry.shutdown().await;
+}
+#[tokio::test]
+async fn des3_rsa_pem_encryption_is_unsupported_without_prompt() {
+    let public = ssh_key::PublicKey::from_openssh(include_str!("fixtures/client_rsa.pub")).unwrap();
+    let f = key_fixture(include_str!("fixtures/key_formats/rsa_pem_des3"), public);
+    let id = f.registry.probe("c-a").unwrap();
+    let view = wait_state(&f.registry, &id, true, SessionState::Error).await;
+    assert_eq!(view.error_code.as_deref(), Some("identity-encryption-unsupported"));
+    assert!(!f.events.0.lock().iter().any(|view| view.state == SessionState::NeedsSecret));
     f.registry.shutdown().await;
 }
 #[cfg(unix)]

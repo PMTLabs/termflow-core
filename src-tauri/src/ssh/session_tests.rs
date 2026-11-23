@@ -279,6 +279,7 @@ fn every_session_error() -> Vec<SessionError> {
         OutputTooLarge,
         MissingExitStatus,
         IdentityUnreadable,
+        IdentityEncryptionUnsupported,
         UnsupportedAuthentication,
         RememberUnavailable,
         StoreUnavailable,
@@ -308,6 +309,7 @@ fn every_session_error() -> Vec<SessionError> {
             | OutputTooLarge
             | MissingExitStatus
             | IdentityUnreadable
+            | IdentityEncryptionUnsupported
             | UnsupportedAuthentication
             | RememberUnavailable
             | StoreUnavailable => {}
