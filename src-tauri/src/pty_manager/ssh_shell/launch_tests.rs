@@ -63,7 +63,27 @@ fn exercise(
 /// D93 oracle: what a terminal of this size shows at the end. ConPTY consumes the launch's
 /// own cursor restore/erase and repaints, so the raw stream is not evidence; the screen is.
 fn final_screen(visible: &[u8], rows: u16, cols: u16) -> String {
-    let mut parser = vt100::Parser::new(rows, cols, 0);
+    replay(visible, rows, cols).screen().contents()
+}
+
+/// Every row the terminal ever kept, scrollback first. Each later prompt reserves rows again,
+/// so earlier output legitimately scrolls off the screen; it must still exist up here.
+fn history(visible: &[u8], rows: u16, cols: u16) -> Vec<String> {
+    let mut parser = replay(visible, rows, cols);
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let kept = parser.screen().scrollback();
+    let mut lines = Vec::new();
+    for offset in (1..=kept).rev() {
+        parser.screen_mut().set_scrollback(offset);
+        lines.extend(parser.screen().rows(0, cols).next());
+    }
+    parser.screen_mut().set_scrollback(0);
+    lines.extend(parser.screen().rows(0, cols));
+    lines
+}
+
+fn replay(visible: &[u8], rows: u16, cols: u16) -> vt100::Parser {
+    let mut parser = vt100::Parser::new(rows, cols, 10_000);
     // vt100 ignores IND (ESC D), which the POSIX hooks write raw. IND is exactly a bare line
     // feed: down one row, same column, scrolling at the bottom (the tty's CR mapping already
     // happened upstream, so a model LF is not followed by CR).
@@ -74,7 +94,7 @@ fn final_screen(visible: &[u8], rows: u16, cols: u16) -> String {
         else { bytes.push(visible[i]); i += 1; }
     }
     parser.process(&bytes);
-    parser.screen().contents()
+    parser
 }
 
 fn assert_launch_echo_erased(screen: &str) {
@@ -130,8 +150,12 @@ fn exercise_after(
     adapter.finish_after_shell_quiescence().unwrap();
     let screen = final_screen(&prompts.visible, rows, cols);
     assert_launch_echo_erased(&screen);
+    let kept = history(&prompts.visible, rows, cols).join("\n");
+    assert_launch_echo_erased(&kept);
     if fill.is_some() {
-        assert!(screen.contains("FILL"), "the erase must stop at the prompt, not wipe earlier output:\n{screen}");
+        // Exact count: an erase that starts above the prompt would delete on-screen FILL rows.
+        let fills = kept.lines().filter(|line| line.trim_end() == "FILL").count();
+        assert_eq!(fills, 30, "the erase must stop at the prompt, not wipe earlier output:\n{kept}");
     }
     prompts.visible
 }
