@@ -67,7 +67,7 @@ function setup() {
 }
 type RowSession = SshState | 'none' | 'restored';
 const rowSessions: RowSession[] = ['none', 'restored', 'connecting', 'needs-secret', 'needs-hostkey', 'connected', 'disconnected', 'error'];
-const rowStages: (LaunchSnapshot['stage'] | undefined)[] = [undefined, 'preparing', 'running', 'ended', 'blocked', 'cancelled', 'error'];
+const rowStages: (LaunchSnapshot['stage'] | undefined)[] = [undefined, 'preparing', 'waiting-ready', 'waiting-trust', 'typed', 'running', 'ended', 'blocked', 'cancelled', 'error'];
 const rowLabels: Record<RowSession, string> = {
   none: 'Disconnected', restored: 'Disconnected', connecting: 'Connecting', 'needs-secret': 'Waiting for credentials',
   'needs-hostkey': 'Waiting for host key approval', connected: 'Collecting first sample', disconnected: 'Disconnected', error: 'SSH error',
@@ -103,7 +103,7 @@ describe('SSH status row liveness', () => {
     const expectedLabel = ended ? 'SSH session ended' : state === 'restored' && !stage ? 'Metrics unavailable' : rowLabels[state];
     const status = row.querySelector('.ssh-metrics-state')?.textContent?.replace(/^○\s*/, '');
     expect(status).toBe(expectedLabel);
-    const terminalLive = state === 'connected' && (stage === 'preparing' || stage === 'running');
+    const terminalLive = state === 'connected' && ['preparing', 'waiting-ready', 'waiting-trust', 'typed', 'running'].includes(stage ?? '');
     expect(markerCount(row) + Number(status !== 'Collecting first sample')).toBe(terminalLive ? 0 : 1);
   });
 
