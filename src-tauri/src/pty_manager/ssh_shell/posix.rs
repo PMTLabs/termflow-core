@@ -13,6 +13,11 @@ pub(crate) mod windows;
 #[path = "launch.rs"]
 pub(crate) mod launch;
 
+/// Characters a typed launch line plus its prompt may take. Each ready hook reserves
+/// `ceil(ECHO_MAX / width) + 1` rows below the cursor it saves, so the echo cannot
+/// scroll that position away before the launch erases from it.
+pub(super) const ECHO_MAX: &str = "1200";
+
 const BASH_BOOTSTRAP: &str = "__TERMFLOW_SSH_BOOTSTRAP";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,7 +102,7 @@ pub(crate) fn instrument_posix(
                 // bash derives the default HISTFILE from HOME before any startup file.
                 let history = if effective_env("HISTFILE").is_some() { "" } else { "HISTFILE=$HOME/.bash_history\n" };
                 let hook = format!("builtin export HOME={}\n{history}{}{}", sh_quote(&home),
-                    BASH_LOGIN_RC.split_once('\n').expect("login rc lines").1, BASH_HOOK.replace("@NONCE@", nonce));
+                    BASH_LOGIN_RC.split_once('\n').expect("login rc lines").1, BASH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX));
                 let helper = output.publish(root, &supervisor, paths, ".bash_profile", &hook)?;
                 let dir = helper.rsplit_once('/').ok_or_else(|| adapter_error("invalid bash hook directory"))?.0;
                 output.spec.env.retain(|(key, _)| key != "HOME");
@@ -112,7 +117,7 @@ pub(crate) fn instrument_posix(
                 } else {
                     "if [[ -r $HOME/.bashrc ]]; then builtin source \"$HOME/.bashrc\"; fi\n".into()
                 };
-                let hook = source + &BASH_HOOK.replace("@NONCE@", nonce);
+                let hook = source + &BASH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX);
                 let helper = output.publish(root, &supervisor, paths, "sh", &hook)?;
                 if args.login {
                     // bash ignores --rcfile on a native login. Use its interactive ENV
@@ -146,7 +151,7 @@ pub(crate) fn instrument_posix(
                         script.push_str(ZSH_SAVE);
                         script.push_str(&format!("export ZDOTDIR={}\n", sh_quote(&dir)));
                     } else {
-                        script.push_str(&ZSH_HOOK.replace("@NONCE@", nonce));
+                        script.push_str(&ZSH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX));
                     }
                     let helper = output.publish(root, &supervisor, paths, stage, &script)?;
                     next = Some(helper.rsplit_once('/').ok_or_else(|| adapter_error("invalid zsh hook directory"))?.0.to_string());
@@ -154,7 +159,7 @@ pub(crate) fn instrument_posix(
                 output.spec.env.push(("ZDOTDIR".into(), next.expect("zsh has startup phases")));
             }
             Dialect::Fish => {
-                let helper = output.publish(root, &supervisor, paths, "fish", &FISH_HOOK.replace("@NONCE@", nonce))?;
+                let helper = output.publish(root, &supervisor, paths, "fish", &FISH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX))?;
                 output.spec.args.extend(["--init-command".into(), format!("source {}", fish_quote(&helper))]);
             }
         }
@@ -304,6 +309,15 @@ __termflow_ssh_ready() {
     local __termflow_ssh_status=$? __termflow_ssh_flags=$-
     case $__termflow_ssh_flags in *x*) builtin set +x ;; esac
     __termflow_ssh_seq=$((__termflow_ssh_seq + 1))
+    # Quiet launch: reserve rows below (IND keeps the column and scrolls only at the bottom),
+    # then save the cursor where the prompt starts. The launch restores it and erases its echo.
+    local __termflow_ssh_c=${COLUMNS:-80} __termflow_ssh_k __termflow_ssh_s=
+    (( __termflow_ssh_c < 20 )) && __termflow_ssh_c=20
+    __termflow_ssh_k=$(( (@ECHO_MAX@ + __termflow_ssh_c - 1) / __termflow_ssh_c + 1 ))
+    (( __termflow_ssh_k > ${LINES:-24} - 1 )) && __termflow_ssh_k=$(( ${LINES:-24} - 1 ))
+    (( __termflow_ssh_k < 1 )) && __termflow_ssh_k=1
+    builtin printf -v __termflow_ssh_s '%*s' "$__termflow_ssh_k" ''
+    builtin printf '%s\033[%dA\033%s' "${__termflow_ssh_s// /$'\033'D}" "$__termflow_ssh_k" 7
     builtin printf '\033]633;TermFlowSshReady;@NONCE@;%s\007' "$__termflow_ssh_seq"
     case $__termflow_ssh_flags in *x*) builtin set -x ;; esac
     return "$__termflow_ssh_status"
@@ -343,6 +357,15 @@ typeset -gi __termflow_ssh_seq=0
 __termflow_ssh_ready() {
     setopt localoptions noxtrace
     (( ++__termflow_ssh_seq ))
+    # Quiet launch: reserve rows, then save the cursor at the prompt start (see BASH_HOOK).
+    local -i __termflow_ssh_c=${COLUMNS:-80} __termflow_ssh_k
+    local __termflow_ssh_s=
+    (( __termflow_ssh_c < 20 )) && __termflow_ssh_c=20
+    __termflow_ssh_k=$(( (@ECHO_MAX@ + __termflow_ssh_c - 1) / __termflow_ssh_c + 1 ))
+    (( __termflow_ssh_k > ${LINES:-24} - 1 )) && __termflow_ssh_k=$(( ${LINES:-24} - 1 ))
+    (( __termflow_ssh_k < 1 )) && __termflow_ssh_k=1
+    repeat $__termflow_ssh_k __termflow_ssh_s+=$'\033'D
+    builtin printf '%s\033[%dA\033%s' "$__termflow_ssh_s" "$__termflow_ssh_k" 7
     builtin printf '\033]633;TermFlowSshReady;@NONCE@;%s\007' "$__termflow_ssh_seq"
 }
 typeset -ga precmd_functions
@@ -354,6 +377,11 @@ set -gu __termflow_ssh_seq 0
 function __termflow_ssh_ready --on-event fish_prompt
     set -l fish_trace
     set -gu __termflow_ssh_seq (math $__termflow_ssh_seq + 1)
+    # Quiet launch: reserve rows, then save the cursor at the prompt start (see BASH_HOOK).
+    set -l __termflow_ssh_c (math "max(20, $COLUMNS)")
+    set -l __termflow_ssh_k (math --scale=0 "(@ECHO_MAX@ + $__termflow_ssh_c - 1) / $__termflow_ssh_c + 1")
+    set __termflow_ssh_k (math "max(1, min($__termflow_ssh_k, $LINES - 1))")
+    builtin printf '%s\033[%dA\033%s' (string repeat -n $__termflow_ssh_k \eD) $__termflow_ssh_k 7
     builtin printf '\033]633;TermFlowSshReady;@NONCE@;%s\007' $__termflow_ssh_seq
 end
 "#;
