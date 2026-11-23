@@ -1,0 +1,11 @@
+uname -s; uname -n; uname -m; /usr/bin/sw_vers; echo "sh=$(readlink /private/var/select/sh 2>/dev/null)"
+/usr/sbin/sysctl -n hw.logicalcpu hw.memsize hw.pagesize kern.boottime vm.loadavg
+/usr/sbin/sysctl -n kern.monotonicclock_usecs 2>&1; date -u +%s
+/usr/bin/vm_stat
+/usr/sbin/netstat -ibn
+/usr/bin/who
+BLOCKSIZE=1024 /bin/df -P -l -k
+/sbin/mount
+command -v timeout gtimeout 2>&1
+/usr/bin/time -p /usr/bin/top -l 2 -n 0 -s 1 2>&1 | grep -E '^(CPU usage|real|user|sys)'
+/usr/bin/time -p /usr/sbin/iostat -c 2 -w 1 2>&1 | tail -4

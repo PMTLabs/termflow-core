@@ -1,0 +1,128 @@
+Darwin
+mac-host.local
+arm64
+ProductName:		macOS
+ProductVersion:		26.5.2
+BuildVersion:		25F84
+sh=/bin/bash
+14
+38654705664
+16384
+{ sec = 1788608901, usec = 365362 } Sat Sep  5 06:48:21 2026
+{ 4.05 5.35 4.43 }
+45054181185180 160951179741140
+1795458834
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   698048.
+Pages active:                                 352705.
+Pages inactive:                               554684.
+Pages speculative:                              7968.
+Pages throttled:                                   0.
+Pages wired down:                             401644.
+Pages purgeable:                                9281.
+"Translation faults":                    64900361793.
+Pages copy-on-write:                      5143983949.
+Pages zero filled:                       33011473323.
+Pages reactivated:                         466586848.
+Pages purged:                              115375774.
+File-backed pages:                            516433.
+Anonymous pages:                              398924.
+Pages stored in compressor:                  2312056.
+Pages occupied by compressor:                 305892.
+Decompressions:                            338996707.
+Compressions:                              527678160.
+Pageins:                                  1147090591.
+Pageouts:                                    1284096.
+Swapins:                                    21578230.
+Swapouts:                                   33333556.
+Name       Mtu   Network       Address            Ipkts Ierrs     Ibytes    Opkts Oerrs     Obytes  Coll
+lo0        16384 <Link#1>                      311105333     0 146048606340 311105333     0 146048606340     0
+lo0        16384 127           127.0.0.1       311105333     - 146048606340 311105333     - 146048606340     -
+lo0        16384 ::1/128     ::1               311105333     - 146048606340 311105333     - 146048606340     -
+lo0        16384 fe80::1%lo0 fe80:1::1         311105333     - 146048606340 311105333     - 146048606340     -
+gif0*      1280  <Link#2>                             0     0          0        0     0          0     0
+stf0*      1280  <Link#3>                             0     0          0        0     0          0     0
+anpi1      1500  <Link#4>    02:00:00:00:00:01        0     0          0        0     0          0     0
+anpi0      1500  <Link#5>    02:00:00:00:00:02        0     0          0        0     0          0     0
+anpi3      1500  <Link#6>    02:00:00:00:00:03        0     0          0        0     0          0     0
+anpi2      1500  <Link#7>    02:00:00:00:00:04        0     0          0        0     0          0     0
+en6        1500  <Link#8>    02:00:00:00:00:05        0     0          0        0     0          0     0
+en7        1500  <Link#9>    02:00:00:00:00:06        0     0          0        0     0          0     0
+en8        1500  <Link#10>   02:00:00:00:00:07        0     0          0        0     0          0     0
+en9        1500  <Link#11>   02:00:00:00:00:08        0     0          0        0     0          0     0
+en2*       1500  <Link#12>   02:00:00:00:00:09        0     0          0        0     0          0     0
+en3        1500  <Link#13>   02:00:00:00:00:10        0     0          0        0     0          0     0
+en4        1500  <Link#14>   02:00:00:00:00:11        0     0          0        0     0          0     0
+en5*       1500  <Link#15>   02:00:00:00:00:12        0     0          0        0     0          0     0
+en0        1500  <Link#20>   02:00:00:00:00:13  6894471     0 3342652065  7212288     0 2440182655     0
+en0        1500  fe80::abcd: fe80:14::abcd:123  6894471     - 3342652065  7212288     - 2440182655     -
+en0        1500  192.0.2/24    192.0.2.10     6894471     - 3342652065  7212288     - 2440182655     -
+bridge0    1500  <Link#21>   02:00:00:00:00:11        0     0          0        0     0          0     0
+ap1*       1500  <Link#16>   02:00:00:00:00:14        0     0          0        0     0          0     0
+en1        1500  <Link#17>   02:00:00:00:00:15 216371552     0 191876048150 134416954     0 77352382884     0
+en1        1500  fe80::abcd: fe80:11::abcd:123 216371552     - 191876048150 134416954     - 77352382884     -
+en1        1500  198.51.100/24 198.51.100.20   216371552     - 191876048150 134416954     - 77352382884     -
+awdl0      1500  <Link#18>   02:00:00:00:00:16  4696062     0 6665945767   597581     0  376615905     0
+awdl0      1500  fe80::abcd: fe80:12::abcd:123  4696062     - 6665945767   597581     -  376615905     -
+llw0       1500  <Link#19>   02:00:00:00:00:16  1745522     0 1216498663  1714666     0  190092880     0
+llw0       1500  fe80::abcd: fe80:13::abcd:123  1745522     - 1216498663  1714666     -  190092880     -
+utun0      1380  <Link#23>                            0     0          0        9     0        760     0
+utun0      1380  fe80::abcd: fe80:17::abcd:123        0     -          0        9     -        760     -
+utun1      1500  <Link#24>                            0     0          0        1     0        100     0
+utun1      1500  fe80::abcd: fe80:18::abcd:123        0     -          0        1     -        100     -
+utun2      2000  <Link#25>                            0     0          0       10     0        860     0
+utun2      2000  fe80::abcd: fe80:19::abcd:123        0     -          0       10     -        860     -
+utun3      1000  <Link#26>                            0     0          0       10     0        840     0
+utun3      1000  fe80::abcd: fe80:1a::abcd:123        0     -          0       10     -        840     -
+utun4      1380  <Link#27>                           50     0       8272       32     0       4585     0
+utun4      1380  fe80::abcd: fe80:1b::abcd:123       50     -       8272       32     -       4585     -
+utun5      1380  <Link#28>                            0     0          0        9     0        780     0
+utun5      1380  fe80::abcd: fe80:1c::abcd:123        0     -          0        9     -        780     -
+utun6      1380  <Link#31>                           80     0      17744       43     0       8615     0
+utun6      1380  fe80::abcd: fe80:1f::abcd:123       80     -      17744       43     -       8615     -
+utun7      1380  <Link#32>                            0     0          0        3     0        340     0
+utun7      1380  fe80::abcd: fe80:20::abcd:123        0     -          0        3     -        340     -
+user1          console      Nov 10 13:58 
+user1          ttys002      Nov 18 13:08 
+user2       console      Oct 26 20:37 
+user2       ttys008      Oct 26 20:39 
+Filesystem     1024-blocks      Used Available Capacity  Mounted on
+/dev/disk3s1s1   482797652  12276964  51455472    20%    /
+/dev/disk3s6     482797652  12585676  51455472    20%    /System/Volumes/VM
+/dev/disk3s2     482797652   8776384  51455472    15%    /System/Volumes/Preboot
+/dev/disk3s4     482797652      7080  51455472     1%    /System/Volumes/Update
+/dev/disk1s2        512000      6164    494680     2%    /System/Volumes/xarts
+/dev/disk1s1        512000      5752    494680     2%    /System/Volumes/iSCPreboot
+/dev/disk1s3        512000       544    494680     1%    /System/Volumes/Hardware
+/dev/disk3s5     482797652 396284248  51455472    89%    /System/Volumes/Data
+/dev/disk5s1      17659904  17159516    455144    98%    /Library/Developer/CoreSimulator/Volumes/iOS_23F77
+/dev/disk2s1       5242836   2465488   2756040    48%    /System/Volumes/Update/SFR/mnt1
+/dev/disk11s1        87360     72440     14920    83%    /Volumes/Volume One
+/dev/disk13s1     17147904  16623700    480032    98%    /Library/Developer/CoreSimulator/Volumes/iOS_21F79
+/dev/disk7s1          9728      7572      1812    81%    /Volumes/AppDisk 1.0
+/dev/disk8s1     125308160  19290752 106017408    16%    /Volumes/USB Drive
+/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)
+devfs on /dev (devfs, local, nobrowse)
+/dev/disk3s6 on /System/Volumes/VM (apfs, local, noexec, journaled, noatime, nobrowse)
+/dev/disk3s2 on /System/Volumes/Preboot (apfs, local, journaled, nobrowse)
+/dev/disk3s4 on /System/Volumes/Update (apfs, local, journaled, nobrowse)
+/dev/disk1s2 on /System/Volumes/xarts (apfs, local, noexec, journaled, noatime, nobrowse)
+/dev/disk1s1 on /System/Volumes/iSCPreboot (apfs, local, journaled, nobrowse)
+/dev/disk1s3 on /System/Volumes/Hardware (apfs, local, journaled, nobrowse)
+/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)
+map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)
+/dev/disk5s1 on /Library/Developer/CoreSimulator/Volumes/iOS_23F77 (apfs, sealed, local, nodev, nosuid, read-only, journaled, noatime, nobrowse)
+/dev/disk2s1 on /System/Volumes/Update/SFR/mnt1 (apfs, local, journaled, nobrowse)
+/dev/disk11s1 on /Volumes/Volume One (hfs, local, nodev, nosuid, read-only, noowners, quarantine, mounted by user2)
+/dev/disk13s1 on /Library/Developer/CoreSimulator/Volumes/iOS_21F79 (apfs, local, nodev, nosuid, read-only, journaled, noatime, nobrowse)
+/dev/disk7s1 on /Volumes/AppDisk 1.0 (apfs, local, nodev, nosuid, read-only, journaled, noowners, quarantine, mounted by user1)
+/dev/disk8s1 on /Volumes/USB Drive (exfat, local, nodev, nosuid, noowners, noatime, fskit)
+CPU usage: 5.74% user, 8.51% sys, 85.74% idle 
+CPU usage: 5.41% user, 5.34% sys, 89.24% idle 
+real 1.51
+user 0.04
+sys 0.46
+   16.00   24  0.37     0.00    0  0.00     0.00    0  0.00  10  4 86  3.97 5.31 4.42
+real 1.01
+user 0.00
+sys 0.00

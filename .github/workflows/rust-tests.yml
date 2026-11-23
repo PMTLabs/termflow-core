@@ -66,7 +66,9 @@ jobs:
             pkg-config \
             zsh \
             fish \
-            tcsh
+            tcsh \
+            original-awk \
+            proot
 
       # Ubuntu's global /etc/zsh/zshrc runs compinit. When an fpath directory on
       # the image is group/world-writable or not owned by root, every login zsh

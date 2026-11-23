@@ -11,6 +11,13 @@ const LINUX: &[&str] = &[
     "dfLocal", "dfNfs", "mounts", "osRelease",
 ];
 
+mod darwin;
+struct PlatformSpec { name: &'static str, sections: &'static [&'static str] }
+const PLATFORMS: &[PlatformSpec] = &[
+    PlatformSpec { name: "Linux", sections: LINUX },
+    PlatformSpec { name: "Darwin", sections: darwin::SECTIONS },
+];
+
 pub type Reading<T> = Result<T, &'static str>;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,27 +42,27 @@ impl<'a> Section<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Platform {
     Linux,
+    Darwin,
     Unsupported(String),
     Unknown,
 }
 
 impl Platform {
-    /// A shared reason for every metric when Linux collection is not supported.
+    /// A shared reason for every metric when this platform has no collector.
     pub fn unavailable_reason(&self) -> Option<String> {
         match self {
-            Self::Linux => None,
-            Self::Unsupported(name) => Some(format!("Metrics are supported only on Linux ({name})")),
+            Self::Linux | Self::Darwin => None,
+            Self::Unsupported(name) => Some(format!("Metrics are supported only on Linux and macOS ({name})")),
             Self::Unknown => Some("Remote platform unavailable".into()),
         }
     }
 
-    /// How the status bar names a platform that has no collector: `macOS (Darwin)` for Darwin,
-    /// else the `uname -s` value as reported. `None` for Linux and for an unknown platform.
+    /// How the status bar names a platform that has no collector: the `uname -s` value as
+    /// reported. `None` for the collected platforms (Linux, Darwin) and for an unknown platform.
     pub fn unsupported_label(&self) -> Option<String> {
         match self {
-            Self::Unsupported(name) if name == "Darwin" => Some("macOS (Darwin)".into()),
             Self::Unsupported(name) => Some(name.clone()),
-            Self::Linux | Self::Unknown => None,
+            Self::Linux | Self::Darwin | Self::Unknown => None,
         }
     }
 }
@@ -120,7 +127,7 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         let key = line
             .strip_prefix(section_prefix.as_str())
             .and_then(|s| s.strip_suffix("_BEGIN__"))
-            .and_then(|s| COMMON.iter().chain(LINUX).copied().find(|key| *key == s))
+            .and_then(|s| COMMON.iter().copied().chain(PLATFORMS.iter().flat_map(|p| p.sections.iter().copied())).find(|key| *key == s))
             .ok_or(FRAME)?;
         let terminator = format!("{prefix}SECTION_{key}_END_");
         let mut rows = Vec::new();
@@ -157,11 +164,15 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
     }
     let platform = match single(&sections["platform"]) {
         Ok(name) if name == "Linux" => Platform::Linux,
+        Ok(name) if name == "Darwin" => Platform::Darwin,
         Ok(name) => Platform::Unsupported(name),
         Err(_) => Platform::Unknown,
     };
     let linux = platform == Platform::Linux;
-    if LINUX.iter().any(|key| sections.contains_key(key) != linux) {
+    let selected = match platform { Platform::Linux => Some("Linux"), Platform::Darwin => Some("Darwin"), _ => None };
+    let expected: std::collections::BTreeSet<_> = PLATFORMS.iter().filter(|p| Some(p.name) == selected)
+        .flat_map(|p| p.sections.iter().copied()).collect();
+    if PLATFORMS.iter().flat_map(|p| p.sections.iter()).any(|k| sections.contains_key(k) != expected.contains(k)) {
         return Err(FRAME);
     }
     let mut sample = RawSample {
@@ -169,8 +180,8 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         hostname: Err("Remote hostname unavailable"),
         architecture: Err("Remote architecture unavailable"),
         os: Err("Remote OS metadata unavailable"),
-        local: Err("Linux partitions unavailable"),
-        nfs: Err("Linux NFS partitions unavailable"),
+        local: Err("Partitions unavailable"),
+        nfs: Err("NFS partitions unavailable"),
         nfs_watchdog_expired: false,
         sections,
     };
@@ -193,6 +204,7 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
             _ => s["dfNfs"].rows().and_then(|rows| df(rows, &mounts, true)),
         };
     }
+    if sample.platform == Platform::Darwin { darwin::populate(&mut sample); }
     Ok(sample)
 }
 

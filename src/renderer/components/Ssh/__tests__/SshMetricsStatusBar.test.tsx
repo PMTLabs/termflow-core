@@ -285,32 +285,32 @@ test('D93: bar items are compact and value-first; the full label stays in title 
 });
 
 test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', async () => {
-  const reason = 'Metrics are supported only on Linux (Darwin)';
-  const darwin: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
-    host: { available: true, hostname: 'mymac', os: { available: true, name: 'Darwin' }, architecture: { available: true, name: 'arm64' } },
+  const reason = 'Metrics are supported only on Linux and macOS (FreeBSD)';
+  const freebsd: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
+    host: { available: true, hostname: 'bsdbox', os: { available: true, name: 'FreeBSD' }, architecture: { available: true, name: 'amd64' } },
     cpu: na(reason), ram: na(reason), netUp: na(reason), netDown: na(reason), uptime: na(reason),
-    users: na(reason), partitions: na(reason), nfs: na(reason), unsupportedPlatform: 'macOS (Darwin)',
+    users: na(reason), partitions: na(reason), nfs: na(reason), unsupportedPlatform: 'FreeBSD',
   } };
-  const h = setup(); h.publish(darwin); h.render(); open();
+  const h = setup(); h.publish(freebsd); h.render(); open();
   const state = bar().querySelector<HTMLElement>('.ssh-metrics-state')!;
-  expect(state.textContent).toBe('○ Metrics not supported on macOS (Darwin)');
-  expect(state.title).toBe(`Metrics not supported on macOS (Darwin) — ${reason}`);
+  expect(state.textContent).toBe('○ Metrics not supported on FreeBSD');
+  expect(state.title).toBe(`Metrics not supported on FreeBSD — ${reason}`);
   expect(bar().querySelector('.is-live')).toBeNull();
   expect(state.textContent).not.toContain('Connected');
   // D93 value-first items: the host item is the bare hostname, the rest lead with the short label.
-  expect(bar().querySelector('[data-metric="host"]')!.textContent).toBe('mymac');
+  expect(bar().querySelector('[data-metric="host"]')!.textContent).toBe('bsdbox');
   expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toBe(`${SSH_METRIC_SHORT_LABELS.cpu} n/a`);
   expect(row('Copy all metrics').disabled).toBe(false);
   await click('Copy all metrics');
   const copied = write.mock.calls[0][0];
-  expect(copied).toBe(formatSshMetricsCopy(darwin));
-  expect(copied).toContain('mymac (Darwin, arm64)');
+  expect(copied).toBe(formatSshMetricsCopy(freebsd));
+  expect(copied).toContain('bsdbox (FreeBSD, amd64)');
   expect(copied).toContain(`n/a (${reason})`);
   expect(copied).not.toContain('unsupportedPlatform');
   open();
 
   // A Linux sample right after goes back to the live, Connected bar.
-  act(() => h.publish(sample(12, B, darwin.sampledAt + 1)));
+  act(() => h.publish(sample(12, B, freebsd.sampledAt + 1)));
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
   expect(bar().querySelector('.is-live')).not.toBeNull();
 });
@@ -333,3 +333,12 @@ test.each(['Metrics collector unavailable', 'Metrics command failed', 'Metrics e
     expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toContain('12');
   },
 );
+
+ test('Darwin measurements render Connected with values', () => {
+    const reading = sample(14);
+    reading.metrics.host = { available: true, hostname: 'mac-host.local', os: { available: true, name: 'macOS 26.5.2' }, architecture: { available: true, name: 'arm64' } };
+    const h = setup(); h.publish(reading); h.render();
+    expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
+    expect(bar().textContent).toContain('14%');
+    expect(bar().textContent).toContain('mac-host.local');
+ });

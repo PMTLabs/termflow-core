@@ -171,3 +171,34 @@ async fn terminal_retirement_keeps_slot_until_drain_and_removes_stamp_history() 
     assert_eq!(wire.count(), 2);
     f.registry.shutdown().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn injected_exec_timeout_fires_existing_latch_without_telemetry() {
+    let (f, _, events, _) = rig([]);
+    connect(&f, A).await;
+    let worker = Arc::new(Terminal::new(A));
+    worker.set_eligible(true).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runner = {
+        let (worker, sessions, events, calls) = (worker.clone(), f.registry.clone(), events.clone(), calls.clone());
+        tokio::spawn(async move {
+            worker.run(&sessions, &*events, None, |_| {
+                calls.fetch_add(1, SeqCst);
+                async {
+                    // A hung interval command has no completed sample; the transport deadline
+                    // is independent of the remote platform and feeds the shared latch.
+                    sleep(DEADLINE).await;
+                    (SessionError::TimedOut.into(), String::new())
+                }
+            }).await;
+        })
+    };
+    let control = events.event(CONTROL, 0).await;
+    assert_eq!(control["pausedReason"], json!(TIMEOUT));
+    sleep(CADENCE * 3).await;
+    assert_eq!(calls.load(SeqCst), 1);
+    assert!(events.events.lock().iter().all(|(name, _)| *name != SAMPLE));
+    worker.retire();
+    runner.await.unwrap();
+    f.registry.shutdown().await;
+}

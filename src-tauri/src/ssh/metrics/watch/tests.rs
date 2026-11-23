@@ -70,7 +70,7 @@ fn server(host: &'static str) -> (Server, Arc<Wire>) {
         let (_, nonce) = cmd.rsplit_once(' ').unwrap();
         let prefix = format!("__TFM_{nonce}_");
         let mut frame = format!("{prefix}V1_BEGIN__\n");
-        for (key, value) in [("platform", "Darwin"), ("hostname", host), ("architecture", "arm64")] {
+        for (key, value) in [("platform", "FreeBSD"), ("hostname", host), ("architecture", "amd64")] {
             writeln!(frame, "{prefix}SECTION_{key}_BEGIN__\n{value}\n{prefix}SECTION_{key}_END_0__").unwrap();
         }
         writeln!(frame, "{prefix}V1_END__").unwrap();
