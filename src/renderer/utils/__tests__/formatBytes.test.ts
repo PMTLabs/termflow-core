@@ -11,12 +11,16 @@ describe('formatBytes', () => {
     [1536, '1.5 KB'],
     [10239, '10 KB'], // 9.999 KB rounds to 10.0, shown whole from 10 up
     [10240, '10 KB'],
+    [10.4 * KiB, '10 KB'], // fractional from 10 up: no decimal
+    [99.6 * KiB, '100 KB'],
+    [1023.4 * KiB, '1023 KB'], // rounds below 1024: stays in KB
     [262144, '256 KB'],
     [524288, '512 KB'],
     [1023.6 * KiB, '1 MB'], // would round to "1024 KB": promoted
     [MiB - 1, '1 MB'],
     [MiB, '1 MB'],
     [1.5 * MiB, '1.5 MB'],
+    [GiB - 1, '1 GB'], // MB -> GB promotion
     [GiB, '1 GB'],
     [2.25 * GiB, '2.3 GB'],
     [500 * GiB, '500 GB'],
