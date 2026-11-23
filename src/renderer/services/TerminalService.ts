@@ -476,7 +476,7 @@ export class TerminalServiceClass {
             const leaf = findLeafByTerminalId(this.paneTrees(), terminalId);
             const connectionId = leaf?.ssh?.connectionId;
             const stays = !!tabId && !!leaf && !!connectionId && !protocol.ended && protocol === this.incarnations()
-              && this.owedSshLaunch(terminalId)?.how === 'wait';
+              && this.owedSshLaunch(terminalId)?.how === 'wait' && this.owedSshLaunch(terminalId)?.pc === processId;
             const owner = stays ? protocol.capture(terminalId, leaf!.id) : undefined;
             if (stays) {
               // Stashed for a transfer, between copies, or a re-minted owner not yet rebound.
