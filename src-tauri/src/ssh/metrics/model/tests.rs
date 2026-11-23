@@ -105,7 +105,7 @@ fn a_parsed_sample_that_measured_nothing_is_flagged_unavailable() {
 
     // Linux with every section failing.
     let keys = ["platform", "hostname", "architecture", "stat", "meminfo", "netdev", "uptime", "bootId", "cpuinfo",
-        "nproc", "loadavg", "who", "dfLocal", "dfNfs", "mounts", "osRelease"];
+        "nproc", "loadavg", "who", "dfLocal", "dfNfs", "mounts", "fileMounts", "osRelease"];
     let failed: Vec<_> = keys.iter().filter(|k| **k != "platform").map(|k| (*k, "", 1)).collect();
     let linux = to_value(sample(&mut Reducer::default(), "", &failed)).unwrap();
     for key in ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {

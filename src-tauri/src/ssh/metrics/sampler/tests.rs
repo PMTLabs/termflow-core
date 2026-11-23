@@ -331,6 +331,7 @@ fn frame(nonce: &str, host: &str, index: u64, nfs: u8) -> Vec<u8> {
         ("bootId", "4ddb381e-fa3b-403a-b6b3-ea87b4a45089", 0), ("cpuinfo", "processor : 0", 0),
         ("nproc", "4", 0), ("loadavg", "1.25 1.00 0.75 1/10 100", 0),
         ("who", "zoe pts/0\nalex pts/1\nzoe pts/2", 0),
+        ("fileMounts", "", 0),
         ("dfLocal", "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n/dev/test ext4 100 20 75 22% /", 0),
         ("dfNfs", "", nfs), ("mounts", "/dev/test / ext4 rw 0 0", 0),
         ("osRelease", "NAME='Test Linux'\nVERSION_ID=12", 0),

@@ -10,7 +10,7 @@ const CAP: usize = 1024 * 1024;
 const COMMON: &[&str] = &["platform", "hostname", "architecture"];
 const LINUX: &[&str] = &[
     "stat", "meminfo", "netdev", "uptime", "bootId", "cpuinfo", "nproc", "loadavg", "who",
-    "dfLocal", "dfNfs", "mounts", "osRelease",
+    "dfLocal", "dfNfs", "mounts", "fileMounts", "osRelease",
 ];
 
 pub(super) const WINDOWS: &[&str] = &[
@@ -224,13 +224,14 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         let s = &sample.sections;
         sample.os = os_release(s["osRelease"].rows());
         let mounts = s["mounts"].rows().and_then(mount_inventory);
-        sample.local = s["dfLocal"].rows().and_then(|rows| df(rows, &mounts, false));
+        sample.local = s["fileMounts"].rows().and_then(file_mounts)
+            .and_then(|files| df(s["dfLocal"].rows()?, &mounts, Some(&files)));
         sample.nfs_watchdog_expired = matches!(s["dfNfs"].exit, 124 | 137);
         sample.nfs = match s["dfNfs"].exit {
             124 | 137 => Err("NFS usage watchdog expired"),
             127 => Err("NFS usage requires timeout and df"),
             125 => Err("Safe NFS usage unavailable"),
-            _ => s["dfNfs"].rows().and_then(|rows| df(rows, &mounts, true)),
+            _ => s["dfNfs"].rows().and_then(|rows| df(rows, &mounts, None)),
         };
     }
     if sample.platform == Platform::Darwin { darwin::populate(&mut sample); }
@@ -379,7 +380,18 @@ fn mount_text(s: &str) -> Reading<String> {
     Ok(result)
 }
 
-fn df(rows: &[&str], inventory: &Reading<Inventory<'_>>, nfs: bool) -> Reading<Vec<MountUsage>> {
+fn file_mounts(rows: &[&str]) -> Reading<std::collections::BTreeSet<String>> {
+    rows.iter().map(|row| {
+        let point = mount_text(row)?;
+        if !point.starts_with('/') {
+            return Err(BAD_DF);
+        }
+        Ok(point)
+    }).collect()
+}
+
+fn df(rows: &[&str], inventory: &Reading<Inventory<'_>>, files: Option<&std::collections::BTreeSet<String>>) -> Reading<Vec<MountUsage>> {
+    let nfs = files.is_none();
     let mut rows = rows.iter();
     let header = rows.next().copied();
     let typed = match header.map(|s| s.split_ascii_whitespace().collect::<Vec<_>>()).as_deref() {
@@ -414,6 +426,7 @@ fn df(rows: &[&str], inventory: &Reading<Inventory<'_>>, nfs: bool) -> Reading<V
             _ => return Err(if inventory.is_err() { BAD_MOUNTS } else { BAD_TYPE }),
         };
         match (nfs, fs_kind(fs, &key.1)) {
+            (false, Fs::Local) if files.is_some_and(|files| files.contains(&key.1)) => (),
             (false, Fs::Local) | (true, Fs::Nfs) => out.push(MountUsage {
                 source: key.0,
                 mount_point: key.1,
