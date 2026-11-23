@@ -347,6 +347,18 @@ test('folder rows expand through a plain chevron button that reports its state (
   expect(chevron().getAttribute('aria-expanded')).toBe('true');
 });
 
+test('file sizes show 1024-based units with the exact byte count in the tooltip (D106)', () => {
+  const file = (name: string, size?: string) => ({ name, path: `/r/${name}`, kind: 'file' as const, size });
+  const entries = [file('a.bin', '262144'), file('b.bin', '524288'), file('c.txt', '20'), file('d.iso', '1572864'),
+    file('e.unknown'), { name: 'dir', path: '/r/dir', kind: 'directory' as const, size: '4096' }];
+  act(() => root.render(<SshFileList entries={entries} expanded={new Set()} childrenByPath={{}} disabled={false}
+    onSelect={jest.fn()} onNavigate={jest.fn()} onToggle={jest.fn()} />));
+  const sizes = [...container.querySelectorAll<HTMLElement>('.ssh-file-size')].map(el => [el.textContent, el.title]);
+  expect(sizes).toEqual([
+    ['256 KB', '262,144 bytes'], ['512 KB', '524,288 bytes'], ['20 B', '20 bytes'], ['1.5 MB', '1,572,864 bytes'],
+  ]); // no size span for a file without a size or for a folder
+});
+
 test('Test dialog success is a green status panel naming the route; Remember-unavailable stays a separate warning', async () => {
   // D87: the success line mirrors the error panel's shape and names the endpoint the way the failure line does.
   const target = { id: 'c-a', host: 'target.test', port: 22, user: 'alice', jumpConnectionId: 'jump' };

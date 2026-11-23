@@ -1,6 +1,7 @@
 import React from 'react';
 import type { RemoteEntry } from './sshFileTypes';
 import { SshIcon } from './SshIcons';
+import { formatBytes, formatBytesExact } from '../../utils/formatBytes';
 
 export interface SshFileListProps {
   entries: RemoteEntry[];
@@ -63,7 +64,8 @@ export function SshFileList(props: SshFileListProps) {
             onKeyDown={event => { if (event.key === 'Enter' && folder) { event.preventDefault(); open(); } }}>
             <span aria-hidden="true">{folder ? '📁 ' : '▤ '}</span>{entry.name}
           </button>
-          {!folder && entry.size !== undefined && <span className="ssh-file-size">{entry.size} B</span>}
+          {!folder && entry.size !== undefined && <span className="ssh-file-size"
+            title={formatBytesExact(entry.size)}>{formatBytes(entry.size)}</span>}
         </div>
         {expanded && (children?.error ? <div role="alert">{children.error}</div>
           : children?.entries ? (children.entries.length
