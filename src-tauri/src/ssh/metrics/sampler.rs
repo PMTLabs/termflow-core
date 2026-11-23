@@ -634,7 +634,7 @@ fn classify_error(error: &SessionError) -> Reading<'static> {
         NotConnected | NotFound | StaleAttempt | OwnerRetired | AdmissionClosed | InvalidTarget
         | HostKeyChanged | HostKeyRevoked | HostCertificateUnsupported | KnownHostsMalformed { .. }
         | KnownHostsUnreadable | TrustWriteFailed | TrustAlreadyPinned | AuthRejected
-        | AgentUnavailable | IdentityUnreadable | UnsupportedAuthentication | RememberUnavailable
+        | AgentUnavailable | IdentityUnreadable | IdentityEncryptionUnsupported | UnsupportedAuthentication | RememberUnavailable
         | StoreUnavailable => Reading::Discard { disarm: true },
     }
 }

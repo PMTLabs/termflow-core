@@ -69,6 +69,7 @@ export const failureCopy = new Map([
   ["output-too-large","The SSH response was too large. Try an operation that returns less output."],
   ["missing-exit-status","The server did not report how the command ended. Check its SSH logs before retrying."],
   ["identity-unreadable","Could not read the selected key file. Check its location, permissions and format."],
+  ["identity-encryption-unsupported","The selected key file uses an encryption this app can't read. Re-save it with `ssh-keygen -p -o -f <file>` (OpenSSH format) and try again."],
   ["unsupported-authentication","This sign-in method is not supported. Check which methods the server allows and select a supported one."],
   ["remember-unavailable","The credential was not saved. Check access to the system keyring before using Remember again."],
   ["store-unavailable","The SSH connection store is unavailable. Check that saved connections can be opened."],

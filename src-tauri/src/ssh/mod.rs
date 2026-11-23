@@ -5,6 +5,7 @@ pub(crate) mod store_adapter;
 #[cfg(test)]
 mod t10_tests;
 pub mod auth;
+mod identity;
 #[cfg(test)]
 mod auth_tests;
 #[cfg(test)]
