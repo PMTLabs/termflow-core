@@ -23,6 +23,10 @@ fn find_executable(name: &str) -> Option<PathBuf> {
 
 struct Host(PathBuf);
 
+// Every test here runs real shells and fake utilities, so each one holds `child_process_gate()`
+// for its whole body: the gate keeps those children away from tests that walk this process's
+// descendants. The census (child_process_gate_census_tests.rs) only sees a direct
+// `Command::new` in a test, not one reached through a `Host` method, so it cannot enforce this.
 impl Host {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("tf-metrics-{}", uuid::Uuid::new_v4()));
@@ -197,11 +201,13 @@ pub(super) fn freebsd_has_no_proc_trace() {
 
 #[test]
 fn real_collector_freebsd_has_no_proc_trace() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     freebsd_has_no_proc_trace();
 }
 
 #[test]
 fn os_release_is_data_never_executed() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     let hostile = "NAME='Test Linux'\nVERSION_ID=11\nBOGUS=$(sentinel)\nsentinel\n";
     let (stdout, nonce, trace) = host.run(&[("OS_RELEASE", hostile)]);
@@ -213,6 +219,7 @@ fn os_release_is_data_never_executed() {
 
 #[test]
 fn production_encoder_quotes_literal_shell_syntax() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     let body = r#"printf '%s\n%s\n' 'It'"'"'s ! $literal $(sentinel) `sentinel` \\ % café
 second line' "$1"
@@ -227,6 +234,7 @@ second line' "$1"
 
 #[test]
 fn collector_runs_identically_under_each_login_shell() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     host.install_timeout();
     let (command, nonce) = collector_command();
@@ -267,6 +275,7 @@ fn collector_runs_identically_under_each_login_shell() {
 
 #[test]
 fn missing_or_failed_decoder_is_typed_collector_unavailable() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     let (command, _) = collector_command();
     fs::remove_file(host.0.join("awk")).unwrap();
@@ -288,6 +297,7 @@ fn missing_or_failed_decoder_is_typed_collector_unavailable() {
 
 #[test]
 fn df_busybox_fallback_stays_in_one_exec() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     host.install_timeout();
     let (stdout, nonce, trace) = host.run(&[("FALLBACK", "yes")]);
@@ -317,6 +327,7 @@ fn df_busybox_fallback_stays_in_one_exec() {
 
 #[test]
 fn who_requires_login_records_only_when_empty() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     for (utmp, body, expected) in [
         ("no", "", Err("Login records unavailable")),
@@ -335,6 +346,7 @@ fn df_trace(trace: &[String]) -> Vec<&str> {
 
 #[test]
 fn nfs_requires_safe_timeout_and_never_falls_back_unguarded() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     let (stdout, nonce, trace) = host.run(&[]);
     let s = parse(stdout.as_bytes(), &nonce).unwrap();
@@ -356,6 +368,7 @@ fn nfs_requires_safe_timeout_and_never_falls_back_unguarded() {
 
 #[test]
 fn inner_nfs_watchdog_is_indeterminate_with_local_rows_and_surviving_child() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     for (mode, exit) in [("expire124", 124), ("expire137", 137)] {
         let host = Host::new();
         host.install_timeout();
@@ -377,6 +390,7 @@ fn inner_nfs_watchdog_is_indeterminate_with_local_rows_and_surviving_child() {
 
 #[test]
 fn ordinary_nfs_errors_and_missing_utilities_are_not_indeterminate_and_recover() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     host.install_timeout();
     for status in ["1", "126", "127"] {
@@ -401,6 +415,7 @@ fn ordinary_nfs_errors_and_missing_utilities_are_not_indeterminate_and_recover()
 #[cfg(target_os = "linux")]
 #[test]
 fn darwin_production_command_runs_with_absolute_utilities_under_dash_and_posix_sh() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     let fixture = include_str!("../../fixtures/darwin.txt");
     let nonce = "07100000000000000000000000000001";
@@ -433,6 +448,10 @@ DATA
 esac");
     host.utility("sysctl", &sysctl);
     binds.push(format!("{}:/usr/sbin/sysctl", host.0.join("sysctl").display()));
+    // PROOT_NO_SECCOMP: with seccomp acceleration, proot 5.4 (Ubuntu 26.04 runners) does not
+    // translate the exec of a bound path. A bind onto a missing path (/sbin/mount) fails with
+    // EACCES and a bind onto a symlinked utility (/usr/bin/who -> uutils) runs the real one.
+    // proot 5.1 (Ubuntu 24.04) honoured both either way.
     for (shell, flags) in [("/bin/dash", &[][..]), ("/bin/bash", &["--posix"][..])] {
         fs::write(host.0.join("trace"), "").unwrap();
         host.script("sh", &format!("printf 'collector-entry\n' >> \"$TRACE\"
@@ -443,6 +462,7 @@ exec {shell} {} \"$@\"", flags.join(" ")));
         let output = cmd.arg(shell).args(flags).arg("-c").arg(&command)
             .env_clear().env("LD_LIBRARY_PATH", std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default())
             .env("PATH", &host.0).env("PLATFORM", "Darwin").env("TRACE", host.0.join("trace"))
+            .env("PROOT_NO_SECCOMP", "1")
             .env("REAL_AWK", find_executable("awk").unwrap()).output().expect("install proot for absolute-path Darwin fixture");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let sample = parse(&output.stdout, &n).unwrap();
@@ -463,6 +483,7 @@ exec {shell} {} \"$@\"", flags.join(" ")));
             let output = cmd.arg(shell).args(flags).arg("-c").arg(&command).env_clear()
                 .env("LD_LIBRARY_PATH", std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default())
                 .env("PATH", &host.0).env("PLATFORM", "Darwin").env("TRACE", host.0.join("trace"))
+                .env("PROOT_NO_SECCOMP", "1")
                 .env("REAL_AWK", find_executable("awk").unwrap()).output().unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             let sample = parse(&output.stdout, &n).unwrap();
@@ -482,6 +503,7 @@ DATA"));
 #[cfg(target_os = "linux")]
 #[test]
 fn production_command_runs_with_original_awk() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let host = Host::new();
     let original = find_executable("original-awk").expect("install original-awk (BWK) for production encoder coverage");
     host.utility("awk", &format!("exec '{}' \"$@\"", original.display()));
