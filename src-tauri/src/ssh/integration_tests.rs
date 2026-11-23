@@ -348,10 +348,9 @@ fn preview(home: &Path, revision: u64) -> Value {
     let kh = format!("UserKnownHostsFile=\"{}\"", home.join(".ssh/known_hosts").display());
     let argv = ["/usr/bin/ssh", "-F", "none", "-o", "StrictHostKeyChecking=yes", "-o", &kh,
         "-o", "GlobalKnownHostsFile=none", "-p", "22", "-l", "alice", "-o", "PreferredAuthentications=password", "--", "target.test"];
-    // POSIX copy text: only the quoted known_hosts option needs single quotes.
-    let text = argv.iter()
-        .map(|arg| if arg.contains('"') { format!("'{arg}'") } else { arg.to_string() })
-        .collect::<Vec<_>>().join(" ");
+    // POSIX copy text: the CI HOME has no whitespace, so the known_hosts
+    // option drops its inner quotes and no word needs shell quoting.
+    let text = argv.iter().map(|arg| arg.replace('"', "")).collect::<Vec<_>>().join(" ");
     json!({"argv":argv,"commands":[{"shell":"sh","label":"sh, bash or zsh","text":text}],"storeRevision":revision,
         "configNotice":"~/.ssh/config does not apply to saved connections. Preview only; trust is not verified here.",
         "wrapper":"Direct native OpenSSH connection"})

@@ -148,7 +148,8 @@ const TOO_LONG: &str = "This jump host command is longer than Windows allows, so
 /// interactive shells and says which one it is for. Without a runnable argv
 /// the symbolic one is shown with the reason, never as copyable.
 fn shell_commands(symbolic: &[String], runnable: Result<&[String], &'static str>, windows: bool) -> Vec<ShellCommand> {
-    let argv = runnable.unwrap_or(symbolic);
+    let argv = runnable.unwrap_or(symbolic).iter().map(|arg| readable(arg)).collect::<Vec<_>>();
+    let argv = argv.as_slice();
     let entry = |shell, label, quoted: Result<String, &'static str>| {
         let (text, unavailable) = match (runnable, quoted) {
             (Err(why), Ok(text)) => (text, Some(why)),
@@ -165,6 +166,20 @@ fn shell_commands(symbolic: &[String], runnable: Result<&[String], &'static str>
     } else {
         vec![entry("sh", "sh, bash or zsh", Ok(posix_text(argv)))]
     }
+}
+
+/// `Key="value"` -> `Key=value` when OpenSSH reads both the same: its option
+/// splitter only needs the quotes for whitespace, quote, comment or escape
+/// characters. The usual known_hosts path then needs no shell-level escaping.
+fn readable(arg: &str) -> String {
+    let unquoted = arg.split_once("=\"").and_then(|(key, rest)| {
+        let value = rest.strip_suffix('"')?;
+        let plain_key = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphabetic());
+        let plain_value = !value.is_empty()
+            && !value.chars().any(|c| c.is_whitespace() || "\"'#\\".contains(c));
+        (plain_key && plain_value).then(|| format!("{key}={value}"))
+    });
+    unquoted.unwrap_or_else(|| arg.into())
 }
 
 fn posix_text(argv: &[String]) -> String {
@@ -197,11 +212,22 @@ fn powershell_text(argv: &[String]) -> Result<String, &'static str> {
         out.push('\'');
         out
     };
+    // The usual case reads and edits as a plain call: 5.1 and 7 pass these
+    // words identically. Bare words stay bare; everything else is quoted.
+    let rest = &argv[1..];
+    if !rest.iter().any(|arg| arg.is_empty() || arg.contains('"')) {
+        let word = |arg: &String| {
+            let bare = arg.chars().all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c));
+            if bare { arg.clone() } else { literal(arg) }
+        };
+        let words = rest.iter().map(word).collect::<Vec<_>>();
+        return Ok(format!("& {} {}", literal(&argv[0]), words.join(" ")));
+    }
     // Windows PowerShell 5.1 passes embedded double quotes unescaped and drops
     // empty arguments; PowerShell 7.3+ escapes them, and also re-splits and
     // re-quotes after --%. A single ArgumentList string is the one command line
     // both hand to ssh.exe verbatim, and nothing expands inside single quotes.
-    let line = argv[1..].iter().map(|arg| windows_word(arg)).collect::<Vec<_>>().join(" ");
+    let line = rest.iter().map(|arg| windows_word(arg)).collect::<Vec<_>>().join(" ");
     Ok(format!(
         "Start-Process -FilePath {} -ArgumentList {} -NoNewWindow -Wait",
         literal(&argv[0]),

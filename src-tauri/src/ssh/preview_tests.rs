@@ -130,13 +130,47 @@ fn windows_copy_text_is_powershell_then_cmd_and_survives_both_powershell_edition
 }
 
 #[test]
+fn usual_windows_command_is_a_plain_powershell_call_without_inner_quotes() {
+    let ssh = r"C:\WINDOWS\system32\OpenSSH\ssh.exe";
+    let argv = args(&[ssh, "-F", "none", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=\"C:/Users/x/.ssh/known_hosts\"",
+        "-p", "22", "-l", "it's", "-o", "IdentityFile=\"C:/Users/x/.ssh/id_ed25519\"", "--", "build.example.test"]);
+    let commands = shell_commands(&argv, Ok(&argv), true);
+    assert_eq!(commands[0].text, format!(
+        "& '{ssh}' -F none -o 'StrictHostKeyChecking=yes' -o 'UserKnownHostsFile=C:/Users/x/.ssh/known_hosts' -p 22 -l 'it''s' -o 'IdentityFile=C:/Users/x/.ssh/id_ed25519' -- build.example.test"));
+    assert_eq!(commands[1].text, format!(
+        "{ssh} -F none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=C:/Users/x/.ssh/known_hosts -p 22 -l it's -o IdentityFile=C:/Users/x/.ssh/id_ed25519 -- build.example.test"));
+    assert!(commands.iter().all(|c| c.unavailable.is_none()));
+}
+
+#[test]
+fn inner_quotes_are_dropped_only_where_openssh_reads_the_value_the_same() {
+    for (arg, shown) in [
+        ("UserKnownHostsFile=\"C:/x/kh\"", "UserKnownHostsFile=C:/x/kh"),
+        ("UserKnownHostsFile=\"C:/a b/kh\"", "UserKnownHostsFile=\"C:/a b/kh\""),
+        ("IdentityFile=\"C:/a'b\"", "IdentityFile=\"C:/a'b\""),
+        ("IdentityFile=\"C:/a#b\"", "IdentityFile=\"C:/a#b\""),
+        ("IdentityFile=\"C:\\a\"", "IdentityFile=\"C:\\a\""),
+        ("IdentityFile=\"\"", "IdentityFile=\"\""),
+        ("ProxyCommand=\"C:\\ssh.exe\" \"-W\"", "ProxyCommand=\"C:\\ssh.exe\" \"-W\""),
+        ("-l", "-l"),
+    ] {
+        assert_eq!(readable(arg), shown, "{arg}");
+    }
+}
+
+#[test]
 fn copy_text_that_cannot_run_unchanged_says_why_instead() {
     let ssh = r"C:\ssh.exe";
     let pipe = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a|b/kh\"", "--", "h"]);
     let commands = shell_commands(&pipe, Ok(&pipe), true);
     assert!(commands.iter().all(|c| c.unavailable.is_none()));
-    // cmd sees the quotes closed after \" so the | there is escaped.
-    assert_eq!(commands[1].text, r#"C:\ssh.exe -o "UserKnownHostsFile=\"C:/a^|b/kh\"" -- h"#);
+    // The inner quotes are dropped (no whitespace), so cmd sees the | unquoted and escapes it.
+    assert_eq!(commands[1].text, r#"C:\ssh.exe -o UserKnownHostsFile=C:/a^|b/kh -- h"#);
+    assert_eq!(commands[0].text, r#"& 'C:\ssh.exe' -o 'UserKnownHostsFile=C:/a|b/kh' -- h"#);
+    // A value OpenSSH must see quoted keeps its quotes: cmd escapes a | it would see as unquoted.
+    let spaced = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a b|c/kh\"", "--", "h"]);
+    let commands = shell_commands(&spaced, Ok(&spaced), true);
+    assert_eq!(commands[1].text, r#"C:\ssh.exe -o "UserKnownHostsFile=\"C:/a b^|c/kh\"" -- h"#);
 
     // No runnable argv (a POSIX jump): show the symbolic text, but never as copyable.
     let symbolic = args(&["/usr/bin/ssh", "-o", "ProxyCommand=/bin/sh '<private-proxy-helper>'", "--", "h"]);
