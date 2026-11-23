@@ -27,7 +27,7 @@ const type = (input: HTMLInputElement, value: string) => act(async () => {
 async function openDirtyEditor() {
   await act(async () => container.querySelector<HTMLElement>('.ssh-tree-row')!.click());
   await type(nameInput(), 'Edited name');
-  await act(async () => button('Connect in new tab', container).click());
+  await act(async () => container.querySelector<HTMLButtonElement>('.ssh-editor-actions button[title="Connect in a new tab"]')!.click());
 }
 
 beforeEach(() => {

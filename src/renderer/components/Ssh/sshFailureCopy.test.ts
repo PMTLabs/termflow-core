@@ -40,8 +40,9 @@ test('backend reasons are context-neutral', () => {
 });
 
 test('Test dialog copy only overrides backend codes and names its next step', () => {
+  // Names the editor's Test button (its label since D88) or the SSH Connections panel.
   for (const [code, copy] of testDialogCopy) {
-    expect([code, codes.includes(code), /Test connection|SSH Connections/.test(copy)]).toEqual([code, true, true]);
+    expect([code, codes.includes(code), /\bRun Test\b|SSH Connections/.test(copy)]).toEqual([code, true, true]);
   }
 });
 

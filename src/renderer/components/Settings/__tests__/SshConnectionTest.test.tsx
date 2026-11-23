@@ -20,7 +20,7 @@ afterEach(() => { act(() => root.unmount()); host.remove(); delete (window as an
 function render(persisted = true, data = view) {
   act(() => root.render(<SshConnectionEditor connectionId={persisted ? 'c-saved' : undefined} initialFolder={null} view={data} api={{} as SshStoreApi} onSaved={jest.fn()} onClose={jest.fn()} />));
 }
-function testButton() { return [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === 'Test connection')!; }
+function testButton() { return [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === 'Test')!; }
 async function open() { await act(async () => { testButton().click(); await flush(); }); }
 test('Test is enabled only for a clean persisted row; dirty drafts never test stale saved values', async () => {
   render(false); expect(testButton().disabled).toBe(true);

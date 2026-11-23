@@ -37,7 +37,7 @@ test('sshStoreRoundTrip: folder → subfolder → connection → bookmark → mo
     await act(async () => button('New folder').click()); await change(document.querySelector<HTMLInputElement>('[role="dialog"] input')!,'Root'); await act(async () => button('Save folder').click()); expect(row('f-1')).not.toBeNull();
     await context('f-1'); await act(async () => button('Add subfolder').click()); await change(document.querySelector<HTMLInputElement>('[role="dialog"] input')!,'Nested'); await act(async () => button('Save folder').click());
     expect(row('f-2').closest('[data-row-id="f-1"]')).not.toBeNull();
-    await context('f-2'); await act(async () => button('New SSH connection here').click()); await change(host.querySelector<HTMLInputElement>('input[name="name"]')!,'web'); await change(host.querySelector<HTMLInputElement>('input[name="host"]')!,'h'); await act(async () => button('Save connection').click());
+    await context('f-2'); await act(async () => button('New SSH connection here').click()); await change(host.querySelector<HTMLInputElement>('input[name="name"]')!,'web'); await change(host.querySelector<HTMLInputElement>('input[name="host"]')!,'h'); await act(async () => button('Save').click());
     expect(row('c-1').closest('[data-row-id="f-2"]')).not.toBeNull(); expect(api.upsertConnection).toHaveBeenCalledWith(expect.objectContaining({ folderId:'f-2' }));
     await act(async () => row('c-1').querySelector<HTMLButtonElement>('[aria-label="Bookmark web"]')!.click());
     expect(row('c-1').querySelector('[aria-pressed="true"]')).not.toBeNull(); expect(store.getState().ssh.revision).toBe(4); expect(api.setBookmark).toHaveBeenCalledWith('c-1',true);

@@ -20,7 +20,7 @@ function render(existing = false, previewConnection?: SshStoreApi['previewConnec
 async function change(name:string,value:string) { const field = host.querySelector<HTMLInputElement>(`input[name="${name}"]`)!; await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(field,value); field.dispatchEvent(new Event('input',{ bubbles:true })); }); }
 const toggle = () => host.querySelector<HTMLButtonElement>('[aria-label="Command preview"] button[aria-expanded]')!;
 const button = (text:string) => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="Command preview"] button')].find(b => b.textContent === text)!;
-async function submit() { await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === 'Save connection')!.click()); }
+async function submit() { await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === 'Save')!.click()); }
 test('create sends every input field and never an id or backend-only fields', async () => {
   render(); for (const [name,value] of Object.entries({ name:'Host',host:'h',port:'2222',user:'deploy',extraOptions:'ServerAliveInterval=30' })) await change(name,value);
   await act(async () => host.querySelector<HTMLInputElement>('input[name="bookmarked"]')!.click()); await submit(); expect(save.mock.calls).toEqual([[input]]); expect(save.mock.calls[0][0]).not.toHaveProperty('id');
