@@ -36,6 +36,11 @@ impl Reducer {
     /// One instance per terminal/session. A completed watchdog run can retain
     /// instantaneous readings, but neither uses nor seeds a rate baseline.
     pub fn reduce(&mut self, raw: RawSample<'_>) -> Metrics {
+        // Every platform's reading passes here, so a sample that measured nothing is marked once.
+        self.reduce_platform(raw).flag_unmeasured()
+    }
+
+    fn reduce_platform(&mut self, raw: RawSample<'_>) -> Metrics {
         if let Some(reason) = raw.platform.unavailable_reason() {
             self.reset();
             let host = host(&raw);
@@ -92,6 +97,7 @@ impl Reducer {
             partitions: raw.local.map(|mounts| Partitions { mounts }).into(),
             nfs: raw.nfs.map(|mounts| Partitions { mounts }).into(),
             unsupported_platform: None,
+            unavailable_reason: None,
         }
     }
 }

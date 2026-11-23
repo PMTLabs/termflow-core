@@ -583,7 +583,8 @@ async fn memory_server_emits_renderer_fixture_snapshots() {
 fn assert_unavailable(sample: &Value, reason: &str) {
     let metrics = sample["metrics"].as_object().unwrap();
     let keys = ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"];
-    assert_eq!(metrics.len(), keys.len());
+    assert_eq!(metrics.len(), keys.len() + 1);
+    assert_eq!(metrics["unavailableReason"], json!(reason));
     for key in keys {
         assert_eq!(metrics[key], json!({"available":false,"reason":reason}), "{key}");
     }

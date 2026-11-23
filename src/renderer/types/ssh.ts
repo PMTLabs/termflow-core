@@ -140,7 +140,8 @@ export type MetricPayloadKeysMatch = Assert<
   [keyof MetricPayloads] extends [MetricKey] ? [MetricKey] extends [keyof MetricPayloads] ? true : false : false
 >;
 // `unsupportedPlatform` names a host platform with no collector (e.g. "macOS (Darwin)"); absent otherwise.
-export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> } & { unsupportedPlatform?: string };
+// `unavailableReason` is set when the sample measured nothing (whole-exec failure or every metric n/a).
+export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> } & { unsupportedPlatform?: string; unavailableReason?: string };
 export interface SshMetricsSample { terminalId: string; sampledAt: number; metrics: SshMetrics }
 export interface SshMetricsResumeReceipt { sampleFloor: number; generation: number; pauseSeq: number }
 export interface SshMetricsWatchReceipt extends SshMetricsResumeReceipt { pausedReason: string | null }

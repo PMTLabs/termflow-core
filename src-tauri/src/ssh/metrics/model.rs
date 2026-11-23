@@ -61,11 +61,43 @@ pub struct Metrics {
     /// so instead of "Connected" over a row of n/a. Absent from the wire otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsupported_platform: Option<String>,
+    /// Set when nothing was measured: a whole-exec failure, or a parsed sample in which every
+    /// metric is unavailable. The bar says "Metrics unavailable" instead of "Connected".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 impl Metrics {
+    /// Marks a sample in which nothing was measured, whichever path built it. A named
+    /// unsupported platform keeps its own status (D95), and one available metric is a measurement.
+    pub fn flag_unmeasured(mut self) -> Self {
+        if self.unavailable_reason.is_none() && self.unsupported_platform.is_none() {
+            self.unavailable_reason = self.nothing_measured();
+        }
+        self
+    }
+
+    fn nothing_measured(&self) -> Option<String> {
+        fn reason<T>(metric: &Metric<T>) -> Option<&str> {
+            match metric {
+                Metric::Available(_) => None,
+                Metric::Unavailable(reason) => Some(reason),
+            }
+        }
+        let reasons = [
+            reason(&self.host), reason(&self.cpu), reason(&self.ram), reason(&self.net_up),
+            reason(&self.net_down), reason(&self.uptime), reason(&self.users),
+            reason(&self.partitions), reason(&self.nfs),
+        ];
+        // The CPU reason names the cause for the whole collector (e.g. the platform); Host's
+        // names only the hostname section.
+        reasons.iter().all(Option::is_some).then(|| reasons[1].unwrap_or_default().to_owned())
+    }
+
     pub fn unavailable(reason: &str) -> Self {
-        Self::unsupported(reason, Metric::Unavailable(reason.into()), None)
+        let mut metrics = Self::unsupported(reason, Metric::Unavailable(reason.into()), None);
+        metrics.unavailable_reason = Some(reason.into());
+        metrics
     }
 
     /// Every collected metric unavailable for `reason`; `host` is what the platform-neutral
@@ -82,6 +114,7 @@ impl Metrics {
             partitions: Metric::Unavailable(reason.into()),
             nfs: Metric::Unavailable(reason.into()),
             unsupported_platform: platform,
+            unavailable_reason: None,
         }
     }
 }
