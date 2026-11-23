@@ -139,7 +139,8 @@ type Assert<T extends true> = T;
 export type MetricPayloadKeysMatch = Assert<
   [keyof MetricPayloads] extends [MetricKey] ? [MetricKey] extends [keyof MetricPayloads] ? true : false : false
 >;
-export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> };
+// `unsupportedPlatform` names a host platform with no collector (e.g. "macOS (Darwin)"); absent otherwise.
+export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> } & { unsupportedPlatform?: string };
 export interface SshMetricsSample { terminalId: string; sampledAt: number; metrics: SshMetrics }
 export interface SshMetricsResumeReceipt { sampleFloor: number; generation: number; pauseSeq: number }
 export interface SshMetricsWatchReceipt extends SshMetricsResumeReceipt { pausedReason: string | null }

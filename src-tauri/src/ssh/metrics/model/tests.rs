@@ -3,7 +3,7 @@ use crate::ssh::metrics::reduce::{tests::sample, Reducer};
 use serde_json::{json, to_value};
 
 #[test]
-fn snapshot_json_has_exact_nine_camelcase_keys_and_finite_values() {
+fn snapshot_json_has_nine_camelcase_metric_keys_plus_only_the_platform_label_and_finite_values() {
     let mut reducer = Reducer::default();
     let first = MetricsSnapshot {
         terminal_id: "derived-A".into(),
@@ -62,10 +62,23 @@ fn snapshot_json_has_exact_nine_camelcase_keys_and_finite_values() {
     }));
 
     let unsupported = to_value(sample(&mut reducer, "", &[("platform", "Darwin", 0)])).unwrap();
-    assert_eq!(unsupported.as_object().unwrap().len(), 9);
-    for key in ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
+    assert_eq!(unsupported.as_object().unwrap().len(), 10);
+    assert_eq!(unsupported["unsupportedPlatform"], json!("macOS (Darwin)"));
+    assert_eq!(unsupported["host"], json!({"available": true, "hostname": "derived-host",
+        "os": {"available": true, "name": "Darwin"}, "architecture": {"available": true, "name": "arm64"}}));
+    for key in ["cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
         assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are supported only on Linux (Darwin)"}));
     }
+    let other = to_value(sample(&mut reducer, "", &[("platform", "FreeBSD", 0)])).unwrap();
+    assert_eq!(other["unsupportedPlatform"], json!("FreeBSD"));
+    assert_eq!(other["ram"], json!({"available": false, "reason": "Metrics are supported only on Linux (FreeBSD)"}));
+    // An unknown platform is not "unsupported": nothing names it, and Host keeps its own reading.
+    let unknown = to_value(sample(&mut reducer, "", &[("platform", "", 1)])).unwrap();
+    assert!(unknown.get("unsupportedPlatform").is_none());
+    assert_eq!(unknown.as_object().unwrap().len(), 9);
+    assert_eq!(unknown["host"], json!({"available": true, "hostname": "derived-host",
+        "os": {"available": false, "reason": "Remote OS metadata unavailable"}, "architecture": {"available": true, "name": "arm64"}}));
+    assert_eq!(unknown["cpu"], json!({"available": false, "reason": "Remote platform unavailable"}));
     let after = to_value(sample(&mut reducer, "16", &[])).unwrap();
     assert_eq!(after["cpu"]["percent"], json!(null));
     assert_eq!(after["netUp"]["bytesPerSecond"], json!(null));

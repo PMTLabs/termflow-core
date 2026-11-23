@@ -57,12 +57,22 @@ pub struct Metrics {
     pub users: Metric<Users>,
     pub partitions: Metric<Partitions>,
     pub nfs: Metric<Partitions>,
+    /// Set only for a host whose platform has no collector (e.g. `macOS (Darwin)`): the bar says
+    /// so instead of "Connected" over a row of n/a. Absent from the wire otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported_platform: Option<String>,
 }
 
 impl Metrics {
     pub fn unavailable(reason: &str) -> Self {
+        Self::unsupported(reason, Metric::Unavailable(reason.into()), None)
+    }
+
+    /// Every collected metric unavailable for `reason`; `host` is what the platform-neutral
+    /// sections measured and `platform` names a platform without a collector.
+    pub fn unsupported(reason: &str, host: Metric<Host>, platform: Option<String>) -> Self {
         Self {
-            host: Metric::Unavailable(reason.into()),
+            host,
             cpu: Metric::Unavailable(reason.into()),
             ram: Metric::Unavailable(reason.into()),
             net_up: Metric::Unavailable(reason.into()),
@@ -71,6 +81,7 @@ impl Metrics {
             users: Metric::Unavailable(reason.into()),
             partitions: Metric::Unavailable(reason.into()),
             nfs: Metric::Unavailable(reason.into()),
+            unsupported_platform: platform,
         }
     }
 }

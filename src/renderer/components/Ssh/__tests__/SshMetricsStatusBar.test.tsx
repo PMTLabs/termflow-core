@@ -268,3 +268,33 @@ test('restored_pane_resumes_normal_flow_once_an_app_session_is_observed', () => 
   act(() => h.publish(sample(44, A)));
   expect(bar().textContent).toContain('3.2KB/s');
 });
+
+test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', async () => {
+  const reason = 'Metrics are supported only on Linux (Darwin)';
+  const darwin: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
+    host: { available: true, hostname: 'mymac', os: { available: true, name: 'Darwin' }, architecture: { available: true, name: 'arm64' } },
+    cpu: na(reason), ram: na(reason), netUp: na(reason), netDown: na(reason), uptime: na(reason),
+    users: na(reason), partitions: na(reason), nfs: na(reason), unsupportedPlatform: 'macOS (Darwin)',
+  } };
+  const h = setup(); h.publish(darwin); h.render(); open();
+  const state = bar().querySelector<HTMLElement>('.ssh-metrics-state')!;
+  expect(state.textContent).toBe('○ Metrics not supported on macOS (Darwin)');
+  expect(state.title).toBe(`Metrics not supported on macOS (Darwin) — ${reason}`);
+  expect(bar().querySelector('.is-live')).toBeNull();
+  expect(state.textContent).not.toContain('Connected');
+  expect(bar().querySelector('[data-metric="host"]')!.textContent).toBe(`${SSH_METRIC_LABELS.host}: mymac`);
+  expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toBe(`${SSH_METRIC_LABELS.cpu}: n/a`);
+  expect(row('Copy all metrics').disabled).toBe(false);
+  await click('Copy all metrics');
+  const copied = write.mock.calls[0][0];
+  expect(copied).toBe(formatSshMetricsCopy(darwin));
+  expect(copied).toContain('mymac (Darwin, arm64)');
+  expect(copied).toContain(`n/a (${reason})`);
+  expect(copied).not.toContain('unsupportedPlatform');
+  open();
+
+  // A Linux sample right after goes back to the live, Connected bar.
+  act(() => h.publish(sample(12)));
+  expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
+  expect(bar().querySelector('.is-live')).not.toBeNull();
+});

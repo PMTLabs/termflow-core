@@ -190,7 +190,7 @@ impl Drop for Host {
 pub(super) fn darwin_has_no_proc_trace() {
     let host = Host::new();
     let (stdout, nonce, trace) = host.run(&[("PLATFORM", "Darwin")]);
-    assert_darwin(&parse(stdout.as_bytes(), &nonce).unwrap());
+    assert_darwin(&parse(stdout.as_bytes(), &nonce).unwrap(), "test-host", "test-arch");
     let utilities: Vec<_> = trace.iter().filter(|line| !line.starts_with("awk ") && !line.starts_with("sh ") && *line != "collector-entry").map(String::as_str).collect();
     assert_eq!(utilities, ["uname -s", "uname -n", "uname -m"]);
 }
