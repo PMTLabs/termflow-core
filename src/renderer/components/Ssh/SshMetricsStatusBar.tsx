@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
 import { ContextMenu, type ContextMenuItem } from '../Terminal/ContextMenu';
 import { formatSshMetric } from './metricFormat';
-import { SSH_METRIC_KEYS, sshMetricLabel } from './sshMetricKeys';
+import { SSH_METRIC_KEYS, sshMetricLabel, sshMetricShortLabel } from './sshMetricKeys';
 import { useSshMetrics } from './useSshMetrics';
 import './SshMetricsStatusBar.css';
 
@@ -79,6 +79,8 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
           title={[status, connected ? failureReason ?? unsupportedReason : restored ? RESTORED_REASON : session?.reason].filter(Boolean).join(' — ')}>
           <span aria-hidden="true">{live ? '●' : '○'}</span> {status}
         </span>
+        {/* Before the values: overflowing items wrap out of the row from the end, never this action. */}
+        {canResume && <button type="button" onClick={resume}>Resume metrics (F3)</button>}
         {visible.map(key => {
           const value = sample ? formatSshMetric(sample.metrics, key)
             : unavailable && connected && !canResume ? { text: 'n/a', detail: `n/a (${unavailable})` }
@@ -87,15 +89,17 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
             : { text: waiting ? '…' : '—', detail: status };
           const label = sshMetricLabel(key, sample?.metrics.platform);
           const identityOnly = key === 'host' && !sample;
-          const text = identityOnly ? `${identity} · ${value.text}` : value.text;
+          // Compact RAM ("3.1/16.0 GiB"); the full spacing stays in the tooltip and copy text.
+          const shown = key === 'ram' ? value.text.replace(' / ', '/') : value.text;
+          const text = identityOnly ? `${identity} · ${shown}` : shown;
           const detail = identityOnly ? `${identity} (configured) · ${value.detail}`
             : key === 'users' && sample?.metrics.platform === 'Windows' ? `${value.detail} · SSH sessions are not listed`
             : value.detail;
+          const short = sshMetricShortLabel(key, sample?.metrics.platform);
           return <span className="ssh-metrics-value" key={key} data-metric={key} title={`${label}: ${detail}`}
-            aria-label={`${label}: ${detail}`}>{label}: {text}</span>;
+            aria-label={`${label}: ${detail}`}>{short ? `${short} ${text}` : text}</span>;
         })}
       </>}
-      {canResume && !!visible.length && <button type="button" onClick={resume}>Resume metrics (F3)</button>}
       {/* Portalled to body, so it carries the Canvas keyboard-owner marker itself (review 349 F6). */}
       {menuOpen && <ContextMenu x={menu.x} y={menu.y} className="ssh-keyboard-owner" items={items} onClose={closeMenu} />}
     </div>

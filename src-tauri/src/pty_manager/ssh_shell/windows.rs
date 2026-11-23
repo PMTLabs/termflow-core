@@ -42,7 +42,7 @@ fn prepare(
     let mut output = PosixAdapter { spec: ordinary.clone(), hooks: Vec::new() };
     let result = (|| {
         let (ext, payload) = if ps { ("txt", nonce.to_owned()) }
-            else { ("cmd", CMD_SCRIPT.replace("@NONCE@", nonce)) };
+            else { ("cmd", CMD_SCRIPT.replace("@NONCE@", nonce).replace("@CMD_SAVE@", CMD_SAVE)) };
         let helper = root.publish(owner.clone(), HelperKind::ShellHook, ext, payload.as_bytes())?;
         let usage = helper.acquire()?;
         let path = usage.path();
@@ -130,7 +130,7 @@ fn cmd_flags(ordinary: &[String]) -> io::Result<Vec<String>> {
 }
 
 const PS_HOOK_PREFIX: &str = "$script:__termflowSshReadyNonce = [System.IO.File]::ReadAllText('";
-const PS_HOOK_SUFFIX: &str = "; $script:__termflowSshReadySequence++; [Console]::Write([string][char]27 + ']633;TermFlowSshReady;' + $script:__termflowSshReadyNonce + ';' + $script:__termflowSshReadySequence + [string][char]27 + '\\') }";
+const PS_HOOK_SUFFIX: &str = "; $script:__termflowSshReadySequence++; $__tfRows = 1; try { $__tfWin = $Host.UI.RawUI.WindowSize; $__tfRows = [Math]::Max(1, [Math]::Min($__tfWin.Height - 1, [Math]::Ceiling(1200 / [Math]::Max(20, $__tfWin.Width)) + 1)) } catch {}; [Console]::Write(([string][char]27 + 'D') * $__tfRows + [string][char]27 + '[' + $__tfRows + 'A' + [string][char]27 + '7' + [string][char]27 + ']633;TermFlowSshReady;' + $script:__termflowSshReadyNonce + ';' + $script:__termflowSshReadySequence + [string][char]27 + '\\') }";
 
 fn powershell_hook_tail() -> String {
     let wrapper = PS_CWD_INTEGRATION.strip_suffix(" }").expect("PowerShell prompt wrapper");
@@ -159,17 +159,27 @@ pub(crate) fn is_powershell_hook_command(arg: &str) -> bool {
         && powershell_hook_command(&path).is_ok_and(|generated| generated == arg)
 }
 
+// Quiet launch (see posix ECHO_MAX): reserve six IND rows, then save the cursor where the
+// prompt starts; the launch batch restores it. PROMPT cannot compute a width-based reserve,
+// so a prompt plus typed batch path taller than six rows can scroll the save away.
+// Known limit (backlog 045): in a restored pane whose new shell starts on the bottom row,
+// the typed path can stay on screen, about six rows above where the restore lands. Cause not
+// yet established; pwsh in the same case is clean.
+const CMD_SAVE: &str = "$ED$ED$ED$ED$ED$ED$E[6A$E7";
+
 // Detect the existing delayed expansion state and keep it. In the off case,
 // expand under setlocal, then return a FOR variable (expanded after metachar
 // parsing) across endlocal. The assignment prefix protects leading EOL chars.
+// `do @(`: with echo on, cmd echoes each FOR iteration's body even under `@for`; without
+// the `@` the pane would show this block, nonce included, above the first prompt.
 const CMD_SCRIPT: &str = "@set \"__TERMFLOW_SSH_CMD_BOOTSTRAP=\"\r\n\
 @if not defined PROMPT set \"PROMPT=$P$G\"\r\n\
 @if \"!\"==\"\" goto :delayed\r\n\
 @setlocal EnableDelayedExpansion\r\n\
-@for /f \"delims=\" %%P in (\"PROMPT=!PROMPT!$E]633;TermFlowSshReady;@NONCE@;$T$E\\\") do (\r\n\
+@for /f \"delims=\" %%P in (\"PROMPT=@CMD_SAVE@!PROMPT!$E]633;TermFlowSshReady;@NONCE@;$T$E\\\") do @(\r\n\
     endlocal\r\n\
     set \"%%P\"\r\n\
 )\r\n\
 @goto :eof\r\n\
 :delayed\r\n\
-@set \"PROMPT=!PROMPT!$E]633;TermFlowSshReady;@NONCE@;$T$E\\\"\r\n";
+@set \"PROMPT=@CMD_SAVE@!PROMPT!$E]633;TermFlowSshReady;@NONCE@;$T$E\\\"\r\n";
