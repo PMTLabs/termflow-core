@@ -294,6 +294,10 @@ export class PaneIncarnations {
     return [...this.slots.values()].find(slot => slot.descriptor.leaf === leaf && !slot.suppressed)?.pi;
   }
 
+  hasPendingRestore(pi: PaneCapture): boolean {
+    return [...this.slots.values()].some(slot => slot.pi === pi && !slot.suppressed && slot.descriptor.restore && !slot.resolved);
+  }
+
   restoreKey(pi: PaneCapture): string | undefined {
     return [...this.slots.values()].find(slot => slot.pi === pi && !slot.suppressed && slot.descriptor.restore && !slot.resolved)?.descriptor.override;
   }

@@ -8,7 +8,7 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { store } from '../../../store';
 import sshReducer from '../../../store/slices/sshSlice';
-import { addTabTree, removeTabTree } from '../../../store/slices/panesSlice';
+import { addTabTree, removeTabTree, setActiveTabId } from '../../../store/slices/panesSlice';
 import { addTab, clearAllTabs, removeTab } from '../../../store/slices/tabsSlice';
 import { hydrateCanvas, pruneCanvasGeometry, setEdges, setNodeGeom, setOverlayNode, setViewport } from '../../../store/slices/canvasSlice';
 import { setDefaultProfile, setShellProfiles } from '../../../store/slices/settingsSlice';
@@ -30,6 +30,8 @@ import { TabManager } from '../../Tabs/TabManager';
 import { SshConnectionsPanel } from '../../Settings/SshConnections/SshConnectionsPanel';
 import { SshConnectionsDialogHost } from '../AllSshConnectionsDialog';
 import { OwnedSshLaunchNotice } from '../OwnedSshLaunchNotice';
+
+import { publishSshCanvasVisible } from '../sshPresentations';
 
 const SOURCE = 'tm-source';
 const sourceRect = { x: 45, y: 35, w: NODE_W, h: NODE_H };
@@ -180,6 +182,46 @@ afterEach(async () => {
   jest.useRealTimers();
 });
 afterAll(() => inputHandler.destroy());
+
+test.each(['background', 'active', 'attach', 'closed', 'canvas'])('restored SSH launch: %s', async scenario => {
+  const connection = saved('restore');
+  await setup([connection]);
+  const tabId = 'restore-tab';
+  const paneId = 'restore-pane';
+  const id = 'tm-restored';
+  const background = store.getState().tabs.activeTabId!;
+  const launchCounts = () => ['ssh_session_open', 'ssh_terminal_launch'].map(command =>
+    ops(command).filter(call => call.args?.terminalId === id).length);
+  await act(async () => {
+    paneIncarnations.prepare([{ paneId, leaf: id, restore: true }]);
+    store.dispatch(addTabTree({ tabId, tree: {
+      id: paneId, type: 'terminal', terminalId: id, ssh: { connectionId: connection.id, browserCollapsed: true, followCd: false, hiddenMetrics: [] },
+    } }));
+    store.dispatch(addTab({ id: tabId, title: tabId, shellType: profile.id, icon: '' }));
+    store.dispatch(setActiveTabId(scenario === 'active' ? tabId : background));
+  });
+  if (scenario === 'attach') {
+    // A hookless surviving shell still has a reattach seed.
+    window.electronAPI = { ...window.electronAPI, takeReattachPromptHook: async () => ({ promptHook: false, atPrompt: false }) };
+  }
+  const shell = await mountShell(connection.id);
+  if (scenario === 'attach') expect(store.getState().sshSession.byTerminal[id]?.reattachedProcessId).toBe(shell.pc);
+  expect(launchCounts()).toEqual(scenario === 'active' ? [1, 1] : [0, 0]);
+  let retract: (() => void) | undefined;
+  await act(async () => {
+    if (scenario === 'closed') store.dispatch(removeTabTree(tabId));
+    if (scenario === 'canvas') retract = publishSshCanvasVisible(id, true);
+    else store.dispatch(setActiveTabId(tabId));
+  });
+  const expected = scenario === 'attach' || scenario === 'closed' ? [0, 0] : [1, 1];
+  expect(launchCounts()).toEqual(expected);
+  await act(async () => {
+    retract?.();
+    store.dispatch(setActiveTabId(background));
+    store.dispatch(setActiveTabId(tabId));
+  });
+  expect(launchCounts()).toEqual(expected);
+});
 
 test('sshCrossWindowSave_updatesBothMenus_withoutReload', async () => {
   const { initial, aStore, bHydration } = await setup([saved('anchor', { bookmarked: true }), saved('new', { order: 1 })], { holdGet: true, source: true });

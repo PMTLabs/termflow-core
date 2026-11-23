@@ -66,8 +66,14 @@ export function publishSshCanvasVisible(terminalId: string, visible: boolean): (
   };
 }
 
+export function isSshCanvasVisible(terminalId: string): boolean {
+  return canvasVisible.has(terminalId);
+}
+
+export const subscribeSshCanvasVisibility = watchPresentations;
+
 export function useSshCanvasVisible(terminalId: string): boolean {
-  const read = useCallback(() => canvasVisible.has(terminalId), [terminalId]);
+  const read = useCallback(() => isSshCanvasVisible(terminalId), [terminalId]);
   return useSyncExternalStore(watchPresentations, read, read);
 }
 

@@ -3,6 +3,8 @@ import { termDiag } from '../utils/diag';
 import { earlyOutput } from './earlyOutput';
 import { findLeafByTerminalId, findTabIdByTerminalId } from '../store/slices/paneTreeOps';
 import { isWaitingForSshLaunch, observeOwnedSshLaunch, sshLaunchFailure, staleSshLaunch, type ReconnectSshResult, type SshLaunchObservation } from './sshLaunchAttempt';
+import { isSshCanvasVisible, subscribeSshCanvasVisibility } from '../components/Ssh/sshPresentations';
+import type { store as rendererStore } from '../store';
 import type { LaunchSnapshot } from '../types/ssh';
 import { reattachPromptGate } from './reattachGate';
 import type { PaneNode } from '../store/slices/panesSlice';
@@ -434,6 +436,7 @@ export class TerminalServiceClass {
           // An ambiguous attach result is not a fresh launch authorization.
         }
       }
+      const coldRestore = mode === 'Mount' && attemptPi && protocol.hasPendingRestore(attemptPi);
       if (attemptPi) protocol.setRestoreResolved(attemptPi);
       if (sshLaunchConnectionId) {
         (window as any).__REDUX_STORE__?.dispatch(sshAttachmentResolved({
@@ -444,10 +447,35 @@ export class TerminalServiceClass {
 
       if (freshSsh && sshLaunchConnectionId && attemptPi) {
         const placement = this.sshPlacement(terminalId, paneId, attemptPi, processId, sshLaunchConnectionId);
-        const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
-        this.sshLaunches.set(attemptPi, { pc: processId, work });
-        // Launch failure does not discard the successfully created local shell.
-        void work.catch(() => {});
+        const launch = () => {
+          const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
+          this.sshLaunches.set(attemptPi, { pc: processId, work });
+          // Launch failure does not discard the successfully created local shell.
+          void work.catch(() => {});
+        };
+        const store = (window as Window & { __REDUX_STORE__?: typeof rendererStore }).__REDUX_STORE__;
+        if (coldRestore && store) {
+          // Watch the owning tab, not the pane layout (maximize, split, etc.).
+          // Canvas has its own visibility signal for individual nodes.
+          let settled = false;
+          const check = () => {
+            if (settled) return; // A nested notification can retain an older listener snapshot.
+            const tabId = findTabIdByTerminalId(this.paneTrees(), terminalId);
+            const current = !!tabId && placement.current();
+            if (current && store.getState().panes.activeTabId !== tabId && !isSshCanvasVisible(terminalId)) return;
+            settled = true;
+            unsubscribeStore();
+            unsubscribeCanvas();
+            unsubscribeOwner();
+            if (current) launch();
+          };
+          const unsubscribeStore = store.subscribe(check);
+          const unsubscribeCanvas = subscribeSshCanvasVisibility(check);
+          const unsubscribeOwner = protocol.subscribe(check);
+          check();
+        } else {
+          launch();
+        }
       }
 
       if (isElevatedFlightOwner) flightResolve?.(processId);
