@@ -159,8 +159,12 @@ pub(crate) fn is_powershell_hook_command(arg: &str) -> bool {
         && powershell_hook_command(&path).is_ok_and(|generated| generated == arg)
 }
 
-// Quiet launch (see posix ECHO_MAX): six IND rows cover a typed batch path plus its
-// prompt at 40 columns; then save the cursor where the prompt starts. The batch restores it.
+// Quiet launch (see posix ECHO_MAX): reserve six IND rows, then save the cursor where the
+// prompt starts; the launch batch restores it. PROMPT cannot compute a width-based reserve,
+// so a prompt plus typed batch path taller than six rows can scroll the save away.
+// Known limit (backlog 045): in a restored pane whose new shell starts on the bottom row,
+// the typed path can stay on screen, about six rows above where the restore lands. Cause not
+// yet established; pwsh in the same case is clean.
 const CMD_SAVE: &str = "$ED$ED$ED$ED$ED$ED$E[6A$E7";
 
 // Detect the existing delayed expansion state and keep it. In the off case,
