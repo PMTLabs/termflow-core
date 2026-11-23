@@ -74,10 +74,10 @@ const UBUNTU_FIELDS: Option<[&str; 7]> = Some([
     "tf-metrics-ubuntu",
     "x86_64",
     "Ubuntu 24.04",
-    "cpu  72525712 139 12419141 1658499522 8448405 0 7167439 0 1085468 0",
+    "cpu  83897355 203 15107968 1918177272 11585838 0 8820145 0 1098382 0",
     "MemTotal:       49327760 kB",
-    "732604.51 16584995.26",
-    "3.98 3.72 3.35 1/3221 2139206",
+    "848680.57 19181773.32",
+    "0.63 1.07 1.11 1/2981 2860012",
 ]);
 const ALPINE_MEM_TOTAL: Option<&str> = Some("MemTotal:       49327760 kB");
 // nfs.txt is DERIVED, NOT CAPTURED (leader ruling D55): the real Ubuntu envelope
@@ -123,6 +123,8 @@ fn alpine_capture_without_who_keeps_memory_but_users_unavailable() {
     let who = s.section("who").unwrap();
     assert_ne!(who.exit, 0);
     assert!(who.rows().is_err());
+    assert_eq!(s.local.unwrap().iter().map(row).collect::<Vec<_>>(),
+        [("overlay", "/", "overlay", 1055762868 * 1024, 227928208 * 1024, 774131188 * 1024, 23)]);
     let denied = include_str!("../fixtures/derived-who-permission.txt");
     for (status, body) in [(126, denied), (1, "partial-user pts/0\n"), (0, "")] {
         let text = linux(&[("who", body, status)]);
@@ -133,6 +135,21 @@ fn alpine_capture_without_who_keeps_memory_but_users_unavailable() {
             0 => assert!(s.section("who").unwrap().rows().unwrap().is_empty()),
             _ => assert!(s.section("who").unwrap().rows().is_err()),
         }
+    }
+}
+
+#[test]
+fn file_mounts_filter_only_local_rows_and_fail_closed() {
+    let local = format!("{LOCAL}/dev/vda ext4 100 30 60 34% /a b\n");
+    let text = linux(&[("dfLocal", &local, 0), ("fileMounts", "/a\\040b\n/srv/nfs", 0)]);
+    let sample = parsed(&text);
+    assert_eq!(sample.local.unwrap().iter().map(row).collect::<Vec<_>>(), [LOCAL_ROW]);
+    assert_eq!(sample.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
+    for (body, status) in [("", 125), ("relative", 0), ("/a\\011b", 0)] {
+        let text = linux(&[("fileMounts", body, status)]);
+        let sample = parsed(&text);
+        assert!(sample.local.is_err());
+        assert_eq!(sample.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
     }
 }
 

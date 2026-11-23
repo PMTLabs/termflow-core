@@ -1,4 +1,4 @@
-DERIVED, NOT CAPTURED: the real Ubuntu/WSL capture (ubuntu.txt) with only the mounts, dfLocal and dfNfs
+DERIVED, NOT CAPTURED: the real Ubuntu/WSL capture (ubuntu.txt) with an empty fileMounts section and the mounts, dfLocal and dfNfs
 sections replaced by a modeled NFS host; see README.md. No NFS host was available (leader ruling D55).
 __TFM_1b29f714ffa84471a5ef491176b5545c_V1_BEGIN__
 __TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_platform_BEGIN__
@@ -877,6 +877,9 @@ nas.example:/export/home /mnt/home nfs4 rw,relatime,vers=4.2,proto=tcp,sec=sys 0
 nas.example:/export/old /mnt/old nfs rw,relatime,vers=3,proto=tcp,sec=sys 0 0
 //nas.example/share /mnt/smb cifs rw,relatime,vers=3.1.1 0 0
 __TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_mounts_END_0__
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_fileMounts_BEGIN__
+
+__TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_fileMounts_END_0__
 __TFM_1b29f714ffa84471a5ef491176b5545c_SECTION_dfLocal_BEGIN__
 Filesystem     Type  1024-blocks       Used Available Capacity Mounted on
 /dev/sda1      ext4    102687672   48291012  49137352      50% /
