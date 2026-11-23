@@ -211,7 +211,11 @@ fn windows_ram_block_does_not_hide_working_clock_or_cpu() {
     assert_eq!(metrics.ram, Metric::Unavailable(BLOCKED.into()));
     assert!(matches!(metrics.uptime, Metric::Available(_)));
     assert!(matches!(metrics.cpu, Metric::Available(_)));
-    assert!(matches!(metrics.host, Metric::Available(_)));
+    assert!(matches!(metrics.host, Metric::Available(Host {
+        os: Metric::Available(_),
+        architecture: Metric::Available(_),
+        ..
+    })));
 }
 
 #[test]
@@ -356,4 +360,95 @@ fn windows_users_section_with_no_rows_is_not_zero_users() {
         Metric::Unavailable("Invalid Windows metrics fields".into())
     );
     assert!(matches!(capture(&mut Reducer::default(), CAPTURE).users, Metric::Available(_)));
+}
+
+#[test]
+fn windows_blocked_metadata_reports_policy() {
+    for key in ["hostname", "architecture"] {
+        let text = section_data(CAPTURE, key, "blocked 1")
+            .replace(&format!("{key}_END_0"), &format!("{key}_END_126"));
+        let raw = parse(text.as_bytes(), NONCE).unwrap();
+        let field = if key == "hostname" { raw.hostname } else { raw.architecture };
+        assert_eq!(field, Err(BLOCKED));
+        // Exit 126 without a `blocked 1` row stays an ordinary permission failure.
+        let text = section_data(CAPTURE, key, "x")
+            .replace(&format!("{key}_END_0"), &format!("{key}_END_126"));
+        let raw = parse(text.as_bytes(), NONCE).unwrap();
+        let field = if key == "hostname" { raw.hostname } else { raw.architecture };
+        assert_eq!(field, Err("Permission denied"));
+    }
+}
+
+#[test]
+fn windows_missing_os_identity_preserves_clock_ram_and_cpu() {
+    for (exit, reason) in [(0, "Invalid Windows metrics fields"), (1, "Collection command failed")] {
+        let text = CAPTURE
+            .lines()
+            .filter(|row| !row.starts_with("caption ") && !row.starts_with("version "))
+            .collect::<Vec<_>>()
+            .join("
+") + "
+";
+        let text = text.replace("winOs_END_0", &format!("winOs_END_{exit}"));
+        let metrics = capture(&mut Reducer::default(), &text);
+        assert!(matches!(metrics.uptime, Metric::Available(_)));
+        assert!(matches!(metrics.ram, Metric::Available(_)));
+        assert!(matches!(metrics.cpu, Metric::Available(_)));
+        let Metric::Available(host) = metrics.host else { panic!("missing host") };
+        assert_eq!(host.os, Metric::Unavailable(reason.into()));
+    }
+}
+
+fn assert_switch_clears_then_rewarms_rates(
+    baseline: impl Fn(&mut Reducer),
+    switch: impl Fn(&mut Reducer),
+    next: impl Fn(&mut Reducer) -> Metrics,
+    after: impl Fn(&mut Reducer) -> Metrics,
+) {
+    for switched in [false, true] {
+        let mut reducer = Reducer::default();
+        baseline(&mut reducer);
+        if switched {
+            switch(&mut reducer);
+        }
+        let metrics = next(&mut reducer);
+        assert_eq!(cpu_percent_of(&metrics).is_none(), switched);
+        assert_eq!(rate(&metrics.net_up).is_none(), switched);
+        assert_eq!(rate(&metrics.net_down).is_none(), switched);
+        // The returning sample is the new baseline: the one after it must diff again.
+        let metrics = after(&mut reducer);
+        assert!(cpu_percent_of(&metrics).is_some(), "switched={switched}");
+        assert!(rate(&metrics.net_up).is_some(), "switched={switched}");
+        assert!(rate(&metrics.net_down).is_some(), "switched={switched}");
+    }
+}
+
+#[test]
+fn linux_windows_linux_clears_then_rewarms_rates() {
+    use crate::ssh::metrics::reduce::tests::sample;
+    assert_switch_clears_then_rewarms_rates(
+        |r| { sample(r, "10", &[]); },
+        |r| { frame(r, 0, 0, "A", 100); },
+        |r| sample(r, "12", &[
+            ("stat", "cpu 20 0 5 120 30 0 0 0 9 0
+btime 1000", 0),
+            ("netdev", "eth0: 130 0 0 0 0 0 0 0 260 0 0 0 0 0 0 0", 0),
+        ]),
+        |r| sample(r, "14", &[
+            ("stat", "cpu 30 0 8 180 40 0 0 0 9 0
+btime 1000", 0),
+            ("netdev", "eth0: 200 0 0 0 0 0 0 0 400 0 0 0 0 0 0 0", 0),
+        ]),
+    );
+}
+
+#[test]
+fn windows_linux_windows_clears_then_rewarms_rates() {
+    use crate::ssh::metrics::reduce::tests::sample;
+    assert_switch_clears_then_rewarms_rates(
+        |r| { frame(r, 0, 0, "A", 100); },
+        |r| { sample(r, "10", &[]); },
+        |r| frame(r, 1, 1, "A", 140),
+        |r| frame(r, 2, 2, "A", 180),
+    );
 }

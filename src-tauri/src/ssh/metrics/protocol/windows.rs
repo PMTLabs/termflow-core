@@ -61,7 +61,7 @@ fn unescape(s: &str) -> Reading<String> {
 }
 
 fn metadata(section: &Section<'_>) -> Reading<String> {
-    let [row] = section.rows()? else {
+    let [row] = section_rows(section)? else {
         return Err(BAD);
     };
     let name = display(unescape(row)?.trim());

@@ -43,10 +43,12 @@ S platform {'Windows'}
 S hostname {[Environment]::MachineName}
 S architecture {$env:PROCESSOR_ARCHITECTURE}
 S winOs {
-    $v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-    $n=$v.ProductName
-    if([int]$v.CurrentBuild -ge 22000){$n=$n -replace '^Windows 10','Windows 11'}
-    "caption $n";"version 10.0.$($v.CurrentBuild).$($v.UBR)"
+    try{
+        $v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $n=$v.ProductName
+        if([int]$v.CurrentBuild -ge 22000){$n=$n -replace '^Windows 10','Windows 11'}
+        "caption $n";"version 10.0.$($v.CurrentBuild).$($v.UBR)"
+    }catch{}
     "uptimeTicks $([Diagnostics.Stopwatch]::GetTimestamp())";"tickFrequency $([Diagnostics.Stopwatch]::Frequency)"
     Native
     $b=New-Object 'uint64[]' 8;$b[0]=64

@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn production_windows_command_degrades_under_constrained_language() {
         use crate::ssh::metrics::{
-            model::Metric,
+            model::{Host, Metric},
             protocol::{parse, windows, Platform},
             reduce::Reducer,
         };
@@ -173,12 +173,17 @@ mod tests {
             assert!(windows::blocked(raw.section(key).unwrap()), "{key}");
         }
         let metrics = Reducer::default().reduce(raw);
-        assert!(matches!(metrics.host, Metric::Available(_)));
+        assert!(matches!(metrics.host, Metric::Available(Host {
+            os: Metric::Available(_),
+            architecture: Metric::Available(_),
+            ..
+        })));
         let blocked = || Metric::Unavailable(windows::BLOCKED.into());
         assert_eq!(metrics.cpu, blocked());
         assert_eq!(metrics.ram, Metric::Unavailable(windows::BLOCKED.into()));
         assert_eq!(metrics.uptime, Metric::Unavailable(windows::BLOCKED.into()));
         assert_eq!(metrics.net_up, Metric::Unavailable(windows::BLOCKED.into()));
+        assert_eq!(metrics.net_down, Metric::Unavailable(windows::BLOCKED.into()));
         assert_eq!(
             metrics.partitions,
             Metric::Unavailable(windows::BLOCKED.into())
@@ -232,5 +237,44 @@ mod tests {
                 }
             }
         }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn registry_failure_keeps_clock_ram_and_cpu_in_production_payload() {
+        use crate::ssh::metrics::{
+            model::{Host, Metric},
+            protocol::{parse, Platform},
+            reduce::Reducer,
+        };
+        use std::process::{Command, Stdio};
+
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        // Shadow the registry read the winOs section makes; the payload's scriptblock sees
+        // this function before the cmdlet, so the read throws under ErrorActionPreference=Stop.
+        let script = format!(
+            "function Get-ItemProperty {{ throw 'registry unavailable' }}
+{}",
+            bootstrap(&nonce).unwrap()
+        );
+        let command = encode_bootstrap(&script);
+        let encoded = command.strip_prefix(PREFIX).unwrap();
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let raw = parse(&output.stdout, &nonce).unwrap();
+        assert_eq!(raw.platform, Platform::Windows);
+        assert_eq!(raw.section("winOs").unwrap().exit, 0);
+        let metrics = Reducer::default().reduce(raw);
+        assert!(matches!(metrics.uptime, Metric::Available(_)), "{:?}", metrics.uptime);
+        assert!(matches!(metrics.ram, Metric::Available(_)), "{:?}", metrics.ram);
+        assert!(matches!(metrics.cpu, Metric::Available(_)), "{:?}", metrics.cpu);
+        let Metric::Available(Host { os, .. }) = metrics.host else {
+            panic!("{:?}", metrics.host)
+        };
+        assert_eq!(os, Metric::Unavailable("Invalid Windows metrics fields".into()));
     }
 }
