@@ -929,3 +929,12 @@ fn start_launch_worker_from_std_thread_without_runtime() {
         });
     }).join().unwrap();
 }
+
+#[test]
+fn connect_without_windows_openssh_client_reports_ssh_client_missing() {
+    use crate::pty_manager::ssh_shell::NativeSshClient;
+    let missing = native_ssh_error(NativeSshClient::Missing);
+    assert_eq!(missing.code, Code::SshClientMissing);
+    assert!(missing.message.starts_with("Windows OpenSSH Client is not installed."));
+    assert_eq!(native_ssh_error(NativeSshClient::Unavailable).code, Code::UnsupportedContext);
+}

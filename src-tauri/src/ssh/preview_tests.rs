@@ -46,7 +46,9 @@ fn preview_saved_and_validated_unsaved_draft_use_rust_builder_without_writes() {
     assert!(preview.argv.iter().any(|a| a.starts_with("UserKnownHostsFile=\"") && a.ends_with("/known_hosts\"")));
     assert!(preview.argv.iter().any(|a| a == "ServerAliveInterval=30"));
     assert_eq!(&preview.argv[preview.argv.len()-2..], &["--", "saved.test"]);
-    assert!(preview.display.ends_with("\"--\" \"saved.test\""));
+    let text = &preview.commands.last().unwrap().text;
+    assert!(text.ends_with(" -- saved.test"), "{text}");
+    assert!(preview.commands.iter().all(|c| c.unavailable.is_none() && c.text.contains(" -- saved.test")));
     assert!(preview.config_notice.contains("~/.ssh/config does not apply"));
 
     let mut draft = input("draft.test");
@@ -57,6 +59,16 @@ fn preview_saved_and_validated_unsaved_draft_use_rust_builder_without_writes() {
     let proxy = if cfg!(windows) { "<native-ssh-proxy>" } else { "/bin/sh '<private-proxy-helper>'" };
     assert!(jump.argv.contains(&format!("ProxyCommand={proxy}")));
     assert!(jump.wrapper.contains("shown symbolically"));
+    // Windows' native ProxyCommand needs no private payload, so its copy text is
+    // the real command; a POSIX jump's helper exists only in a real launch.
+    for command in &jump.commands {
+        if cfg!(windows) {
+            assert_eq!(command.unavailable, None);
+            assert!(command.text.contains("ProxyCommand=") && !command.text.contains("<native-ssh-proxy>"), "{}", command.text);
+        } else {
+            assert_eq!(command.unavailable, Some(PRIVATE_HELPER));
+        }
+    }
 
     let self_jump = temp.preview(PreviewSource::Draft { draft: Box::new(draft), editing_id: Some(id) }).unwrap_err();
     assert_eq!(self_jump.code, "Validation");
@@ -88,4 +100,75 @@ fn preview_replies_preserve_field_codes_and_hide_store_errors() {
     assert_eq!(serde_json::to_value(err).unwrap(), serde_json::json!({
         "code": "StoreUnavailable", "message": "SSH definitions could not be read."
     }));
+}
+
+fn args(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| w.to_string()).collect()
+}
+
+#[test]
+fn windows_copy_text_is_powershell_then_cmd_and_survives_both_powershell_editions() {
+    let ssh = r"C:\WINDOWS\system32\OpenSSH\ssh.exe";
+    // One ArgumentList string: 5.1 and 7.3+ both pass it to ssh.exe unchanged.
+    // Embedded quotes, spaces, an empty argument, ' and the typographic quote
+    // PowerShell also treats as a quote all go through it.
+    let argv = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a b/known_hosts\"", "-l", "it's", "-o", "X=a&b|c%PATH%\u{2019}", "", "--", "h"]);
+    let commands = shell_commands(&argv, Some(&argv), true);
+    assert_eq!(commands.iter().map(|c| c.shell).collect::<Vec<_>>(), ["powershell", "cmd"]);
+    assert_eq!(commands[0].text, format!(
+        r#"Start-Process -FilePath '{ssh}' -ArgumentList '-o "UserKnownHostsFile=\"C:/a b/known_hosts\"" -l it''s -o X=a&b|c%PATH%’’ "" -- h' -NoNewWindow -Wait"#));
+    assert_eq!(commands[0].unavailable, None);
+    // cmd cannot keep %PATH% literal in a pasted line.
+    assert!(commands[1].unavailable.unwrap().contains("Command Prompt expands %"));
+
+    let argv = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a b/known_hosts\"", "-o", "X=a&b", "", "--", "h"]);
+    let commands = shell_commands(&argv, Some(&argv), true);
+    // cmd flips quote state at every ", so only the & outside quotes is escaped.
+    assert_eq!(commands[1].text, format!(
+        r#"{ssh} -o "UserKnownHostsFile=\"C:/a b/known_hosts\"" -o X=a^&b "" -- h"#));
+    assert!(commands.iter().all(|c| c.unavailable.is_none()));
+}
+
+#[test]
+fn copy_text_that_cannot_run_unchanged_says_why_instead() {
+    let ssh = r"C:\ssh.exe";
+    let pipe = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a|b/kh\"", "--", "h"]);
+    let commands = shell_commands(&pipe, Some(&pipe), true);
+    assert!(commands.iter().all(|c| c.unavailable.is_none()));
+    // cmd sees the quotes closed after \" so the | there is escaped.
+    assert_eq!(commands[1].text, r#"C:\ssh.exe -o "UserKnownHostsFile=\"C:/a^|b/kh\"" -- h"#);
+
+    // No runnable argv (a POSIX jump): show the symbolic text, but never as copyable.
+    let symbolic = args(&["/usr/bin/ssh", "-o", "ProxyCommand=/bin/sh '<private-proxy-helper>'", "--", "h"]);
+    let commands = shell_commands(&symbolic, None, false);
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].unavailable, Some(PRIVATE_HELPER));
+}
+
+#[test]
+fn posix_copy_text_single_quotes_only_what_needs_it() {
+    let argv = args(&["/usr/bin/ssh", "-F", "none", "-o", "UserKnownHostsFile=\"/home/a b/kh\"", "-l", "it's", "", "--", "user@host.test"]);
+    let commands = shell_commands(&argv, Some(&argv), false);
+    assert_eq!((commands[0].shell, commands[0].unavailable), ("sh", None));
+    assert_eq!(commands[0].text,
+        r#"/usr/bin/ssh -F none -o 'UserKnownHostsFile="/home/a b/kh"' -l 'it'\''s' '' -- user@host.test"#);
+}
+
+#[test]
+fn missing_windows_openssh_client_has_its_own_code_and_instructions() {
+    use crate::pty_manager::ssh_shell::{installed_ssh_client, NativeSshClient};
+    let temp = Temp::new();
+    let missing = temp.0.join("OpenSSH").join("ssh.exe").to_string_lossy().into_owned();
+    let err = installed_ssh_client(Ok(missing)).unwrap_err();
+    assert_eq!(err, NativeSshClient::Missing);
+    let json = serde_json::to_value(PreviewError::native_ssh(err)).unwrap();
+    assert_eq!(json["code"], "SshClientMissing");
+    assert_eq!(json["message"], "Windows OpenSSH Client is not installed. Turn it on in Settings > System > Optional features > OpenSSH Client, then try again.");
+    assert_eq!(installed_ssh_client(Err(std::io::Error::other("no system dir"))).unwrap_err(), NativeSshClient::Unavailable);
+    assert_eq!(PreviewError::native_ssh(NativeSshClient::Unavailable).code, "UnsupportedContext");
+    fs::create_dir_all(&temp.0).unwrap();
+    let present = temp.0.join("ssh.exe");
+    fs::write(&present, "").unwrap();
+    let present = present.to_string_lossy().into_owned();
+    assert_eq!(installed_ssh_client(Ok(present.clone())), Ok(present));
 }

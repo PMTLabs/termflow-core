@@ -71,6 +71,8 @@ pub(crate) enum LaunchErrorCode {
     InputLocked,
     UnsupportedShell,
     UnsupportedContext,
+    /// Windows' optional OpenSSH Client feature is not installed.
+    SshClientMissing,
     TrustBlocked,
     Timeout,
     WriteFailed,
@@ -92,6 +94,7 @@ impl From<LaunchErrorCode> for LaunchError {
             LaunchErrorCode::NotFound => "No SSH launch attempt is registered for this terminal.",
             LaunchErrorCode::InputLocked => "Terminal input is locked by an SSH launch.",
             LaunchErrorCode::UnsupportedContext => "This local shell was not prepared for this saved SSH connection.",
+            LaunchErrorCode::SshClientMissing => crate::pty_manager::ssh_shell::SSH_CLIENT_MISSING,
             LaunchErrorCode::TrustBlocked => "The SSH session refused the launch.",
             LaunchErrorCode::UnsupportedShell => "This shell cannot safely run the saved SSH connection.",
             LaunchErrorCode::Timeout => "Return to the local shell prompt, then retry the SSH connection.",

@@ -77,10 +77,18 @@ fn native_bare_shell(shell: &str, identity: &ProcessIdentity) -> bool {
 
 fn native_ssh() -> Result<String, LaunchError> {
     #[cfg(windows)]
-    return crate::pty_manager::ssh_shell::system_shell(r"OpenSSH\ssh.exe")
-        .map_err(|_| Code::UnsupportedContext.into());
+    return crate::pty_manager::ssh_shell::native_ssh_client().map_err(native_ssh_error);
     #[cfg(not(windows))]
     Ok("/usr/bin/ssh".into())
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn native_ssh_error(error: crate::pty_manager::ssh_shell::NativeSshClient) -> LaunchError {
+    use crate::pty_manager::ssh_shell::NativeSshClient;
+    match error {
+        NativeSshClient::Missing => Code::SshClientMissing.into(),
+        NativeSshClient::Unavailable => Code::UnsupportedContext.into(),
+    }
 }
 
 pub(super) struct Payload {
