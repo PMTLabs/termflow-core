@@ -224,6 +224,7 @@ function collectTerminals(node: PaneNode, acc: DetachTerminal[]): void {
         ...(win32InputMode ? { win32InputMode: true as const } : {}),
         ...(hasKeyboardProtocol ? { keyboardProtocol } : {}),
         ...(cwd ? { cwd } : {}),
+        ...(terminalService.hasDeferredSshLaunch(node.terminalId) ? { sshLaunchDeferred: true as const } : {}),
       });
     } else {
       // No live process for this pane — it can't be reattached and will be
@@ -477,6 +478,7 @@ async function closeWindowIfEmpty(): Promise<void> {
 function seedKeyboardProtocol(t: DetachTerminal): void {
   if (t.win32InputMode) terminalService.markReattachedSession(t.terminalId);
   if (t.keyboardProtocol) terminalService.stashKeyboardProtocol(t.terminalId, t.keyboardProtocol);
+  if (t.sshLaunchDeferred) terminalService.stashCarriedSshLaunch(t.terminalId, t.processId);
 }
 
 /** Target-window handler: take the stashed payload for `token` and add it as a tab. */
