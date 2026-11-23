@@ -342,11 +342,13 @@ fn interfaces(rows: &[&str]) -> Reading<Interfaces> {
 
 fn network_rates(before: &Interfaces, now: &Interfaces, elapsed: Option<Duration>, wrap: bool) -> Reading<[Option<f64>; 2]> {
     let seconds = elapsed.filter(|d| !d.is_zero()).ok_or(NET_ELAPSED)?.as_secs_f64();
-    if before.keys().ne(now.keys()) {
+    // Only interfaces sampled at both endpoints can contribute a delta.
+    let common = now.iter().filter_map(|(name, b)| before.get(name).map(|a| (a, b)));
+    if common.clone().next().is_none() {
         return Ok([None, None]);
     }
     let rate = |direction: usize| {
-        let total = before.values().zip(now.values()).try_fold(0u128, |sum, (a, b)| {
+        let total = common.clone().try_fold(0u128, |sum, (a, b)| {
             sum.checked_add(delta(a[direction], b[direction], wrap)?)
         })?;
         let rate = total as f64 / seconds;
