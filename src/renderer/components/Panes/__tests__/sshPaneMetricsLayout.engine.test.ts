@@ -285,7 +285,9 @@ test('tagged_grid_ignores_ssh_state_samples_and_preferences', async () => {
     await step(() => session('connected'), 'Collecting first sample');
     // D101: the upload value follows an aria-hidden glyph, not a text label.
     await step(() => publish(null, 1), '…');
+    expect(h.bar()?.querySelector('[data-metric=netUp]')?.textContent).toBe('…');
     await step(() => publish(3200, 1), '3.2KB/s');
+    expect(h.bar()?.querySelector('[data-metric=netUp]')?.textContent).toBe('3.2KB/s');
     await step(() => dispatch(sshMetricsDisarmed(terminalId)), 'Metrics delayed');
     await step(() => dispatch(sshMetricsUnavailable({ terminalId, reason: 'Sampler unavailable' })), 'Metrics unavailable');
     await step(() => dispatch(sshMetricsControlled({ terminalId, generation: 1, pauseSeq: 1, pausedReason: 'Metrics paused' })), 'Metrics paused');

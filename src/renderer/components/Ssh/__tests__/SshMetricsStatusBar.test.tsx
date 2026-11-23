@@ -13,6 +13,8 @@ import { writeClipboardText } from '../../../utils/clipboard';
 import type { SshMetricsAPI, SshMetricsSample, SshMetricsControl, SshState } from '../../../types/ssh';
 import { SshMetricsStatusBar } from '../SshMetricsStatusBar';
 import { SSH_METRIC_KEYS, SSH_METRIC_LABELS } from '../sshMetricKeys';
+import { SshIcon, type SshIconName } from '../SshIcons';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { formatSshMetricsCopy } from '../metricFormat';
 
 jest.mock('../../../utils/clipboard', () => ({ writeClipboardText: jest.fn() }));
@@ -288,9 +290,17 @@ test('D101: every value leads with its own aria-hidden glyph and no text label; 
   const h = setup(); h.dispatch(setSshHiddenMetrics({ terminalId: B, hiddenMetrics: [] })); h.publish(sample(61)); h.render();
   const values = visibleValues();
   expect(values.map(v => v.dataset.metric)).toEqual([...SSH_METRIC_KEYS]);
+  // The glyph each metric must draw, by its icon name: a swapped pair (↑/↓) must fail.
+  const expected = { host: 'server', cpu: 'chip', ram: 'memory', netUp: 'up', netDown: 'down',
+    uptime: 'clock', users: 'user', partitions: 'disk', nfs: 'networkDrive' } as const;
+  const pathOf = (name: SshIconName) => /\sd="([^"]+)"/.exec(renderToStaticMarkup(<SshIcon name={name} />))![1];
   for (const v of values) {
     const glyph = v.firstElementChild!;
     expect(glyph.tagName.toLowerCase()).toBe('svg');
+    // Icon first, then the value as text: an icon rendered after the value must fail.
+    expect(v.firstChild).toBe(glyph);
+    expect(v.lastChild!.nodeType).toBe(Node.TEXT_NODE);
+    expect(glyph.querySelector('path')!.getAttribute('d')).toBe(pathOf(expected[v.dataset.metric as keyof typeof expected]));
     expect(glyph.getAttribute('aria-hidden')).toBe('true');
     expect(glyph.getAttribute('focusable')).toBe('false');
     expect(v.children).toHaveLength(1);
