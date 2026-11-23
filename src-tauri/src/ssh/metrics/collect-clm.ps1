@@ -16,7 +16,7 @@ S winOs $r 126
 S winCpu $b 126
 S winNet $b 126
 $q="$env:SystemRoot\System32\quser.exe"
-if(Test-Path $q){$u=& $q 2>$null;if($LASTEXITCODE){S winUsers @() 1}else{S winUsers $u}}else{S winUsers @() 127}
+if(Test-Path $q){$u=& $q 2>$null;if(!$? -or $LASTEXITCODE){S winUsers @() 1}else{S winUsers $u}}else{S winUsers @() 127}
 S winDisks $b 126
 S winNetDrives $b 126
 Write-Host -NoNewline ((($l+"${p}V1_END__") -join "`n")+"`n")

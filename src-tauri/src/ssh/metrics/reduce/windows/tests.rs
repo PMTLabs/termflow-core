@@ -317,3 +317,21 @@ __TFM_0123456789abcdef0123456789abcdef_SECTION_winOs_END").unwrap()],
     };
     assert_eq!(host.os, Metric::Unavailable(BLOCKED.into()));
 }
+
+#[test]
+fn windows_users_section_with_no_rows_is_not_zero_users() {
+    // CLM with quser blocked by policy: the launch fails, $LASTEXITCODE stays unset and
+    // the section ends with exit 0 and no rows. That is a failed read, never "0 users".
+    let start = format!("__TFM_{NONCE}_SECTION_winUsers_BEGIN__\n");
+    let end = format!("__TFM_{NONCE}_SECTION_winUsers_END_0__");
+    let users_start = CAPTURE.find(&start).unwrap() + start.len();
+    let users_end = CAPTURE.find(&end).unwrap();
+    assert!(users_end > users_start, "fixture has user rows to remove");
+    let text = format!("{}{}", &CAPTURE[..users_start], &CAPTURE[users_end..]);
+    let metrics = capture(&mut Reducer::default(), &text);
+    assert_eq!(
+        metrics.users,
+        Metric::Unavailable("Invalid Windows metrics fields".into())
+    );
+    assert!(matches!(capture(&mut Reducer::default(), CAPTURE).users, Metric::Available(_)));
+}

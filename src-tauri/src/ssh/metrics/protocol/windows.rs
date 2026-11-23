@@ -175,9 +175,15 @@ pub(in crate::ssh::metrics) fn perf_rows(rows: Reading<&[&str]>) -> Reading<Perf
 }
 
 pub(in crate::ssh::metrics) fn users(rows: Reading<&[&str]>) -> Reading<Users> {
+    let rows = rows?;
+    // A quser run that succeeded always prints its header line. No rows means it never
+    // ran (CLM leaves $LASTEXITCODE unset when policy blocks the launch), not 0 users.
+    if rows.is_empty() {
+        return Err(BAD);
+    }
     let mut count = 0;
     let mut names = BTreeSet::new();
-    for row in rows?.iter().skip(1) {
+    for row in rows.iter().skip(1) {
         if let Some(name) = unescape(row)?.split_whitespace().next() {
             let name = display(name.trim_start_matches('>'));
             if !name.is_empty() {
