@@ -334,7 +334,7 @@ fn collector_excludes_file_binds_but_keeps_local_directories() {
     let host = Host::new();
     fs::create_dir(host.0.join("etc")).unwrap();
     fs::create_dir(host.0.join("data")).unwrap();
-    for file in ["etc/hosts", "etc/hostname", "etc/resolv.conf", "a b", r"c\040d", "nfs"] {
+    for file in ["etc/hosts", "etc/hostname", "etc/resolv.conf", "a b", r"c\040d", "nfs", "stacked"] {
         fs::write(host.0.join(file), "").unwrap();
     }
     let mounts = r"overlay / overlay rw 0 0
@@ -346,6 +346,8 @@ fn collector_excludes_file_binds_but_keeps_local_directories() {
 /dev/disk /c\134040d ext4 rw 0 0
 /dev/disk /skip\011me ext4 rw 0 0
 server:/vol /nfs nfs4 rw 0 0
+/dev/disk /stacked ext4 rw 0 0
+server:/vol /stacked nfs4 rw 0 0
 ";
     let local = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n\
 overlay overlay 100 30 60 34% /\n\
@@ -360,7 +362,7 @@ overlay overlay 100 30 60 34% /\n\
     files.sort_unstable();
     assert_eq!(files, [r"/a\040b", r"/c\134040d", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf"]);
     assert_eq!(sample.local.unwrap().into_iter().map(|m| m.mount_point).collect::<Vec<_>>(), ["/", "/data"]);
-    assert!(!trace.iter().any(|line| line.starts_with("probe: /nfs") || line.starts_with("probe: /skip")));
+    assert!(!trace.iter().any(|line| line.starts_with("probe: /nfs") || line.starts_with("probe: /skip") || line.starts_with("probe: /stacked")));
 }
 
 #[test]

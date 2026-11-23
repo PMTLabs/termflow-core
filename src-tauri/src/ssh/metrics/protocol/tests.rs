@@ -108,6 +108,7 @@ fn ubuntu_capture_preserves_all_sections_and_statuses() {
         s.section("uptime").unwrap().rows().unwrap()[0],
         s.section("loadavg").unwrap().rows().unwrap()[0],
     ], expected);
+    assert_eq!(s.section("fileMounts").unwrap().rows().unwrap(), ["/mnt/wslg/versions.txt"]);
     let local = s.local.unwrap();
     assert!(!local.is_empty());
     assert_eq!(local.iter().map(|m| (m.source.as_str(), m.mount_point.as_str(), m.fs_type.as_str())).collect::<Vec<_>>(),
@@ -140,10 +141,15 @@ fn alpine_capture_without_who_keeps_memory_but_users_unavailable() {
 
 #[test]
 fn file_mounts_filter_only_local_rows_and_fail_closed() {
-    let local = format!("{LOCAL}/dev/vda ext4 100 30 60 34% /a b\n");
-    let text = linux(&[("dfLocal", &local, 0), ("fileMounts", "/a\\040b\n/srv/nfs", 0)]);
+    let local = format!("{LOCAL}/dev/vdb ext4 100 30 60 34% /a b\n/dev/vdc ext4 100 30 60 34% /e\\040f\n/dev/vdd ext4 100 30 60 34% /data\n");
+    // `\134040` decodes once to a literal `\040`, so `/a b` is not a file bind and stays.
+    let text = linux(&[("dfLocal", &local, 0), ("fileMounts", "/e\\040f\n/a\\134040b\n/srv/nfs", 0)]);
     let sample = parsed(&text);
-    assert_eq!(sample.local.unwrap().iter().map(row).collect::<Vec<_>>(), [LOCAL_ROW]);
+    assert_eq!(sample.local.unwrap().iter().map(row).collect::<Vec<_>>(), [
+        LOCAL_ROW,
+        ("/dev/vdb", "/a b", "ext4", 102400, 30720, 61440, 34),
+        ("/dev/vdd", "/data", "ext4", 102400, 30720, 61440, 34),
+    ]);
     assert_eq!(sample.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
     for (body, status) in [("", 125), ("relative", 0), ("/a\\011b", 0)] {
         let text = linux(&[("fileMounts", body, status)]);
