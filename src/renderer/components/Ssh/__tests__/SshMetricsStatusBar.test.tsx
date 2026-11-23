@@ -270,13 +270,13 @@ test('restored_pane_resumes_normal_flow_once_an_app_session_is_observed', () => 
 });
 
 test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', async () => {
-  const reason = 'Metrics are supported only on Linux (FreeBSD)';
-  const darwin: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
+  const reason = 'Metrics are supported only on Linux and macOS (FreeBSD)';
+  const freebsd: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
     host: { available: true, hostname: 'bsdbox', os: { available: true, name: 'FreeBSD' }, architecture: { available: true, name: 'amd64' } },
     cpu: na(reason), ram: na(reason), netUp: na(reason), netDown: na(reason), uptime: na(reason),
     users: na(reason), partitions: na(reason), nfs: na(reason), unsupportedPlatform: 'FreeBSD',
   } };
-  const h = setup(); h.publish(darwin); h.render(); open();
+  const h = setup(); h.publish(freebsd); h.render(); open();
   const state = bar().querySelector<HTMLElement>('.ssh-metrics-state')!;
   expect(state.textContent).toBe('○ Metrics not supported on FreeBSD');
   expect(state.title).toBe(`Metrics not supported on FreeBSD — ${reason}`);
@@ -287,14 +287,14 @@ test('a host with no collector says so instead of Connected, and still shows its
   expect(row('Copy all metrics').disabled).toBe(false);
   await click('Copy all metrics');
   const copied = write.mock.calls[0][0];
-  expect(copied).toBe(formatSshMetricsCopy(darwin));
+  expect(copied).toBe(formatSshMetricsCopy(freebsd));
   expect(copied).toContain('bsdbox (FreeBSD, amd64)');
   expect(copied).toContain(`n/a (${reason})`);
   expect(copied).not.toContain('unsupportedPlatform');
   open();
 
   // A Linux sample right after goes back to the live, Connected bar.
-  act(() => h.publish(sample(12, B, darwin.sampledAt + 1)));
+  act(() => h.publish(sample(12, B, freebsd.sampledAt + 1)));
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
   expect(bar().querySelector('.is-live')).not.toBeNull();
 });

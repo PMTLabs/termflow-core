@@ -157,16 +157,16 @@ fn nfs_capture_separates_nfs4_and_local_not_tmpfs_or_cifs() {
 }
 
 #[test]
-fn darwin_capture_marks_every_metric_linux_only() {
+fn freebsd_capture_marks_metrics_unsupported() {
     #[cfg(unix)]
-    executable::darwin_has_no_proc_trace();
+    executable::freebsd_has_no_proc_trace();
     let s = capture("FreeBSD", include_str!("../fixtures/non-linux.txt"));
-    assert_darwin(&s, "tf-metrics-darwin", "arm64");
+    assert_freebsd(&s, "tf-metrics-freebsd", "arm64");
 }
 
-fn assert_darwin(s: &RawSample<'_>, hostname: &str, architecture: &str) {
+fn assert_freebsd(s: &RawSample<'_>, hostname: &str, architecture: &str) {
     assert_eq!(s.platform, Platform::Unsupported("FreeBSD".into()));
-    assert_eq!(s.platform.unavailable_reason().as_deref(), Some("Metrics are supported only on Linux (FreeBSD)"));
+    assert_eq!(s.platform.unavailable_reason().as_deref(), Some("Metrics are supported only on Linux and macOS (FreeBSD)"));
     assert_eq!(s.platform.unsupported_label().as_deref(), Some("FreeBSD"));
     // T1 is raw: one platform gate supplies the same reason for the eight Linux
     // metrics; all Linux dependencies must be absent rather than zero-filled.

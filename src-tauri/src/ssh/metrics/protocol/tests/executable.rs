@@ -187,17 +187,17 @@ impl Drop for Host {
     }
 }
 
-pub(super) fn darwin_has_no_proc_trace() {
+pub(super) fn freebsd_has_no_proc_trace() {
     let host = Host::new();
     let (stdout, nonce, trace) = host.run(&[("PLATFORM", "FreeBSD")]);
-    assert_darwin(&parse(stdout.as_bytes(), &nonce).unwrap(), "test-host", "test-arch");
+    assert_freebsd(&parse(stdout.as_bytes(), &nonce).unwrap(), "test-host", "test-arch");
     let utilities: Vec<_> = trace.iter().filter(|line| !line.starts_with("awk ") && !line.starts_with("sh ") && *line != "collector-entry").map(String::as_str).collect();
     assert_eq!(utilities, ["uname -s", "uname -n", "uname -m"]);
 }
 
 #[test]
-fn real_collector_darwin_has_no_proc_trace() {
-    darwin_has_no_proc_trace();
+fn real_collector_freebsd_has_no_proc_trace() {
+    freebsd_has_no_proc_trace();
 }
 
 #[test]
@@ -411,7 +411,6 @@ fn darwin_production_command_runs_with_absolute_utilities_under_dash_and_posix_s
         ("netstat", "/usr/sbin/netstat", "netstat"), ("iostat", "/usr/sbin/iostat", "iostat"),
         ("who", "/usr/bin/who", "who"), ("mount", "/sbin/mount", "mounts"),
         ("date", "/bin/date", "now"), ("df", "/bin/df", "dfLocal"),
-        ("df", "/bin/df", "dfLocal"), ("date", "/bin/date", "now"),
     ] {
         let data = raw.section(key).unwrap().rows().unwrap().join("
 ");
@@ -435,22 +434,50 @@ esac");
     host.utility("sysctl", &sysctl);
     binds.push(format!("{}:/usr/sbin/sysctl", host.0.join("sysctl").display()));
     for (shell, flags) in [("/bin/dash", &[][..]), ("/bin/bash", &["--posix"][..])] {
-        host.script("sh", &format!("exec {shell} {} \"$@\"", flags.join(" ")));
+        fs::write(host.0.join("trace"), "").unwrap();
+        host.script("sh", &format!("printf 'collector-entry\n' >> \"$TRACE\"
+exec {shell} {} \"$@\"", flags.join(" ")));
         let (command, n) = collector_command();
         let mut cmd = Command::new(find_executable("proot").expect("install proot"));
         for bind in &binds { cmd.arg("-b").arg(bind); }
-        let output = cmd.arg(shell).args(flags).arg("-c").arg(command)
+        let output = cmd.arg(shell).args(flags).arg("-c").arg(&command)
+            .env_clear().env("LD_LIBRARY_PATH", std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default())
             .env("PATH", &host.0).env("PLATFORM", "Darwin").env("TRACE", host.0.join("trace"))
             .env("REAL_AWK", find_executable("awk").unwrap()).output().expect("install proot for absolute-path Darwin fixture");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let sample = parse(&output.stdout, &n).unwrap();
         assert_eq!(sample.platform, Platform::Darwin);
+        assert_eq!(sample.nfs.as_ref().unwrap(), &[]);
         assert_eq!(sample.local.as_ref().unwrap().len(), 4);
         assert_eq!(sample.section("iostat").unwrap().rows().unwrap().len(), 4);
-    }
-    let trace = fs::read_to_string(host.0.join("trace")).unwrap();
-    assert!(!trace.contains("/proc"));
+        let trace = fs::read_to_string(host.0.join("trace")).unwrap();
+        let calls: Vec<_> = trace.lines().filter(|line| !line.starts_with(&format!("{}/awk ", host.0.display()))).map(|line| line.strip_prefix(&format!("{}/", host.0.display())).unwrap_or(line).trim_end()).collect();
+        assert_eq!(calls, ["collector-entry", "uname -s", "uname -n", "uname -m", "/usr/bin/sw_vers", "/usr/sbin/sysctl -n hw.logicalcpu", "/usr/sbin/sysctl -n hw.memsize", "/usr/sbin/sysctl -n hw.pagesize", "/usr/sbin/sysctl -n kern.boottime", "/bin/date -u +%s", "/usr/sbin/sysctl -n vm.loadavg", "/usr/bin/vm_stat", "/usr/sbin/netstat -ibn", "/usr/sbin/iostat -c 2 -w 1", "/usr/bin/who", "/sbin/mount", "/bin/df -P -l -k"]);
+        assert_eq!(calls.iter().filter(|line| **line == "collector-entry").count(), 1);
+        for (mount_body, expected_exit) in [("exit 1", 125), ("printf '%s\n' 'server:/share on /net (nfs)'", 127)] {
+            host.utility("mount", mount_body);
+            fs::write(host.0.join("trace"), "").unwrap();
+            let mut cmd = Command::new(find_executable("proot").unwrap());
+            for bind in &binds { cmd.arg("-b").arg(bind); }
+            for path in ["/usr/local/bin/timeout", "/usr/local/bin/gtimeout", "/opt/homebrew/bin/timeout", "/opt/homebrew/bin/gtimeout"] { cmd.arg("-b").arg(format!("/dev/null:{path}")); }
+            let output = cmd.arg(shell).args(flags).arg("-c").arg(&command).env_clear()
+                .env("LD_LIBRARY_PATH", std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default())
+                .env("PATH", &host.0).env("PLATFORM", "Darwin").env("TRACE", host.0.join("trace"))
+                .env("REAL_AWK", find_executable("awk").unwrap()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let sample = parse(&output.stdout, &n).unwrap();
+            assert_eq!(sample.section("dfNfs").unwrap().exit, expected_exit);
+            let trace = fs::read_to_string(host.0.join("trace")).unwrap();
+            assert_eq!(trace.lines().filter(|s| s.contains("/bin/df ")).collect::<Vec<_>>(), ["/bin/df -P -l -k"]);
+        }
+        let mounts = raw.section("mounts").unwrap().rows().unwrap().join("
+");
+        host.utility("mount", &format!("/bin/cat <<'DATA'
+{mounts}
+DATA"));
+
     assert!(!trace.contains("df -P -k -t nfs"));
+    }
 }
 
 #[cfg(target_os = "linux")]

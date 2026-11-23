@@ -66,6 +66,7 @@ pub(super) fn interfaces(raw: &RawSample<'_>) -> Reading<Interfaces> {
         let cols: Vec<_> = row.split_ascii_whitespace().collect();
         let name = *cols.first().ok_or(NET_INVALID)?;
         if name == "lo0" || name.ends_with('*') || !cols.get(2).is_some_and(|s| s.starts_with("<Link#") && s.ends_with('>')) { continue; }
+        if !matches!(cols.len(), 10 | 11) { return Err(NET_INVALID); }
         // Address may be absent; the seven trailing counter columns are fixed.
         let counters = cols.get(cols.len().checked_sub(7).ok_or(NET_INVALID)?..).ok_or(NET_INVALID)?;
         let pair = [decimal(counters[2]).ok_or(NET_INVALID)?, decimal(counters[5]).ok_or(NET_INVALID)?];

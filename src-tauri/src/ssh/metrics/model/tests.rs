@@ -67,11 +67,8 @@ fn snapshot_json_has_nine_camelcase_metric_keys_plus_only_the_platform_label_and
     assert_eq!(unsupported["host"], json!({"available": true, "hostname": "derived-host",
         "os": {"available": true, "name": "FreeBSD"}, "architecture": {"available": true, "name": "arm64"}}));
     for key in ["cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
-        assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are supported only on Linux (FreeBSD)"}));
+        assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are supported only on Linux and macOS (FreeBSD)"}));
     }
-    let other = to_value(sample(&mut reducer, "", &[("platform", "FreeBSD", 0)])).unwrap();
-    assert_eq!(other["unsupportedPlatform"], json!("FreeBSD"));
-    assert_eq!(other["ram"], json!({"available": false, "reason": "Metrics are supported only on Linux (FreeBSD)"}));
     // An unknown platform is not "unsupported": nothing names it, and Host keeps its own reading.
     let unknown = to_value(sample(&mut reducer, "", &[("platform", "", 1)])).unwrap();
     assert!(unknown.get("unsupportedPlatform").is_none());

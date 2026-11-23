@@ -5,7 +5,7 @@ pub(super) fn populate(sample: &mut RawSample<'_>) {
     let s = &sample.sections;
     sample.os = s["swVers"].rows().and_then(|rows| {
         let field = |key| rows.iter().find_map(|r| r.strip_prefix(key)).map(str::trim).filter(|s| !s.is_empty()).ok_or("Invalid sw_vers output");
-        Ok(format!("{} {}", field("ProductName:")?, field("ProductVersion:")?))
+        Ok(display(&format!("{} {}", field("ProductName:")?, field("ProductVersion:")?)))
     });
     let mounts = s["mounts"].rows().and_then(inventory);
     sample.local = s["dfLocal"].rows().and_then(|rows| partitions(rows, &mounts, false));
@@ -41,8 +41,11 @@ fn inventory(rows: &[&str]) -> Reading<Vec<Mount>> {
 fn partitions(rows: &[&str], mounts: &Reading<Vec<Mount>>, nfs: bool) -> Reading<Vec<MountUsage>> {
     let mounts = mounts.as_ref().map_err(|e| *e)?;
     if mounts.iter().any(|m| m.kind == Fs::Unknown) { return Err(BAD_TYPE); }
-    if !rows.is_empty() && !rows[0].starts_with("Filesystem") { return Err(BAD_DF); }
-    if !rows.is_empty() && rows[0].split_ascii_whitespace().collect::<Vec<_>>() != ["Filesystem", "1024-blocks", "Used", "Available", "Capacity", "Mounted", "on"] { return Err(BAD_DF); }
+    match rows.first().map(|row| row.split_ascii_whitespace().collect::<Vec<_>>()).as_deref() {
+        Some(["Filesystem", "1024-blocks", "Used", "Available", "Capacity", "Mounted", "on"]) => (),
+        None if nfs => (),
+        _ => return Err(BAD_DF),
+    }
     let mut usage = BTreeMap::new();
     for line in rows.iter().skip(1) {
         let row = df_row(line, false)?.ok_or(BAD_DF)?;
@@ -52,4 +55,24 @@ fn partitions(rows: &[&str], mounts: &Reading<Vec<Mount>>, nfs: bool) -> Reading
         let r = usage.get(&m.source).ok_or(BAD_DF)?;
         Ok(MountUsage { source: m.source.clone(), mount_point: m.point.clone(), fs_type: m.fs.clone(), total_bytes: r.total, used_bytes: r.used, available_bytes: r.available, used_percent: r.percent })
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn empty_local_df_requires_header_but_empty_nfs_is_none_mounted() {
+        assert_eq!(partitions(&[], &Ok(vec![]), false), Err(BAD_DF));
+        assert_eq!(partitions(&[], &Ok(vec![]), true), Ok(vec![]));
+    }
+}
+
+#[cfg(test)]
+mod empty_df_tests {
+    use super::*;
+    #[test]
+    fn empty_local_df_requires_header_even_without_local_mounts() {
+        assert_eq!(partitions(&[], &Ok(vec![]), false), Err(BAD_DF));
+        assert_eq!(partitions(&[], &Ok(vec![]), true), Ok(vec![]));
+    }
 }

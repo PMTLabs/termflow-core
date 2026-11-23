@@ -137,15 +137,25 @@ elif [ "$status" -eq 0 ] && [ "$platform" = Darwin ]; then
     section netstat /usr/sbin/netstat -ibn
     section iostat /usr/sbin/iostat -c 2 -w 1
     section who /usr/bin/who
-    section mounts /sbin/mount
+    inventory=$(/sbin/mount)
+    inventory_status=$?
+    section_begin mounts
+    printf '%s' "$inventory"
+    section_end mounts "$inventory_status"
     section dfLocal /bin/df -P -l -k
+    has_nfs=no
+    case "$inventory" in *' (nfs,'*|*' (nfs)'*) has_nfs=yes ;; esac
     section_begin dfNfs
-    # Never stat a network filesystem without a fixed, absolute watchdog.
-    if [ -x /usr/local/bin/timeout ]; then
-        /usr/local/bin/timeout -s KILL 2 /bin/df -P -k -t nfs
-        section_end dfNfs "$?"
-    elif [ -x /opt/homebrew/bin/gtimeout ]; then
-        /opt/homebrew/bin/gtimeout -s KILL 2 /bin/df -P -k -t nfs
+    watchdog=
+    for candidate in /usr/local/bin/timeout /usr/local/bin/gtimeout /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout; do
+        if [ -x "$candidate" ]; then watchdog=$candidate; break; fi
+    done
+    if [ "$inventory_status" -ne 0 ]; then
+        section_end dfNfs 125
+    elif [ "$has_nfs" = no ]; then
+        section_end dfNfs 0
+    elif [ -n "$watchdog" ]; then
+        "$watchdog" -s KILL 2 /bin/df -P -k -T nfs
         section_end dfNfs "$?"
     else
         section_end dfNfs 127

@@ -48,11 +48,11 @@ pub enum Platform {
 }
 
 impl Platform {
-    /// A shared reason for every metric when Linux collection is not supported.
+    /// A shared reason for every metric when this platform has no collector.
     pub fn unavailable_reason(&self) -> Option<String> {
         match self {
             Self::Linux | Self::Darwin => None,
-            Self::Unsupported(name) => Some(format!("Metrics are supported only on Linux ({name})")),
+            Self::Unsupported(name) => Some(format!("Metrics are supported only on Linux and macOS ({name})")),
             Self::Unknown => Some("Remote platform unavailable".into()),
         }
     }
@@ -180,8 +180,8 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         hostname: Err("Remote hostname unavailable"),
         architecture: Err("Remote architecture unavailable"),
         os: Err("Remote OS metadata unavailable"),
-        local: Err("Linux partitions unavailable"),
-        nfs: Err("Linux NFS partitions unavailable"),
+        local: Err("Partitions unavailable"),
+        nfs: Err("NFS partitions unavailable"),
         nfs_watchdog_expired: false,
         sections,
     };

@@ -173,7 +173,7 @@ async fn terminal_retirement_keeps_slot_until_drain_and_removes_stamp_history() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn darwin_iostat_hang_times_out_into_the_existing_latch() {
+async fn injected_exec_timeout_fires_existing_latch_without_telemetry() {
     let (f, _, events, _) = rig([]);
     connect(&f, A).await;
     let worker = Arc::new(Terminal::new(A));
@@ -197,6 +197,7 @@ async fn darwin_iostat_hang_times_out_into_the_existing_latch() {
     assert_eq!(control["pausedReason"], json!(TIMEOUT));
     sleep(CADENCE * 3).await;
     assert_eq!(calls.load(SeqCst), 1);
+    assert!(events.events.lock().iter().all(|(name, _)| *name != SAMPLE));
     worker.retire();
     runner.await.unwrap();
     f.registry.shutdown().await;
