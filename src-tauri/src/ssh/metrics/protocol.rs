@@ -48,6 +48,16 @@ impl Platform {
             Self::Unknown => Some("Remote platform unavailable".into()),
         }
     }
+
+    /// How the status bar names a platform that has no collector: `macOS (Darwin)` for Darwin,
+    /// else the `uname -s` value as reported. `None` for Linux and for an unknown platform.
+    pub fn unsupported_label(&self) -> Option<String> {
+        match self {
+            Self::Unsupported(name) if name == "Darwin" => Some("macOS (Darwin)".into()),
+            Self::Unsupported(name) => Some(name.clone()),
+            Self::Linux | Self::Unknown => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -164,10 +174,14 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         nfs_watchdog_expired: false,
         sections,
     };
+    // uname -n and -m run on every platform; only the OS name needs Linux's os-release.
+    sample.hostname = single(&sample.sections["hostname"]);
+    sample.architecture = single(&sample.sections["architecture"]);
+    if let Platform::Unsupported(name) = &sample.platform {
+        sample.os = Ok(name.clone());
+    }
     if linux {
         let s = &sample.sections;
-        sample.hostname = single(&s["hostname"]);
-        sample.architecture = single(&s["architecture"]);
         sample.os = os_release(s["osRelease"].rows());
         let mounts = s["mounts"].rows().and_then(mount_inventory);
         sample.local = s["dfLocal"].rows().and_then(|rows| df(rows, &mounts, false));

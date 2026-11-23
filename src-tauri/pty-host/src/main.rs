@@ -333,18 +333,14 @@ async fn main() {
 /// Drain/takeover is NOT implemented yet — `CAP_DRAIN` is deliberately absent.
 /// `inherit_cursor` is true only once the bundled ConPTY is loaded
 /// (`init_for_current_exe`): the inbox one is not measured to honour an
-/// inherited cursor. `CAP_MCP_HOLD` is the plan 054 rollback switch: drop that
-/// one line and no GUI sends the MCP-hold frames.
+/// inherited cursor. The rest is `HOST_BASE_CAPABILITIES`, shared with the GUI
+/// so it can spot an older host binary. `CAP_MCP_HOLD` is the plan 054 rollback
+/// switch: drop that one line there and no GUI sends the MCP-hold frames.
 ///
 /// The elevated dial-out host returns before the record is built, so it never
 /// advertises any of these.
 fn host_capabilities(inherit_cursor: bool) -> u32 {
-    termflow_pty_protocol::CAP_ATTACH_ACK
-        | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
-        | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL
-        | termflow_pty_protocol::CAP_MCP_HOLD
-        | termflow_pty_protocol::bootstrap::CAP_SSH_PROMPT_REGISTRATION
-        | if cfg!(target_os = "macos") { termflow_pty_protocol::CAP_PERMISSIONS } else { 0 }
+    termflow_pty_protocol::bootstrap::HOST_BASE_CAPABILITIES
         | if inherit_cursor { termflow_pty_protocol::CAP_INHERIT_CURSOR } else { 0 }
 }
 

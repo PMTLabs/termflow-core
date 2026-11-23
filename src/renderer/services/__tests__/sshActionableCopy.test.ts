@@ -7,7 +7,7 @@ import type { SshState } from '../../store/slices/sshSlice';
 import { sshLaunchEndReason } from '../../components/Ssh/SshLaunchNotice';
 
 test('only the terminal host wire code selects the outdated-host copy', () => {
-  const copy = "The terminal host is out of date. Restart TermFlow's terminal host, then retry.";
+  const copy = "This TermFlow's terminal host is older than the app, so it can't open SSH sessions. Reinstall or rebuild TermFlow; if this persists, quit TermFlow from the tray icon (this closes all terminals) and start it again.";
   expect(getPaneStartupStatus(undefined, paneStartupFailureCode('PtyHostOutdated'))?.text).toBe(copy);
   for (const message of [copy, 'PtyHostOutdated: details', 'another error']) {
     expect(getPaneStartupStatus(undefined, paneStartupFailureCode(message))?.text).toBe('Failed to start shell');
