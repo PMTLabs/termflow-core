@@ -141,16 +141,17 @@ fn cpu_percent(
 }
 
 fn net_rates(before: &PerfRows, now: &PerfRows, seconds: f64) -> Option<[f64; 2]> {
-    if before.len() != now.len() {
-        return None;
-    }
     let mut rate = [0.0, 0.0];
+    let mut has_common = false;
     for (name, &[rx, tx]) in now {
-        let &[old_rx, old_tx] = before.get(name)?;
+        let Some(&[old_rx, old_tx]) = before.get(name) else {
+            continue;
+        };
+        has_common = true;
         rate[0] += rx.checked_sub(old_rx)? as f64 / seconds;
         rate[1] += tx.checked_sub(old_tx)? as f64 / seconds;
     }
-    Some(rate)
+    has_common.then_some(rate)
 }
 
 #[cfg(test)]

@@ -87,7 +87,7 @@ fn network_tx_is_upload_rx_download_excludes_only_lo() {
     sample(&mut r, "10", &[("netdev", &first, 0)]);
     assert_eq!(rates(&sample(&mut r, "12", &[("netdev", &second, 0)])), (Some(42.0), Some(20.0)));
     let swapped = format!("{THIRD_NET}\n{}\n{}", netrow("veth2", 5000, 6000), netrow("br0", 26, 46));
-    assert_eq!(rates(&sample(&mut r, "14", &[("netdev", &swapped, 0)])), (None, None));
+    assert_eq!(rates(&sample(&mut r, "14", &[("netdev", &swapped, 0)])), (Some(21.0), Some(6.0)));
     assert_eq!(rates(&sample(&mut r, "16", &[("netdev", &swapped, 0)])), (Some(0.0), Some(0.0)));
 }
 
@@ -177,14 +177,15 @@ fn missing_boot_id_uses_btime_and_uptime() {
 }
 
 #[test]
-fn interface_added_removed_or_reset_cannot_spike() {
+fn interface_churn_rates_over_common_interfaces() {
     let mut r = Reducer::default();
     sample(&mut r, "2", &[]);
     let added = format!("{SECOND_NET}\n{}", netrow("eth1", 999, 999));
-    assert_eq!(rates(&sample(&mut r, "4", &[("netdev", &added, 0)])), (None, None));
-    assert_eq!(rates(&sample(&mut r, "6", &[("netdev", THIRD_NET, 0)])), (None, None));
+    assert_eq!(rates(&sample(&mut r, "4", &[("netdev", &added, 0)])), (Some(30.0), Some(15.0)));
+    assert_eq!(rates(&sample(&mut r, "6", &[("netdev", THIRD_NET, 0)])), (Some(20.0), Some(5.0)));
     assert_eq!(rates(&sample(&mut r, "8", &[("netdev", BASE_NET, 0)])), (None, None));
-    assert_eq!(rates(&sample(&mut r, "10", &[("netdev", SECOND_NET, 0)])), (Some(30.0), Some(15.0)));
+    let replaced = netrow("eth9", 999, 999);
+    assert_eq!(rates(&sample(&mut r, "10", &[("netdev", &replaced, 0)])), (None, None));
 }
 
 #[test]
@@ -391,7 +392,7 @@ __TFM_{N}_V1_END__"));
         assert_eq!(map["en0"], [3342652065, 2440182655]);
     }
     #[test]
-    fn darwin_network_rate_uses_local_exec_start_and_resets_on_interface_change() {
+    fn darwin_network_rate_uses_local_exec_start_and_common_interfaces() {
         let start = std::time::Instant::now();
         let cadence = crate::ssh::metrics::sampler::CADENCE;
         let mut r = Reducer::default();
@@ -400,7 +401,7 @@ __TFM_{N}_V1_END__"));
         let m = read(&s, &mut r, start + cadence);
         assert_eq!(avail(&m.net_up).bytes_per_second, Some(1000.0 / cadence.as_secs_f64()));
         let s = s.replace("en0 ", "new0 ");
-        assert_eq!(avail(&read(&s, &mut r, start + cadence * 2).net_up).bytes_per_second, None);
+        assert_eq!(avail(&read(&s, &mut r, start + cadence * 2).net_up).bytes_per_second, Some(0.0));
     }
     #[test]
     fn darwin_reboot_resets_baselines() {

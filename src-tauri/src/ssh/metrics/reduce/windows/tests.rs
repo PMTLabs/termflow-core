@@ -102,16 +102,26 @@ fn windows_network_rate_uses_qpc_delta_not_nominal_cadence() {
     );
 }
 
+fn adapter_frame(reducer: &mut Reducer, index: u64, rows: &str) -> Metrics {
+    let hz = 10_000_000;
+    let ticks = (100 + index * 2 * CADENCE.as_secs()) * hz;
+    let text = section_data(CAPTURE, "winOs", &format!("uptimeTicks {ticks}\ntickFrequency {hz}"));
+    capture(reducer, &section_data(&text, "winNet", rows))
+}
+
 #[test]
-fn windows_instance_set_change_resets_baseline() {
+fn windows_rates_over_common_adapters() {
     let mut reducer = Reducer::default();
-    frame(&mut reducer, 0, 0, "A", 100);
-    assert_eq!(rate(&frame(&mut reducer, 1, 1, "B", 110).net_down), None);
-    assert_eq!(rate(&frame(&mut reducer, 2, 2, "B", 10).net_down), None);
-    assert_eq!(
-        rate(&frame(&mut reducer, 3, 3, "B", 10 + 4 * CADENCE.as_secs()).net_down),
-        Some(2.0)
-    );
+    let step = 2 * CADENCE.as_secs();
+    adapter_frame(&mut reducer, 0, "100 200 A");
+    let added = adapter_frame(&mut reducer, 1, &format!("{} {} A\n9999 9999 B", 100 + step, 200 + 2 * step));
+    assert_eq!((rate(&added.net_down), rate(&added.net_up)), (Some(1.0), Some(2.0)));
+    let removed = adapter_frame(&mut reducer, 2, &format!("{} {} A", 100 + 4 * step, 200 + 6 * step));
+    assert_eq!((rate(&removed.net_down), rate(&removed.net_up)), (Some(3.0), Some(4.0)));
+    let decreased = adapter_frame(&mut reducer, 3, "10 20 A");
+    assert_eq!((rate(&decreased.net_down), rate(&decreased.net_up)), (None, None));
+    let replaced = adapter_frame(&mut reducer, 4, "9999 9999 B");
+    assert_eq!((rate(&replaced.net_down), rate(&replaced.net_up)), (None, None));
 }
 
 #[test]
