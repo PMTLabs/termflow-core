@@ -283,8 +283,8 @@ test('tagged_grid_ignores_ssh_state_samples_and_preferences', async () => {
       session('connecting');
     }, 'Connecting');
     await step(() => session('connected'), 'Collecting first sample');
-    await step(() => publish(null, 1), 'Network upload: …');
-    await step(() => publish(3200, 1), 'Network upload: 3.2KB/s');
+    await step(() => publish(null, 1), '↑ …');
+    await step(() => publish(3200, 1), '↑ 3.2KB/s');
     await step(() => dispatch(sshMetricsDisarmed(terminalId)), 'Metrics delayed');
     await step(() => dispatch(sshMetricsUnavailable({ terminalId, reason: 'Sampler unavailable' })), 'Metrics unavailable');
     await step(() => dispatch(sshMetricsControlled({ terminalId, generation: 1, pauseSeq: 1, pausedReason: 'Metrics paused' })), 'Metrics paused');

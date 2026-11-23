@@ -124,7 +124,7 @@ fn encode(
                 let path = launch.payload.as_ref().unwrap().1.path();
                 let path = windows::literal_path(&path)?;
                 let source = format!("[IO.File]::ReadAllText({})", ps_quote(path)?);
-                Ok(ps_launch(&source, false))
+                Ok(ps_launch(&source))
             }
             (Some(false), _) => {
                 windows::literal_path(root.path())?;
@@ -146,7 +146,8 @@ fn encode(
                     ""
                 };
                 let proxy = if posix_proxy { "/usr/bin/env SHELL=/bin/sh " } else { "" };
-                Ok(format!("{prefix}command {proxy}{literal}"))
+                // First erase this line's own echo back to the ready hook's saved cursor.
+                Ok(format!("builtin printf '\\033%s\\033[1G\\033[J' 8; {prefix}command {proxy}{literal}"))
             }
             _ => unreachable!("classified shell"),
         }
@@ -205,10 +206,18 @@ fn ps_quote(path: &str) -> io::Result<String> {
 }
 
 // Inline fixed code works under Restricted. The literal path is used only to
-// read JSON data, not to execute a .ps1 or evaluate its contents.
-fn ps_launch(json_source: &str, echo: bool) -> String {
-    let preview = if echo { "[Console]::WriteLine($data.preview); " } else { "" };
-    format!("& {{ $data = ({json_source}) | ConvertFrom-Json; {preview}\
+// read JSON data, not to execute a .ps1 or evaluate its contents. Its first action
+// restores the cursor the ready hook saved at the prompt start and erases from there,
+// so neither the local prompt nor this echoed command stays on screen. Column 1 first:
+// a prompt theme that saves/restores the cursor itself (a right prompt) can replace
+// that save with one on the same row, after the prompt text.
+// Known limits: if that theme save lands on a later row (a multi-line or wrapped prompt),
+// the rows above it stay. cmd prints its own blank line before each prompt while echo is
+// on, before PROMPT (and so the save) renders; that row stays too. Erasing above the save
+// is not done because it would delete real output whenever that row is not blank.
+fn ps_launch(json_source: &str) -> String {
+    format!("& {{ [Console]::Write([string][char]27 + '8' + [string][char]27 + '[1G' + [string][char]27 + '[J'); \
+        $data = ({json_source}) | ConvertFrom-Json; \
         $si = [System.Diagnostics.ProcessStartInfo]::new(); \
         $si.FileName = $data.exe; $si.UseShellExecute = $false; \
         $si.WorkingDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath; \
@@ -271,7 +280,7 @@ fn cmd_batch(argv: &[String]) -> io::Result<(String, Option<Vec<String>>)> {
             }
             let data = STANDARD.encode(ps_payload(argv)?);
             let source = format!("[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{data}'))");
-            let command = ps_launch(&source, true).encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+            let command = ps_launch(&source).encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
             let arg = STANDARD.encode(command);
             let body = format!("@{} -NoLogo -NoProfile -EncodedCommand {arg}", cmd_exe(&ps)?);
             (body, Some(vec![ps, "-NoLogo".into(), "-NoProfile".into(), "-EncodedCommand".into(), arg]))
@@ -284,8 +293,9 @@ fn cmd_batch(argv: &[String]) -> io::Result<(String, Option<Vec<String>>)> {
         let exe = cmd_exe(&argv[0])?;
         let crt = crt_args(&argv[1..]);
         let args = cmd_escape(&crt);
-        let display = cmd_escape(&format!("{} {crt}", crt_arg(&argv[0])));
-        (format!("@echo {display}\r\n@{exe} {args}"), None)
+        // Restore the hook's saved cursor, erase the prompt and the typed path, then step up
+        // one row so echo's own line break lands back on that row. No command display.
+        (format!("@echo \x1b8\x1b[1G\x1b[J\x1b[1A\r\n@{exe} {args}"), None)
     };
     if body.lines().any(|line| line.len() >= 8191) {
         return Err(adapter_error("SSH argv exceeds the cmd batch command line limit"));

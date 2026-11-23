@@ -4,9 +4,13 @@
   flex: 0 0 26px;
   min-width: 0;
   display: flex;
+  /* Items that do not fit wrap onto a hidden second line, so the lowest-priority (last:
+     Uptime, Users, Partitions, NFS) drop out whole before CPU/RAM would truncate. */
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  padding: 0 8px;
+  align-content: flex-start;
+  gap: 0;
+  padding: 0 2px;
   border-top: 1px solid var(--border-color);
   background: var(--bg-secondary);
   color: var(--text-secondary);
@@ -21,11 +25,28 @@
 }
 
 .ssh-metrics-value,
-.ssh-metrics-state {
+.ssh-metrics-state,
+.ssh-metrics-status-bar > button {
+  box-sizing: border-box;
+  height: 24px;
+  line-height: 24px;
   min-width: 0;
+  padding: 0 8px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* D93: a thin divider between items; CSS only, so screen readers never announce it. */
+.ssh-metrics-status-bar > * + * {
+  border-left: 1px solid color-mix(in srgb, var(--text-secondary) 35%, transparent);
+}
+
+/* Value-first core items never shrink; they wrap out whole instead of ellipsizing. */
+.ssh-metrics-value[data-metric='cpu'],
+.ssh-metrics-value[data-metric='ram'],
+.ssh-metrics-value[data-metric='netUp'],
+.ssh-metrics-value[data-metric='netDown'] { flex: none; }
+.ssh-metrics-value[data-metric='host'] { max-width: 30%; }
 
 .ssh-metrics-state,
 .ssh-metrics-value[data-metric='partitions'],
@@ -36,6 +57,10 @@
 
 .ssh-metrics-status-bar > button {
   flex: none;
+  height: 20px;
+  line-height: 18px;
+  margin: 0 6px;
+  padding: 0 6px;
   color: var(--text-primary);
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
