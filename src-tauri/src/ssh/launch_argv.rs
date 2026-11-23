@@ -204,6 +204,21 @@ impl LaunchArgv {
         self.render(command.as_deref())
     }
 
+    /// The argv a user can run by hand, for the preview's Copy text: the
+    /// native Windows ProxyCommand needs no private payload, but a POSIX jump
+    /// runs a helper that only a real launch publishes, so it has none.
+    /// An error is a native ProxyCommand too long for Windows to run at all.
+    pub fn copyable_argv(&self) -> io::Result<Option<Vec<String>>> {
+        let Some(child) = &self.proxy else { return Ok(Some(self.render(None))) };
+        #[cfg(windows)]
+        return native_proxy_command(child).map(|command| Some(self.render(Some(&command))));
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Ok(None)
+        }
+    }
+
     /// Native Win32-OpenSSH has no payload to publish or retain. Select the
     /// system executable by provenance, not by the basename of a profile tool.
     #[cfg(windows)]

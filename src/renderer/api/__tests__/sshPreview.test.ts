@@ -1,10 +1,10 @@
 import { createSshBridge } from '../sshBridge';
 import type { SshPreview, SshPreviewError } from '../../types/ssh';
 
-test('preview IPC forwards native display and structured validation unchanged', async () => {
+test('preview IPC forwards native shell commands and structured validation unchanged', async () => {
   const preview: SshPreview = {
     argv:['/usr/bin/ssh','-F','none','--','target.test'],
-    display:'"/usr/bin/ssh" "-F" "none" "--" "target.test"',
+    commands:[{ shell:'sh', label:'sh, bash or zsh', text:'/usr/bin/ssh -F none -- target.test' }],
     storeRevision:6, configNotice:'Native, isolated configuration', wrapper:'Direct',
   };
   const error: SshPreviewError = {

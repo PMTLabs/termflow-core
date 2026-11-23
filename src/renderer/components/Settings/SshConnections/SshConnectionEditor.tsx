@@ -3,6 +3,7 @@ import type { SshConnection, SshConnectionInput, SshError, SshPreview, SshPrevie
 import { registerSshEditorGuard } from '../../../services/sshEditorGuard';
 import { parseArgs } from '../../../services/argParse';
 import { ConfirmDialog } from '../../UI/ConfirmDialog';
+import { writeClipboardText } from '../../../utils/clipboard';
 import { SshTestConnectionDialog } from '../../Ssh/SshTestConnectionDialog';
 import { isAllowedSshOption, refreshReadOnly, sshErrorMessage, sshFieldMessage } from './sshErrors';
 function inputOf(c: SshConnection): SshConnectionInput { return { id:c.id, folderId:c.folderId, name:c.name, host:c.host, port:c.port, user:c.user, auth:c.auth, identityFile:c.identityFile, jumpConnectionId:c.jumpConnectionId, extraOptions:c.extraOptions, bookmarked:c.bookmarked }; }
@@ -132,6 +133,11 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
     return () => { current = false; };
   }, [api, previewRequest]);
   const currentPreview = previewResult?.request === previewRequest ? previewResult : undefined;
+  const [showCommand, setShowCommand] = useState(false);
+  const [shell, setShell] = useState<string>();
+  // The text last copied: "Copied" shows only while that exact text is on screen.
+  const [copiedText, setCopiedText] = useState<string>();
+  const commandId = useId();
   const previewErrors = previewRequest.error ? [previewRequest.error] : currentPreview?.errors ?? [];
   // Save-time errors win; otherwise the live preview's field error, worded by code like save() or as the backend sent it.
   const fieldMessage = (name:string):string | undefined => {
@@ -213,6 +219,16 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
   const locked = busy || readOnly || removed;
   const browse = async () => { try { const path = await window.electronAPI?.pickFile?.('Select SSH identity file'); if (path) { clearField('identityFile'); setDraft(value => ({ ...value, identityFile:path })); } } catch (e) { setError({ code:'picker', message:sshErrorMessage(e) }); } };
   const canConnect = !!existing && !!onConnect;
+  const commands = currentPreview?.value?.commands ?? [];
+  const shellIndex = Math.max(0, commands.findIndex(c => c.shell === shell));
+  const command = commands[shellIndex];
+  const toggleCommand = () => setShowCommand(open => !open);
+  const chooseShell = (next:string) => setShell(next);
+  const copy = async () => {
+    if (!command || command.unavailable) return;
+    const text = command.text;
+    try { await writeClipboardText(text); setCopiedText(text); } catch (e) { setError({ code:'copy', message:sshErrorMessage(e) }); }
+  };
   return <div className="ssh-connection-editor">
     {changed && !view.loadError && <div role="alert" className="ssh-conflict">{removed ? 'Deleted elsewhere' : 'Changed elsewhere'} — <button type="button" className="au-btn sm" onClick={() => removed ? onClose() : reset()}>{removed ? 'Close' : 'Reload'}</button>{!removed && <button type="button" className="au-btn sm" onClick={() => { if (existing) { baseline.current = JSON.stringify(inputOf(existing)); setBaseOptions(optionsText(existing)); setDraft(value => ({ ...value, extraOptions:existing.extraOptions })); } setChanged(false); }}>Keep mine</button>}</div>}
     <form ref={form} noValidate onSubmit={event => { event.preventDefault(); void save(); }}>
@@ -232,8 +248,18 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
         {showSavedCredential && <div className="ssh-span-all"><small id={credentialDescription}>Saved credential for the app channel</small>{' '}<button type="button" ref={forgetButton} className="au-btn sm" aria-describedby={credentialDescription} disabled={readOnly || busy} onClick={() => setConfirmForget(true)}>Forget</button></div>}
         <div className="ssh-editor-field ssh-span-2"><label>Jump host<select className="setting-input" name="jumpConnectionId" value={draft.jumpConnectionId ?? ''} {...errorProps('jumpConnectionId')} onChange={event => { clearField('jumpConnectionId'); setDraft({ ...draft, jumpConnectionId:event.target.value || null }); }}><option value="">None</option>{draft.jumpConnectionId && !jumpChoices.some(c => c.id === draft.jumpConnectionId) && <option value={draft.jumpConnectionId} disabled>(unavailable: {draft.jumpConnectionId})</option>}{jumpChoices.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>{fieldError('jumpConnectionId')}</div>
         <div className="ssh-editor-field ssh-span-2"><label>Extra options<input className="setting-input" name="extraOptions" value={options} title={options || undefined} {...errorProps('extraOptions')} onChange={event => { clearField('extraOptions'); setOptions(event.target.value); }} onPaste={event => { if (/[\r\n\u2028\u2029]/.test(event.clipboardData.getData('text'))) { event.preventDefault(); setFieldErrors(errors => ({ ...errors, extraOptions:sshFieldMessage('extraOptions','one-line') })); } }} /><small>Applies to the terminal ssh only</small></label>{fieldError('extraOptions')}</div>
-        <div className={invalidOptions ? 'ssh-argv invalid ssh-span-all' : 'ssh-argv ssh-span-all'} aria-label="Command preview"><strong>Command preview</strong>
-          {invalidOptions ? <small>Fix Extra options to preview the command.</small> : currentPreview?.value && <><code>{currentPreview.value.display}</code><small>{currentPreview.value.wrapper} — {currentPreview.value.configNotice}</small></>}
+        <div className={invalidOptions ? 'ssh-argv invalid ssh-span-all' : 'ssh-argv ssh-span-all'} role="group" aria-label="Command preview">
+          {/* Collapsed by default; problems below stay visible either way so a closed panel never hides an error. */}
+          <button type="button" className="au-btn sm ssh-argv-toggle" aria-expanded={showCommand} aria-controls={commandId} onClick={toggleCommand}><span aria-hidden="true">{showCommand ? '▾' : '▸'}</span> Command preview</button>
+          {invalidOptions && <small>Fix Extra options to preview the command.</small>}
+          {/* The body exists whenever the toggle says expanded, even with nothing to show yet. */}
+          {showCommand && <div id={commandId} className="ssh-argv-body">{!invalidOptions && command && <>
+            {commands.length > 1 && <div role="group" aria-label="Shell" className="au-seg">{commands.map((c,i) => <button type="button" key={c.shell} className={i === shellIndex ? 'on' : undefined} aria-pressed={i === shellIndex} onClick={() => chooseShell(c.shell)}>{c.label}</button>)}</div>}
+            <code>{command.text}</code>
+            <div className="ssh-inline-row"><button type="button" className="au-btn sm" disabled={!!command.unavailable} aria-describedby={command.unavailable ? `${commandId}-why` : undefined} onClick={copy}>Copy</button><span role="status">{copiedText === command.text ? 'Copied' : ''}</span></div>
+            {command.unavailable ? <small id={`${commandId}-why`}>{command.unavailable}</small> : <small>Runs as-is in {command.label}.</small>}
+            <small>{currentPreview!.value!.wrapper} — {currentPreview!.value!.configNotice}</small>
+          </>}</div>}
           {previewErrors.filter(e => !inlineFields.includes(e.field ?? '')).map(e => <small role="alert" key={e.field ?? e.code}>{e.message || e.code}</small>)}
         </div>
         {error && <p role="alert" className="ssh-span-all">{error.message}</p>}

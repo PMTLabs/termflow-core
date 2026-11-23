@@ -69,6 +69,29 @@ pub(crate) fn system_shell(executable: &str) -> std::io::Result<String> {
     path.into_os_string().into_string().map_err(|_| std::io::Error::other("non-Unicode system shell path"))
 }
 
+/// Copy for an absent optional Windows feature; the preview and Connect share it.
+pub(crate) const SSH_CLIENT_MISSING: &str =
+    "Windows OpenSSH Client is not installed. Turn it on in Settings > System > Optional features > OpenSSH Client, then try again.";
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NativeSshClient {
+    /// The system directory could not be resolved.
+    Unavailable,
+    /// The path resolved but the optional OpenSSH Client feature is not installed.
+    Missing,
+}
+
+/// system_shell only builds a path; the OpenSSH Client is an optional feature.
+pub(crate) fn installed_ssh_client(path: std::io::Result<String>) -> Result<String, NativeSshClient> {
+    let path = path.map_err(|_| NativeSshClient::Unavailable)?;
+    if std::path::Path::new(&path).is_file() { Ok(path) } else { Err(NativeSshClient::Missing) }
+}
+
+#[cfg(windows)]
+pub(crate) fn native_ssh_client() -> Result<String, NativeSshClient> {
+    installed_ssh_client(system_shell(r"OpenSSH\ssh.exe"))
+}
+
 pub(crate) fn has_cwd_hook(executable: &str) -> bool {
     posix::is_powershell(executable)
 }

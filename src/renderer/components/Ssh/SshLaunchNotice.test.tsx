@@ -194,3 +194,9 @@ test.each([
   expect([...el.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual([reason]);
   expect(button('Reconnect')).toBeTruthy();
 });
+
+test('a Connect refused for a missing Windows OpenSSH Client shows how to install it', () => {
+  const message = 'Windows OpenSSH Client is not installed. Turn it on in Settings > System > Optional features > OpenSSH Client, then try again.';
+  act(() => root.render(<SshLaunchNotice {...props()} snapshot={{ ...base, stage: 'error', error: { code: 'SshClientMissing', message } }} />));
+  expect([...el.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual([message]);
+});

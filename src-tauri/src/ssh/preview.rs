@@ -20,10 +20,21 @@ pub enum PreviewSource {
 #[serde(rename_all = "camelCase")]
 pub struct Preview {
     argv: Vec<String>,
-    display: String,
+    /// Text for each shell the user may paste into; the first is the default.
+    commands: Vec<ShellCommand>,
     store_revision: u64,
     config_notice: &'static str,
     wrapper: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShellCommand {
+    shell: &'static str,
+    label: &'static str,
+    text: String,
+    /// Why this text cannot be copied and run as-is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +50,15 @@ impl PreviewError {
     }
     fn unsupported() -> Self {
         Self::new("UnsupportedContext", "SSH preview requires native desktop paths.")
+    }
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn native_ssh(error: crate::pty_manager::ssh_shell::NativeSshClient) -> Self {
+        match error {
+            crate::pty_manager::ssh_shell::NativeSshClient::Missing => {
+                Self::new("SshClientMissing", crate::pty_manager::ssh_shell::SSH_CLIENT_MISSING)
+            }
+            crate::pty_manager::ssh_shell::NativeSshClient::Unavailable => Self::unsupported(),
+        }
     }
     fn validation(error: StoreError) -> Self {
         if error.code == "not-found"
@@ -56,8 +76,7 @@ impl PreviewError {
 pub fn connection_preview(store: &Store, source: PreviewSource) -> Result<Preview, PreviewError> {
     preview_in(store, source, || {
         #[cfg(windows)]
-        let executable = crate::pty_manager::ssh_shell::system_shell(r"OpenSSH\ssh.exe")
-            .map_err(|_| PreviewError::unsupported())?;
+        let executable = crate::pty_manager::ssh_shell::native_ssh_client().map_err(PreviewError::native_ssh)?;
         #[cfg(not(windows))]
         let executable = "/usr/bin/ssh".into();
         Ok((executable, native_home()))
@@ -89,16 +108,17 @@ fn preview_in(
     let (ssh, home) = native_paths()?;
     let has_jump = target.hops.len() == 2;
     let trust = preview_trust(&home, has_jump)?;
-    let argv = build_launch_argv(&target, &trust, &ssh, &home)
-        .map_err(PreviewError::validation)?
-        .preview_argv();
-    // Delimit argv unambiguously without pretending this is shell syntax.
-    let display = argv.iter().map(|arg| {
-        serde_json::to_string(arg).expect("a string always serializes")
-    }).collect::<Vec<_>>().join(" ");
+    let plan = build_launch_argv(&target, &trust, &ssh, &home).map_err(PreviewError::validation)?;
+    let argv = plan.preview_argv();
+    let runnable = match plan.copyable_argv() {
+        Ok(Some(argv)) => Ok(argv),
+        Ok(None) => Err(PRIVATE_HELPER),
+        Err(_) => Err(TOO_LONG),
+    };
+    let commands = shell_commands(&argv, runnable.as_deref().map_err(|why| *why), cfg!(windows));
     Ok(Preview {
         argv,
-        display,
+        commands,
         store_revision: snapshot.revision,
         config_notice: "~/.ssh/config does not apply to saved connections. Preview only; trust is not verified here.",
         wrapper: match (has_jump, cfg!(windows)) {
@@ -116,6 +136,123 @@ fn preview_trust(home: &Path, has_jump: bool) -> Result<KnownHostsPaths, Preview
     let path = home.join(".ssh/known_hosts");
     let path = path.to_str().ok_or_else(PreviewError::unsupported)?;
     Ok(KnownHostsPaths { target: path.into(), jump: has_jump.then(|| path.into()) })
+}
+
+const PRIVATE_HELPER: &str =
+    "This jump host runs through a private helper that only TermFlow creates, so the command cannot be run by hand.";
+
+const TOO_LONG: &str = "This jump host command is longer than Windows allows, so it cannot be run by hand.";
+
+/// Quote the runnable argv for each shell the user may paste into. Connect
+/// runs ssh directly with no shell, so the text targets the platform's usual
+/// interactive shells and says which one it is for. Without a runnable argv
+/// the symbolic one is shown with the reason, never as copyable.
+fn shell_commands(symbolic: &[String], runnable: Result<&[String], &'static str>, windows: bool) -> Vec<ShellCommand> {
+    let argv = runnable.unwrap_or(symbolic).iter().map(|arg| readable(arg)).collect::<Vec<_>>();
+    let argv = argv.as_slice();
+    let entry = |shell, label, quoted: Result<String, &'static str>| {
+        let (text, unavailable) = match (runnable, quoted) {
+            (Err(why), Ok(text)) => (text, Some(why)),
+            (Ok(_), Ok(text)) => (text, None),
+            (_, Err(reason)) => (posix_text(argv), Some(reason)),
+        };
+        ShellCommand { shell, label, text, unavailable }
+    };
+    if windows {
+        vec![
+            entry("powershell", "PowerShell", powershell_text(argv)),
+            entry("cmd", "Command Prompt", cmd_text(argv)),
+        ]
+    } else {
+        vec![entry("sh", "sh, bash or zsh", Ok(posix_text(argv)))]
+    }
+}
+
+/// `Key="value"` -> `Key=value` when OpenSSH reads both the same: its option
+/// splitter only needs the quotes for whitespace, quote, comment or escape
+/// characters. The usual known_hosts path then needs no shell-level escaping.
+fn readable(arg: &str) -> String {
+    let unquoted = arg.split_once("=\"").and_then(|(key, rest)| {
+        let value = rest.strip_suffix('"')?;
+        let plain_key = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphabetic());
+        let plain_value = !value.is_empty()
+            && !value.chars().any(|c| c.is_whitespace() || "\"'#\\".contains(c));
+        (plain_key && plain_value).then(|| format!("{key}={value}"))
+    });
+    unquoted.unwrap_or_else(|| arg.into())
+}
+
+fn posix_text(argv: &[String]) -> String {
+    let word = |arg: &String| {
+        let plain = !arg.is_empty()
+            && arg.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c));
+        if plain { arg.clone() } else { format!("'{}'", arg.replace('\'', r"'\''")) }
+    };
+    argv.iter().map(word).collect::<Vec<_>>().join(" ")
+}
+
+/// CommandLineToArgvW spelling, quoted only when the argument needs it.
+fn windows_word(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.into();
+    }
+    crate::pty_manager::ssh_shell::posix::launch::crt_arg(arg)
+}
+
+fn powershell_text(argv: &[String]) -> Result<String, &'static str> {
+    // PowerShell treats the typographic single quotes as quotes too.
+    let literal = |arg: &str| {
+        let mut out = String::from("'");
+        for ch in arg.chars() {
+            if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                out.push(ch);
+            }
+            out.push(ch);
+        }
+        out.push('\'');
+        out
+    };
+    // The usual case reads and edits as a plain call: 5.1 and 7 pass these
+    // words identically. Bare words stay bare; everything else is quoted.
+    let rest = &argv[1..];
+    if !rest.iter().any(|arg| arg.is_empty() || arg.contains('"')) {
+        let word = |arg: &String| {
+            let bare = arg.chars().all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c));
+            if bare { arg.clone() } else { literal(arg) }
+        };
+        let words = rest.iter().map(word).collect::<Vec<_>>();
+        return Ok(format!("& {} {}", literal(&argv[0]), words.join(" ")));
+    }
+    // Windows PowerShell 5.1 passes embedded double quotes unescaped and drops
+    // empty arguments; PowerShell 7.3+ escapes them, and also re-splits and
+    // re-quotes after --%. A single ArgumentList string is the one command line
+    // both hand to ssh.exe verbatim, and nothing expands inside single quotes.
+    let line = rest.iter().map(|arg| windows_word(arg)).collect::<Vec<_>>().join(" ");
+    Ok(format!(
+        "Start-Process -FilePath {} -ArgumentList {} -NoNewWindow -Wait",
+        literal(&argv[0]),
+        literal(&line)
+    ))
+}
+
+fn cmd_text(argv: &[String]) -> Result<String, &'static str> {
+    if argv.iter().any(|arg| arg.contains('%')) {
+        return Err("Command Prompt expands % in a pasted command; use PowerShell.");
+    }
+    let line = argv.iter().map(|arg| windows_word(arg)).collect::<Vec<_>>().join(" ");
+    // cmd flips its quote state at every double quote, escaped or not, and
+    // only treats metacharacters outside quotes as operators.
+    let mut out = String::with_capacity(line.len());
+    let mut quoted = false;
+    for ch in line.chars() {
+        if ch == '"' {
+            quoted = !quoted;
+        } else if !quoted && "^&|<>()".contains(ch) {
+            out.push('^');
+        }
+        out.push(ch);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

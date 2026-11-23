@@ -18,9 +18,10 @@ export interface SshMove { kind: 'folder' | 'connection'; id: string; parentId: 
 export type SshPreviewSource =
   | { kind: 'saved'; id: string }
   | { kind: 'draft'; draft: SshConnectionInput; editingId?: string };
-export interface SshPreview { argv: string[]; display: string; storeRevision: number; configNotice: string; wrapper: string }
+export interface SshShellCommand { shell: string; label: string; text: string; unavailable?: string }
+export interface SshPreview { argv: string[]; commands: SshShellCommand[]; storeRevision: number; configNotice: string; wrapper: string }
 export interface SshPreviewError {
-  code: 'Validation' | 'NotFound' | 'UnsupportedContext' | 'StoreUnavailable' | 'desktop-only';
+  code: 'Validation' | 'NotFound' | 'UnsupportedContext' | 'SshClientMissing' | 'StoreUnavailable' | 'desktop-only';
   message: string;
   fields?: SshError[];
 }
@@ -49,7 +50,7 @@ export interface LaunchAttemptRef {
   ownerIncarnation: import('../services/paneIncarnations').PaneIncarnation;
 }
 export interface LaunchError {
-  code: 'StaleAttempt' | 'NotFound' | 'InputLocked' | 'UnsupportedShell' | 'UnsupportedContext'
+  code: 'StaleAttempt' | 'NotFound' | 'InputLocked' | 'UnsupportedShell' | 'UnsupportedContext' | 'SshClientMissing'
     | 'TrustBlocked' | 'Timeout' | 'WriteFailed' | 'SshExitedBeforeConnecting' | 'TransportClosed' | 'StoreUnavailable' | 'desktop-only';
   message: string;
 }
