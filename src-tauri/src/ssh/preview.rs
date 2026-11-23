@@ -110,7 +110,12 @@ fn preview_in(
     let trust = preview_trust(&home, has_jump)?;
     let plan = build_launch_argv(&target, &trust, &ssh, &home).map_err(PreviewError::validation)?;
     let argv = plan.preview_argv();
-    let commands = shell_commands(&argv, plan.copyable_argv().as_deref(), cfg!(windows));
+    let runnable = match plan.copyable_argv() {
+        Ok(Some(argv)) => Ok(argv),
+        Ok(None) => Err(PRIVATE_HELPER),
+        Err(_) => Err(TOO_LONG),
+    };
+    let commands = shell_commands(&argv, runnable.as_deref().map_err(|why| *why), cfg!(windows));
     Ok(Preview {
         argv,
         commands,
@@ -136,15 +141,18 @@ fn preview_trust(home: &Path, has_jump: bool) -> Result<KnownHostsPaths, Preview
 const PRIVATE_HELPER: &str =
     "This jump host runs through a private helper that only TermFlow creates, so the command cannot be run by hand.";
 
+const TOO_LONG: &str = "This jump host command is longer than Windows allows, so it cannot be run by hand.";
+
 /// Quote the runnable argv for each shell the user may paste into. Connect
 /// runs ssh directly with no shell, so the text targets the platform's usual
-/// interactive shells and says which one it is for.
-fn shell_commands(symbolic: &[String], runnable: Option<&[String]>, windows: bool) -> Vec<ShellCommand> {
+/// interactive shells and says which one it is for. Without a runnable argv
+/// the symbolic one is shown with the reason, never as copyable.
+fn shell_commands(symbolic: &[String], runnable: Result<&[String], &'static str>, windows: bool) -> Vec<ShellCommand> {
     let argv = runnable.unwrap_or(symbolic);
     let entry = |shell, label, quoted: Result<String, &'static str>| {
         let (text, unavailable) = match (runnable, quoted) {
-            (None, Ok(text)) => (text, Some(PRIVATE_HELPER)),
-            (_, Ok(text)) => (text, None),
+            (Err(why), Ok(text)) => (text, Some(why)),
+            (Ok(_), Ok(text)) => (text, None),
             (_, Err(reason)) => (posix_text(argv), Some(reason)),
         };
         ShellCommand { shell, label, text, unavailable }

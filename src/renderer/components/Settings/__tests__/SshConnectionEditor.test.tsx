@@ -122,6 +122,11 @@ test('preview problems stay visible while the command is collapsed', async () =>
   await change('extraOptions','NotAnOption=1');
   expect(toggle().getAttribute('aria-expanded')).toBe('false');
   expect(region.textContent).toContain('Fix Extra options to preview the command.');
+  // Expanded with nothing to show: aria-controls still names a rendered body, and no command or Copy appears.
+  await act(async () => toggle().click());
+  expect(document.getElementById(toggle().getAttribute('aria-controls')!)).toBe(region.querySelector('.ssh-argv-body'));
+  expect(region.querySelector('code')).toBeNull();
+  expect([...region.querySelectorAll('button')].some(b => b.textContent === 'Copy')).toBe(false);
 });
 
 test('structured host error renders under Host', async () => { save.mockRejectedValue({ field:'host',code:'leading-dash' }); render(true); await submit(); const field = host.querySelector('input[name="host"]')!; expect(document.getElementById(field.getAttribute('aria-describedby')!)?.textContent).toBe("Host can't start with “-”."); });

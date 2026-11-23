@@ -113,7 +113,7 @@ fn windows_copy_text_is_powershell_then_cmd_and_survives_both_powershell_edition
     // Embedded quotes, spaces, an empty argument, ' and the typographic quote
     // PowerShell also treats as a quote all go through it.
     let argv = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a b/known_hosts\"", "-l", "it's", "-o", "X=a&b|c%PATH%\u{2019}", "", "--", "h"]);
-    let commands = shell_commands(&argv, Some(&argv), true);
+    let commands = shell_commands(&argv, Ok(&argv), true);
     assert_eq!(commands.iter().map(|c| c.shell).collect::<Vec<_>>(), ["powershell", "cmd"]);
     assert_eq!(commands[0].text, format!(
         r#"Start-Process -FilePath '{ssh}' -ArgumentList '-o "UserKnownHostsFile=\"C:/a b/known_hosts\"" -l it''s -o X=a&b|c%PATH%’’ "" -- h' -NoNewWindow -Wait"#));
@@ -122,7 +122,7 @@ fn windows_copy_text_is_powershell_then_cmd_and_survives_both_powershell_edition
     assert!(commands[1].unavailable.unwrap().contains("Command Prompt expands %"));
 
     let argv = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a b/known_hosts\"", "-o", "X=a&b", "", "--", "h"]);
-    let commands = shell_commands(&argv, Some(&argv), true);
+    let commands = shell_commands(&argv, Ok(&argv), true);
     // cmd flips quote state at every ", so only the & outside quotes is escaped.
     assert_eq!(commands[1].text, format!(
         r#"{ssh} -o "UserKnownHostsFile=\"C:/a b/known_hosts\"" -o X=a^&b "" -- h"#));
@@ -133,14 +133,14 @@ fn windows_copy_text_is_powershell_then_cmd_and_survives_both_powershell_edition
 fn copy_text_that_cannot_run_unchanged_says_why_instead() {
     let ssh = r"C:\ssh.exe";
     let pipe = args(&[ssh, "-o", "UserKnownHostsFile=\"C:/a|b/kh\"", "--", "h"]);
-    let commands = shell_commands(&pipe, Some(&pipe), true);
+    let commands = shell_commands(&pipe, Ok(&pipe), true);
     assert!(commands.iter().all(|c| c.unavailable.is_none()));
     // cmd sees the quotes closed after \" so the | there is escaped.
     assert_eq!(commands[1].text, r#"C:\ssh.exe -o "UserKnownHostsFile=\"C:/a^|b/kh\"" -- h"#);
 
     // No runnable argv (a POSIX jump): show the symbolic text, but never as copyable.
     let symbolic = args(&["/usr/bin/ssh", "-o", "ProxyCommand=/bin/sh '<private-proxy-helper>'", "--", "h"]);
-    let commands = shell_commands(&symbolic, None, false);
+    let commands = shell_commands(&symbolic, Err(PRIVATE_HELPER), false);
     assert_eq!(commands.len(), 1);
     assert_eq!(commands[0].unavailable, Some(PRIVATE_HELPER));
 }
@@ -148,7 +148,7 @@ fn copy_text_that_cannot_run_unchanged_says_why_instead() {
 #[test]
 fn posix_copy_text_single_quotes_only_what_needs_it() {
     let argv = args(&["/usr/bin/ssh", "-F", "none", "-o", "UserKnownHostsFile=\"/home/a b/kh\"", "-l", "it's", "", "--", "user@host.test"]);
-    let commands = shell_commands(&argv, Some(&argv), false);
+    let commands = shell_commands(&argv, Ok(&argv), false);
     assert_eq!((commands[0].shell, commands[0].unavailable), ("sh", None));
     assert_eq!(commands[0].text,
         r#"/usr/bin/ssh -F none -o 'UserKnownHostsFile="/home/a b/kh"' -l 'it'\''s' '' -- user@host.test"#);
@@ -171,4 +171,19 @@ fn missing_windows_openssh_client_has_its_own_code_and_instructions() {
     fs::write(&present, "").unwrap();
     let present = present.to_string_lossy().into_owned();
     assert_eq!(installed_ssh_client(Ok(present.clone())), Ok(present));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_jump_command_too_long_for_windows_says_so_not_private_helper() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let saved = store.transact(|s| s.upsert_connection(input("bastion.test")), |_| {}).unwrap();
+    let mut draft = input("draft.test");
+    draft.jump_connection_id = Some(saved.view.connections[0].id.clone());
+    // The known_hosts path appears in the ProxyCommand, so a long home overflows its 32,767 limit.
+    let home = PathBuf::from(format!(r"C:\{}", "h".repeat(33_000)));
+    let source = PreviewSource::Draft { draft: Box::new(draft), editing_id: None };
+    let jump = preview_in(&store, source, || Ok((r"C:\ssh.exe".into(), home))).unwrap();
+    assert!(jump.commands.iter().all(|c| c.unavailable == Some(TOO_LONG)), "{:?}", jump.commands.iter().map(|c| c.unavailable).collect::<Vec<_>>());
 }

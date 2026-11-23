@@ -252,13 +252,14 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
           {/* Collapsed by default; problems below stay visible either way so a closed panel never hides an error. */}
           <button type="button" className="au-btn sm ssh-argv-toggle" aria-expanded={showCommand} aria-controls={commandId} onClick={toggleCommand}><span aria-hidden="true">{showCommand ? '▾' : '▸'}</span> Command preview</button>
           {invalidOptions && <small>Fix Extra options to preview the command.</small>}
-          {showCommand && !invalidOptions && command && <div id={commandId} className="ssh-argv-body">
+          {/* The body exists whenever the toggle says expanded, even with nothing to show yet. */}
+          {showCommand && <div id={commandId} className="ssh-argv-body">{!invalidOptions && command && <>
             {commands.length > 1 && <div role="group" aria-label="Shell" className="au-seg">{commands.map((c,i) => <button type="button" key={c.shell} className={i === shellIndex ? 'on' : undefined} aria-pressed={i === shellIndex} onClick={() => chooseShell(c.shell)}>{c.label}</button>)}</div>}
             <code>{command.text}</code>
             <div className="ssh-inline-row"><button type="button" className="au-btn sm" disabled={!!command.unavailable} aria-describedby={command.unavailable ? `${commandId}-why` : undefined} onClick={copy}>Copy</button><span role="status">{copiedText === command.text ? 'Copied' : ''}</span></div>
             {command.unavailable ? <small id={`${commandId}-why`}>{command.unavailable}</small> : <small>Runs as-is in {command.label}.</small>}
             <small>{currentPreview!.value!.wrapper} — {currentPreview!.value!.configNotice}</small>
-          </div>}
+          </>}</div>}
           {previewErrors.filter(e => !inlineFields.includes(e.field ?? '')).map(e => <small role="alert" key={e.field ?? e.code}>{e.message || e.code}</small>)}
         </div>
         {error && <p role="alert" className="ssh-span-all">{error.message}</p>}

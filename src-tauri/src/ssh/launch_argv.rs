@@ -207,14 +207,15 @@ impl LaunchArgv {
     /// The argv a user can run by hand, for the preview's Copy text: the
     /// native Windows ProxyCommand needs no private payload, but a POSIX jump
     /// runs a helper that only a real launch publishes, so it has none.
-    pub fn copyable_argv(&self) -> Option<Vec<String>> {
-        let Some(child) = &self.proxy else { return Some(self.render(None)) };
+    /// An error is a native ProxyCommand too long for Windows to run at all.
+    pub fn copyable_argv(&self) -> io::Result<Option<Vec<String>>> {
+        let Some(child) = &self.proxy else { return Ok(Some(self.render(None))) };
         #[cfg(windows)]
-        return native_proxy_command(child).ok().map(|command| self.render(Some(&command)));
+        return native_proxy_command(child).map(|command| Some(self.render(Some(&command))));
         #[cfg(not(windows))]
         {
             let _ = child;
-            None
+            Ok(None)
         }
     }
 
