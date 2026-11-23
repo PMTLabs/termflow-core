@@ -63,17 +63,23 @@ the sanitized bytes independently and fill the literal oracles
 ## Windows
 
 `windows.txt`: **local console capture; sshd capture pending live test**.
-Windows 11 Pro 10.0.26300, Windows PowerShell 5.1, non-elevated console.
-The final collector and committed gzip payload were run using the production
-UTF-16LE bootstrap under `cmd.exe /d /c` (6,546 command bytes). Stdout was
+Windows 11 Pro 10.0.26300.9974, Windows PowerShell 5.1, local console.
+The WMI-free collector ran through the production UTF-16LE bootstrap under
+`cmd.exe /d /c` (6,886 command bytes). Stdout was
 captured with LF line endings. Host, users, adapter names (including the
 brackets and numbered suffixes), and the UNC host/share were pseudonymized;
 the measurements and section statuses were not changed. A mapped network
 drive in the console is not evidence of a mapping in the sshd logon session.
 
-The `windows-*.txt` variants are derived, not additional captures: CRLF,
-no quser (127), an empty Size drive, watchdog (137), and an escaped Unicode
-hostname. The latter includes a UTF-16 surrogate pair.
+An sshd capture as a non-admin user will be added by the orchestrator.
+`windows-clm.txt` is a separate local capture: the child used
+`__PSLockdownPolicy=4` and explicitly entered Constrained Language Mode when
+retail PowerShell ignored that variable. Output was ASCII with LF endings;
+host, architecture, registry OS and available quser data survived.
+
+The other variants are derived: CRLF, no quser (127), users denied (126),
+an empty Size drive, watchdog (137), and an escaped Unicode hostname (including
+a UTF-16 surrogate pair).
 
 Windows collection uses the same ten-second cadence and five-second deadline.
 The first tick tries POSIX; a framing-free command failure can move Windows

@@ -1,4 +1,3 @@
-# Windows PowerShell 5.1. Stdout is a nonce-framed ASCII stream, not PS formatting.
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $p="__TFM_$($args[0])_"
@@ -7,76 +6,91 @@ $o=[Console]::Out
 function Escape([string]$s){
     [regex]::Replace($s,'[^ -~]|\\',{param($m) '\u{0:x4}' -f [int][char]$m.Value})
 }
-function S($key,[scriptblock]$body){
+function S($key,$body){
     $o.Write("${p}SECTION_${key}_BEGIN__`n")
     $script:rc=0
-    try { foreach($row in @(& $body)){ $o.Write("$(Escape $row)`n") } }
+    try { & $body | ForEach-Object { $o.Write("$(Escape $_)`n") } }
     catch {
         $script:rc=1
-        for($e=$_.Exception;$e;$e=$e.InnerException){
-            if($e -is [UnauthorizedAccessException] -or ($e -is [Management.ManagementException] -and $e.ErrorCode -eq 'AccessDenied')){ $script:rc=126;break }
+        if($_.FullyQualifiedErrorId -match 'ConstrainedLanguage|NotAllowedInRestrictedLanguage|BlockedByPolicy|PSSecurityException'){
+            $script:rc=126
+            $o.Write("blocked 1`n")
         }
     }
     $o.Write("${p}SECTION_${key}_END_${script:rc}__`n")
 }
-function Q($sql){
-    $ErrorActionPreference='Stop'
-    $s=[Management.ManagementObjectSearcher]::new('root\cimv2',$sql)
-    $s.Options.Timeout=[TimeSpan]::FromSeconds(2)
-    $s.Options.ReturnImmediately=$false
-    try { $r=$s.Get();try { foreach($item in $r){ $item } } finally { $r.Dispose() } }
-    finally { $s.Dispose() }
+function Native {
+    if($script:K){return}
+    if($script:nativeError){throw $script:nativeError}
+    try{
+    $started=[Diagnostics.Stopwatch]::GetTimestamp()
+    $a=[AppDomain]::CurrentDomain.DefineDynamicAssembly((New-Object Reflection.AssemblyName Tfm),[Reflection.Emit.AssemblyBuilderAccess]::Run)
+    $t=$a.DefineDynamicModule('Tfm').DefineType('TfmNative','Public,Class')
+    $r=[uint64].MakeByRefType()
+    foreach($name in 'GetSystemTimes','GlobalMemoryStatusEx'){
+        $types=if($name -eq 'GetSystemTimes'){@($r,$r,$r)}else{@([uint64[]])}
+        $m=$t.DefinePInvokeMethod($name,'kernel32.dll','Public,Static,PinvokeImpl','Standard',[bool],[type[]]$types,'Winapi','Auto')
+        $m.SetImplementationFlags('PreserveSig')
+    }
+    $script:K=$t.CreateType()
+    }catch{$script:nativeError=$_;throw}
+    if($env:TFM_TIMING -eq '1'){
+        [Console]::Error.WriteLine("define_ms $(([Diagnostics.Stopwatch]::GetTimestamp()-$started)*1000/[Diagnostics.Stopwatch]::Frequency)")
+    }
 }
 $o.Write("${p}V1_BEGIN__`n")
-S platform { 'Windows' }
-S hostname { [Environment]::MachineName }
-S architecture { $env:PROCESSOR_ARCHITECTURE }
+S platform {'Windows'}
+S hostname {[Environment]::MachineName}
+S architecture {$env:PROCESSOR_ARCHITECTURE}
 S winOs {
-    $x=Q 'SELECT Caption,Version,TotalVisibleMemorySize,FreePhysicalMemory,LastBootUpTime,LocalDateTime FROM Win32_OperatingSystem' | Select-Object -First 1
-    if(!$x){ throw 'Missing OS counters' }
-    "caption $($x.Caption)";"version $($x.Version)"
-    "totalKiB $($x.TotalVisibleMemorySize)";"freeKiB $($x.FreePhysicalMemory)"
-    "boot $($x.LastBootUpTime)";"now $($x.LocalDateTime)"
+    $v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $n=$v.ProductName
+    if([int]$v.CurrentBuild -ge 22000){$n=$n -replace '^Windows 10','Windows 11'}
+    "caption $n";"version 10.0.$($v.CurrentBuild).$($v.UBR)"
+    "uptimeTicks $([Diagnostics.Stopwatch]::GetTimestamp())";"tickFrequency $([Diagnostics.Stopwatch]::Frequency)"
+    Native
+    $b=New-Object 'uint64[]' 8;$b[0]=64
+    if(!$K::GlobalMemoryStatusEx($b)){throw 'memory'}
+    "totalBytes $($b[1])";"availBytes $($b[2])"
 }
 S winCpu {
-    $x=Q "SELECT PercentIdleTime,Timestamp_Sys100NS FROM Win32_PerfRawData_PerfOS_Processor WHERE Name='_Total'" | Select-Object -First 1
-    if(!$x){ throw 'Missing CPU counters' }
-    "idle100ns $($x.PercentIdleTime)";"stamp100ns $($x.Timestamp_Sys100NS)"
-    "cores $([Environment]::ProcessorCount)"
+    Native
+    $i=$kernel=$u=[uint64]0
+    if(!$K::GetSystemTimes([ref]$i,[ref]$kernel,[ref]$u)){throw 'cpu'}
+    "idle100ns $i";"kernel100ns $kernel";"user100ns $u";"cores $([Environment]::ProcessorCount)"
 }
 S winNet {
-    Q 'SELECT Name,BytesReceivedPersec,BytesSentPersec,Timestamp_Sys100NS FROM Win32_PerfRawData_Tcpip_NetworkInterface' | ForEach-Object {
-        "$($_.BytesReceivedPersec) $($_.BytesSentPersec) $($_.Timestamp_Sys100NS) $($_.Name)"
+    foreach($n in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()){
+        if($n.NetworkInterfaceType -eq 'Loopback'){continue}
+        $b=$n.GetIPStatistics()
+        "$($b.BytesReceived) $($b.BytesSent) $($n.Name)"
     }
 }
 S winUsers {
-    $q=Join-Path $env:SystemRoot 'System32\quser.exe'
-    if(!(Test-Path $q)){ $script:rc=127;return }
+    $q="$env:SystemRoot\System32\quser.exe"
+    if(!(Test-Path $q)){$script:rc=127;return}
     $lines=& $q 2>$null
-    if($LASTEXITCODE -ne 0){ $script:rc=1;return }
+    if($LASTEXITCODE){$script:rc=1;return}
     $lines
 }
+$drives={foreach($d in [IO.DriveInfo]::GetDrives()){if($d.DriveType -eq $args[0]){$d}}}
 S winDisks {
-    Q 'SELECT DeviceID,Size,FreeSpace,FileSystem FROM Win32_LogicalDisk WHERE DriveType=3' | ForEach-Object {
-        "$($_.DeviceID)`t$($_.Size)`t$($_.FreeSpace)`t$($_.FileSystem)"
+    foreach($d in (& $drives Fixed)){
+        try{if($d.IsReady){"$($d.Name.TrimEnd('\'))`t$($d.TotalSize)`t$($d.TotalFreeSpace)`t$($d.DriveFormat)"}}catch{}
     }
 }
 S winNetDrives {
-    $drives=@(Q 'SELECT DeviceID,ProviderName FROM Win32_LogicalDisk WHERE DriveType=4')
-    if(!$drives.Count){ return }
-    # Do not dispose a timed-out runspace: disposal can wait on the share.
+    $paths=@{}
+    foreach($d in (& $drives Network)){
+        $letter=$d.Name[0];$paths[$d.Name]=(Get-ItemProperty "HKCU:\Network\$letter" -ErrorAction SilentlyContinue).RemotePath
+    }
+    if(!$paths.Count){return}
     $ps=[PowerShell]::Create()
-    $job=$ps.AddScript('param($q,$sql) & ([scriptblock]::Create($q)) $sql').AddArgument(${function:Q}.ToString()).AddArgument('SELECT DeviceID,Size,FreeSpace FROM Win32_LogicalDisk WHERE DriveType=4').BeginInvoke()
-    if(!$job.AsyncWaitHandle.WaitOne(2000)){ $script:rc=137;return }
-    try {
-        $usage=@{}
-        foreach($x in $ps.EndInvoke($job)){ $usage[$x.DeviceID]=$x }
-        foreach($x in $drives){
-            $u=$usage[$x.DeviceID]
-            "$($x.DeviceID)`t$($u.Size)`t$($u.FreeSpace)`t$($x.ProviderName)"
-        }
-    } finally { $ps.Dispose() }
+    $job=$ps.AddScript({param($names) foreach($n in $names){try{$d=[IO.DriveInfo]::new($n);@{n=$n;s=$d.TotalSize;f=$d.TotalFreeSpace}}catch{}}}).AddArgument(@($paths.Keys)).BeginInvoke()
+    if(!$job.AsyncWaitHandle.WaitOne(2000)){$script:rc=137;return}
+    try{foreach($d in $ps.EndInvoke($job)){"$($d.n.TrimEnd('\'))`t$($d.s)`t$($d.f)`t$($paths[$d.n])"}}finally{$ps.Dispose()}
 }
 $o.Write("${p}V1_END__`n")
 $o.Flush()
+if($env:TFM_TIMING -eq '1'){[Console]::Error.WriteLine("cpu_ms $((Get-Process -Id $PID).TotalProcessorTime.TotalMilliseconds)")}
 [Environment]::Exit(0)

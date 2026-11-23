@@ -1,27 +1,28 @@
 //! Typed rows emitted by the Windows PowerShell collector.
 use super::{decimal, display, MountUsage, RawSample, Reading, Section, FIELD_LIMIT};
 use crate::ssh::metrics::model::Users;
-use chrono::{FixedOffset, NaiveDate, TimeZone};
 use std::collections::{BTreeMap, BTreeSet};
 
 const BAD: &str = "Invalid Windows metrics fields";
+pub(in crate::ssh::metrics) const BLOCKED: &str = "Blocked by PowerShell language mode or policy";
+const USERS_DENIED: &str = "Signed-in users require an administrator account on Windows";
 const WATCHDOG: &str = "Network drive usage watchdog expired";
 
 pub(super) fn populate(sample: &mut RawSample<'_>) {
     let sections = &sample.sections;
     sample.hostname = metadata(&sections["hostname"]);
     sample.architecture = metadata(&sections["architecture"]);
-    sample.os = fields(sections["winOs"].rows()).and_then(|fields| {
+    sample.os = os_fields(&sections["winOs"]).and_then(|fields| {
         let (caption, version) = (value(&fields, "caption")?, value(&fields, "version")?);
         Ok(display(&format!("{caption} {version}")))
     });
-    sample.local = disks(sections["winDisks"].rows(), false);
+    sample.local = disks(section_rows(&sections["winDisks"]), false);
     let drives = &sections["winNetDrives"];
     sample.nfs_watchdog_expired = matches!(drives.exit, 124 | 137);
     sample.nfs = if sample.nfs_watchdog_expired {
         Err(WATCHDOG)
     } else {
-        disks(drives.rows(), true)
+        disks(section_rows(drives), true)
     };
 }
 
@@ -97,48 +98,52 @@ pub(in crate::ssh::metrics) fn number<T: std::str::FromStr>(
     decimal(value(fields, key)?).ok_or(BAD)
 }
 
-/// DMTF yyyymmddHHMMSS.ffffff±mmm, as UTC microseconds. Wildcards are not valid readings.
-pub(in crate::ssh::metrics) fn dmtf(s: &str) -> Reading<i64> {
-    if s.len() != 25 || !s.is_ascii() || s.as_bytes()[14] != b'.' {
-        return Err(BAD);
-    }
-    let direction = match s.as_bytes()[21] {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return Err(BAD),
-    };
-    let offset =
-        FixedOffset::east_opt(direction * decimal::<i32>(&s[22..]).ok_or(BAD)? * 60).ok_or(BAD)?;
-    let date = NaiveDate::from_ymd_opt(
-        decimal(&s[..4]).ok_or(BAD)?,
-        decimal(&s[4..6]).ok_or(BAD)?,
-        decimal(&s[6..8]).ok_or(BAD)?,
-    )
-    .filter(|_| &s[..4] != "0000")
-    .ok_or(BAD)?;
-    let time = date
-        .and_hms_micro_opt(
-            decimal(&s[8..10]).ok_or(BAD)?,
-            decimal(&s[10..12]).ok_or(BAD)?,
-            decimal(&s[12..14]).ok_or(BAD)?,
-            decimal(&s[15..21]).ok_or(BAD)?,
-        )
-        .ok_or(BAD)?;
-    Ok(offset
-        .from_local_datetime(&time)
-        .single()
-        .ok_or(BAD)?
-        .timestamp_micros())
+pub(in crate::ssh::metrics) fn blocked(section: &Section<'_>) -> bool {
+    section.exit == 126
+        && section
+            .rows
+            .as_ref()
+            .is_ok_and(|rows| rows.contains(&"blocked 1"))
 }
 
-pub(in crate::ssh::metrics) type PerfRows = BTreeMap<String, [u64; 3]>; // RX, TX, stamp (100 ns)
+pub(in crate::ssh::metrics) fn section_rows<'a, 'b>(
+    section: &'a Section<'b>,
+) -> Reading<&'a [&'b str]> {
+    if blocked(section) {
+        Err(BLOCKED)
+    } else {
+        section.rows()
+    }
+}
+
+// The collector emits registry and clock rows before attempting native RAM.
+pub(in crate::ssh::metrics) fn os_fields<'a>(
+    section: &Section<'a>,
+) -> Reading<BTreeMap<&'a str, String>> {
+    let rows = if section.exit == 1 || blocked(section) {
+        section.rows.as_deref().map_err(|&reason| reason)
+    } else {
+        section.rows()
+    };
+    fields(rows)
+}
+
+pub(in crate::ssh::metrics) fn users_section(section: &Section<'_>) -> Reading<Users> {
+    if matches!(section.exit, 1 | 126) {
+        Err(USERS_DENIED)
+    } else {
+        users(section.rows())
+    }
+}
+
+pub(in crate::ssh::metrics) type PerfRows = BTreeMap<String, [u64; 2]>; // RX, TX
 
 pub(in crate::ssh::metrics) fn perf_rows(rows: Reading<&[&str]>) -> Reading<PerfRows> {
     let mut counters = BTreeMap::new();
     for row in rows? {
         let decoded = unescape(row)?;
         let mut rest = decoded.as_str();
-        let mut values = [0; 3];
+        let mut values = [0; 2];
         for value in &mut values {
             let (head, tail) = rest.split_once(' ').ok_or(BAD)?;
             *value = decimal(head).ok_or(BAD)?;
@@ -195,7 +200,7 @@ fn disks(rows: Reading<&[&str]>, remote: bool) -> Reading<Vec<MountUsage>> {
             return Err(BAD);
         }
         disks.push(MountUsage {
-            source: if remote {
+            source: if remote && !detail.is_empty() {
                 display(detail)
             } else {
                 drive.into()

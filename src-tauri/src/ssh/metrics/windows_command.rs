@@ -15,17 +15,46 @@ fn encode(nonce: &str) -> Option<String> {
     if !valid_nonce(nonce) {
         return None;
     }
-    let gz = PAYLOAD.trim_end();
-    let bootstrap = format!(concat!(
-        "&([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.Compression.GzipStream(",
-        "(New-Object IO.MemoryStream(,[Convert]::FromBase64String('{gz}'))),",
-        "[IO.Compression.CompressionMode]::Decompress)))).ReadToEnd())) '{nonce}'",
-    ), gz = gz, nonce = nonce);
+    Some(encode_bootstrap(&bootstrap(nonce)?))
+}
+
+fn bootstrap(nonce: &str) -> Option<String> {
+    let gz = STANDARD.decode(PAYLOAD.trim_end()).ok()?;
+    // The outer command must fit cmd.exe. Pack 15 gzip bits per UTF-16
+    // code unit in a range with no surrogates, quotes or line terminators.
+    let mut packed = String::new();
+    let (mut word, mut bits) = (0u32, 0);
+    for byte in gz {
+        word |= u32::from(byte) << bits;
+        bits += 8;
+        if bits >= 15 {
+            packed.push(char::from_u32(0x4000 + (word & 0x7fff))?);
+            word >>= 15;
+            bits -= 15;
+        }
+    }
+    if bits != 0 {
+        packed.push(char::from_u32(0x4000 + word)?);
+    }
+    let clm = include_str!("collect-clm.ps1");
+    Some(format!(concat!(
+        "$n='{nonce}';$s=$null\n",
+        "if($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage'){{try{{",
+        "$m=[IO.MemoryStream]::new();$w=$b=0;",
+        "foreach($c in '{packed}'.ToCharArray()){{$w=$w -bor (([int]$c-0x4000) -shl $b);$b+=15;",
+        "while($b -ge 8){{$m.WriteByte($w -band 255);$w=$w -shr 8;$b-=8}}}};",
+        "$m.Position=0;$z=[IO.Compression.GzipStream]::new($m,[IO.Compression.CompressionMode]::Decompress);",
+        "$s=[scriptblock]::Create([IO.StreamReader]::new($z).ReadToEnd())",
+        "}}catch{{}}}}\nif($s){{&$s $n}}else{{\n{clm}\n}}",
+    ), nonce = nonce, packed = packed, clm = clm))
+}
+
+fn encode_bootstrap(bootstrap: &str) -> String {
     let utf16: Vec<_> = bootstrap
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
-    Some(format!("{PREFIX}{}", STANDARD.encode(utf16)))
+    format!("{PREFIX}{}", STANDARD.encode(utf16))
 }
 
 #[cfg(test)]
@@ -47,7 +76,7 @@ mod tests {
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         let bootstrap = String::from_utf16(&units).ok()?;
-        let (_, nonce) = bootstrap.strip_suffix('\'')?.rsplit_once(" '")?;
+        let (nonce, _) = bootstrap.strip_prefix("$n='")?.split_once('\'')?;
         (valid_nonce(nonce)
             && bootstrap.matches(nonce).count() == 1
             && encode(nonce)?.as_str() == command)
@@ -66,6 +95,16 @@ mod tests {
     }
 
     #[test]
+    fn windows_collector_does_not_use_wmi_or_compile_code() {
+        for source in [include_str!("collect.ps1"), include_str!("collect-clm.ps1")] {
+            let source = source.to_ascii_lowercase();
+            for forbidden in ["management", "wmi", "cim", "get-counter", "add-type"] {
+                assert!(!source.contains(forbidden), "{forbidden}");
+            }
+        }
+    }
+
+    #[test]
     fn windows_payload_inflates_to_collect_ps1() {
         let bytes = STANDARD.decode(PAYLOAD.trim_end()).unwrap();
         let mut body = Vec::new();
@@ -80,6 +119,62 @@ mod tests {
         encoder.write_all(include_bytes!("collect.ps1")).unwrap();
         println!("{}", STANDARD.encode(encoder.finish().unwrap()));
         windows_payload_inflates_to_collect_ps1();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn production_windows_command_degrades_under_constrained_language() {
+        use crate::ssh::metrics::{
+            model::Metric,
+            protocol::{parse, windows, Platform},
+            reduce::Reducer,
+        };
+        use std::process::{Command, Stdio};
+
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+        let nonce = "0123456789abcdef0123456789abcdef";
+        // Retail Windows PowerShell may ignore the test-only lockdown variable.
+        // Set the mode explicitly if needed, without modifying the production bootstrap.
+        let command = encode_bootstrap(&format!(
+            concat!(
+                "if($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage')",
+                "{{$ExecutionContext.SessionState.LanguageMode='ConstrainedLanguage'}}\n{}",
+            ),
+            bootstrap(nonce).unwrap()
+        ));
+        let output = Command::new("powershell.exe")
+            .args(
+                command
+                    .strip_prefix("powershell ")
+                    .unwrap()
+                    .split_ascii_whitespace(),
+            )
+            .env("__PSLockdownPolicy", "4")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_ascii() && !output.stdout.contains(&b'\r'));
+        assert!(output.stdout.ends_with(b"V1_END__\n"));
+        assert!(output.stderr.len() < 16 * 1024);
+        let raw = parse(&output.stdout, nonce).unwrap();
+        assert_eq!(raw.platform, Platform::Windows);
+        assert!(raw.hostname.is_ok() && raw.architecture.is_ok() && raw.os.is_ok());
+        for key in ["winOs", "winCpu", "winNet", "winDisks", "winNetDrives"] {
+            assert!(windows::blocked(raw.section(key).unwrap()), "{key}");
+        }
+        let metrics = Reducer::default().reduce(raw);
+        assert!(matches!(metrics.host, Metric::Available(_)));
+        let blocked = || Metric::Unavailable(windows::BLOCKED.into());
+        assert_eq!(metrics.cpu, blocked());
+        assert_eq!(metrics.ram, Metric::Unavailable(windows::BLOCKED.into()));
+        assert_eq!(metrics.uptime, Metric::Unavailable(windows::BLOCKED.into()));
+        assert_eq!(metrics.net_up, Metric::Unavailable(windows::BLOCKED.into()));
+        assert_eq!(
+            metrics.partitions,
+            Metric::Unavailable(windows::BLOCKED.into())
+        );
+        assert_eq!(metrics.nfs, Metric::Unavailable(windows::BLOCKED.into()));
     }
 
     #[cfg(windows)]

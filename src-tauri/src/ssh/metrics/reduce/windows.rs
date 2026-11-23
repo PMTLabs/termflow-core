@@ -1,60 +1,82 @@
-//! Windows rates use per-class timestamps; WMI classes do not share a clock origin.
-use super::{host, rows};
+//! Windows CPU and network baselines share the collector's monotonic QPC uptime.
+use super::host;
 use crate::ssh::metrics::{
     model::*,
     protocol::{windows::*, RawSample},
 };
 
-const TICKS_PER_SECOND: f64 = 10_000_000.0;
-const MICROS_PER_SECOND: i64 = 1_000_000;
 const NO_LOAD: &str = "Load average is not available on Windows";
 const BAD_RAM: &str = "Invalid memory counters";
 const BAD_UPTIME: &str = "Invalid remote uptime";
 
 #[derive(Default)]
 pub(super) struct WindowsRates {
-    boot: Option<i64>,
-    cpu: Option<(u64, u64)>,
+    clock: Option<(u64, u64)>, // uptime ticks, tick frequency
+    cpu: Option<[u64; 3]>,     // idle, kernel (includes idle), user
     interfaces: Option<PerfRows>,
 }
 
 pub(super) fn reduce_windows(rates: &mut WindowsRates, raw: RawSample<'_>) -> Metrics {
-    let os = fields(rows(&raw, "winOs"));
-    let os_fields = os.as_ref().map_err(|&reason| reason);
-    let boot_time = os_fields.and_then(|f| dmtf(value(f, "boot")?));
-    let boot = boot_time
-        .ok()
-        .map(|time| time.div_euclid(MICROS_PER_SECOND));
-    if raw.nfs_watchdog_expired || rates.boot != boot {
+    let section = |key| raw.section(key).expect("validated Windows section");
+    let os = section("winOs");
+    let os_data = os_fields(os);
+    let fields_ref = os_data.as_ref().map_err(|&reason| reason);
+    let os_error = |invalid| {
+        if blocked(os) {
+            BLOCKED
+        } else if os.exit == 1 {
+            "Collection command failed"
+        } else {
+            invalid
+        }
+    };
+    let clock = fields_ref.and_then(|f| {
+        let ticks: u64 = number(f, "uptimeTicks").map_err(|_| os_error(BAD_UPTIME))?;
+        let frequency: u64 = number(f, "tickFrequency").map_err(|_| os_error(BAD_UPTIME))?;
+        if frequency == 0 {
+            return Err(BAD_UPTIME);
+        }
+        Ok((ticks, frequency))
+    });
+    // A backwards uptime (or changed QPC frequency) invalidates both baselines.
+    // Using remote monotonic uptime rather than wall time avoids treating NTP/time-zone
+    // changes as a reboot. A missing clock also breaks continuity across samples.
+    let elapsed = rates
+        .clock
+        .zip(clock.ok())
+        .and_then(|((old, old_hz), (now, hz))| {
+            (old_hz == hz).then_some(())?;
+            let ticks = now.checked_sub(old)?;
+            (ticks != 0).then(|| ticks as f64 / hz as f64)
+        })
+        .filter(|_| !raw.nfs_watchdog_expired);
+    if elapsed.is_none() {
         *rates = WindowsRates::default();
     }
-    rates.boot = boot;
-    let uptime = os_fields.and_then(|f| {
-        let now = dmtf(value(f, "now")?)?;
-        let micros = now
-            .checked_sub(boot_time?)
-            .filter(|&v| v >= 0)
-            .ok_or(BAD_UPTIME)?;
-        Ok(Uptime {
-            seconds: micros as f64 / MICROS_PER_SECOND as f64,
-        })
+    rates.clock = clock.ok();
+    let uptime = clock.map(|(ticks, hz)| Uptime {
+        seconds: ticks as f64 / hz as f64,
     });
-    let ram = os_fields.and_then(|f| {
-        let total_kib: u64 = number(f, "totalKiB")?;
-        let free_kib = number(f, "freeKiB")?;
-        let used_kib = total_kib.checked_sub(free_kib).ok_or(BAD_RAM)?;
-        let total_bytes = total_kib
-            .checked_mul(1024)
-            .filter(|&v| v != 0)
+    let ram = fields_ref.and_then(|f| {
+        let total_bytes: u64 = number(f, "totalBytes").map_err(|_| os_error(BAD_RAM))?;
+        let avail = number(f, "availBytes").map_err(|_| os_error(BAD_RAM))?;
+        let used_bytes = total_bytes
+            .checked_sub(avail)
+            .filter(|_| total_bytes != 0)
             .ok_or(BAD_RAM)?;
         Ok(Ram {
-            used_bytes: used_kib * 1024,
+            used_bytes,
             total_bytes,
-            percent: 100.0 * used_kib as f64 / total_kib as f64,
+            percent: 100.0 * used_bytes as f64 / total_bytes as f64,
         })
     });
-    let cpu = fields(rows(&raw, "winCpu")).and_then(|f| {
-        let now = (number(&f, "idle100ns")?, number(&f, "stamp100ns")?);
+    let cpu = fields(section_rows(section("winCpu"))).and_then(|f| {
+        clock?;
+        let now = [
+            number(&f, "idle100ns")?,
+            number(&f, "kernel100ns")?,
+            number(&f, "user100ns")?,
+        ];
         let percent = rates
             .cpu
             .replace(now)
@@ -76,13 +98,15 @@ pub(super) fn reduce_windows(rates: &mut WindowsRates, raw: RawSample<'_>) -> Me
     if cpu.is_err() {
         rates.cpu = None;
     }
-    let network = perf_rows(rows(&raw, "winNet")).map(|now| {
+    let network = perf_rows(section_rows(section("winNet"))).and_then(|now| {
+        clock?;
         let value = rates
             .interfaces
             .as_ref()
-            .and_then(|before| net_rates(before, &now));
+            .zip(elapsed)
+            .and_then(|(before, seconds)| net_rates(before, &now, seconds));
         rates.interfaces = Some(now);
-        value
+        Ok(value)
     });
     if network.is_err() {
         rates.interfaces = None;
@@ -108,30 +132,29 @@ pub(super) fn reduce_windows(rates: &mut WindowsRates, raw: RawSample<'_>) -> Me
             })
             .into(),
         uptime: uptime.into(),
-        users: users(rows(&raw, "winUsers")).into(),
+        users: users_section(section("winUsers")).into(),
         partitions: raw.local.map(|mounts| Partitions { mounts }).into(),
         nfs: raw.nfs.map(|mounts| Partitions { mounts }).into(),
     }
 }
 
-fn cpu_percent((idle_before, stamp_before): (u64, u64), (idle, stamp): (u64, u64)) -> Option<f64> {
-    let idle_delta = idle.checked_sub(idle_before)?;
-    let ticks = stamp.checked_sub(stamp_before)?;
-    (ticks > 0 && idle_delta <= ticks).then(|| 100.0 - 100.0 * idle_delta as f64 / ticks as f64)
+fn cpu_percent(
+    [old_idle, old_kernel, old_user]: [u64; 3],
+    [idle, kernel, user]: [u64; 3],
+) -> Option<f64> {
+    let idle = idle.checked_sub(old_idle)?;
+    let total =
+        u128::from(kernel.checked_sub(old_kernel)?) + u128::from(user.checked_sub(old_user)?);
+    (total > 0 && u128::from(idle) <= total).then(|| 100.0 * (1.0 - idle as f64 / total as f64))
 }
 
-fn net_rates(before: &PerfRows, now: &PerfRows) -> Option<[f64; 2]> {
+fn net_rates(before: &PerfRows, now: &PerfRows, seconds: f64) -> Option<[f64; 2]> {
     if before.len() != now.len() {
         return None;
     }
     let mut rate = [0.0, 0.0];
-    for (name, &[rx, tx, stamp]) in now {
-        let &[old_rx, old_tx, old_stamp] = before.get(name)?;
-        let ticks = stamp.checked_sub(old_stamp)?;
-        if ticks == 0 {
-            return None;
-        }
-        let seconds = ticks as f64 / TICKS_PER_SECOND;
+    for (name, &[rx, tx]) in now {
+        let &[old_rx, old_tx] = before.get(name)?;
         rate[0] += rx.checked_sub(old_rx)? as f64 / seconds;
         rate[1] += tx.checked_sub(old_tx)? as f64 / seconds;
     }
