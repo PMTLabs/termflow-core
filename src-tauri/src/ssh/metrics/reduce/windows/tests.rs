@@ -210,3 +210,38 @@ fn sshd_non_admin_capture_reduces_every_metric_but_users() {
         Metric::Unavailable("Signed-in users require an administrator account on Windows".into())
     );
 }
+
+#[test]
+fn windows_sample_that_measured_nothing_is_flagged_unavailable() {
+    let keys = [
+        "hostname",
+        "architecture",
+        "winOs",
+        "winCpu",
+        "winNet",
+        "winUsers",
+        "winDisks",
+        "winNetDrives",
+    ];
+    let mut text = format!(
+        "__TFM_{NONCE}_V1_BEGIN__\n__TFM_{NONCE}_SECTION_platform_BEGIN__\nWindows\n__TFM_{NONCE}_SECTION_platform_END_0__\n"
+    );
+    for key in keys {
+        text +=
+            &format!("__TFM_{NONCE}_SECTION_{key}_BEGIN__\n__TFM_{NONCE}_SECTION_{key}_END_1__\n");
+    }
+    text += &format!("__TFM_{NONCE}_V1_END__\n");
+    let metrics = capture(&mut Reducer::default(), &text);
+    assert_eq!(metrics.platform, Some("Windows"));
+    let Metric::Unavailable(cpu) = &metrics.cpu else {
+        panic!("cpu measured from failed sections");
+    };
+    assert_eq!(metrics.unavailable_reason.as_deref(), Some(cpu.as_str()));
+
+    // The non-admin sshd capture measures everything but users: no flag.
+    let sshd = include_str!("../../fixtures/windows-sshd-nonadmin.txt");
+    assert_eq!(
+        capture(&mut Reducer::default(), sshd).unavailable_reason,
+        None
+    );
+}
