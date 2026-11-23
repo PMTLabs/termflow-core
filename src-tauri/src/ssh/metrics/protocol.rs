@@ -57,11 +57,10 @@ impl Platform {
         }
     }
 
-    /// How the status bar names a platform that has no collector: `macOS (Darwin)` for Darwin,
-    /// else the `uname -s` value as reported. `None` for Linux and for an unknown platform.
+    /// How the status bar names a platform that has no collector: the `uname -s` value as
+    /// reported. `None` for the collected platforms (Linux, Darwin) and for an unknown platform.
     pub fn unsupported_label(&self) -> Option<String> {
         match self {
-            Self::Unsupported(name) if name == "Darwin" => Some("macOS (Darwin)".into()),
             Self::Unsupported(name) => Some(name.clone()),
             Self::Linux | Self::Darwin | Self::Unknown => None,
         }

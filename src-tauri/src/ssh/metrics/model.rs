@@ -57,7 +57,7 @@ pub struct Metrics {
     pub users: Metric<Users>,
     pub partitions: Metric<Partitions>,
     pub nfs: Metric<Partitions>,
-    /// Set only for a host whose platform has no collector (e.g. `macOS (Darwin)`): the bar says
+    /// Set only for a host whose platform has no collector (e.g. `FreeBSD`): the bar says
     /// so instead of "Connected" over a row of n/a. Absent from the wire otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsupported_platform: Option<String>,

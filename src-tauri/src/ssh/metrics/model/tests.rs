@@ -125,7 +125,7 @@ fn a_parsed_sample_that_measured_nothing_is_flagged_unavailable() {
     assert!(partial.get("unavailableReason").is_none());
 
     // A named unsupported platform keeps its own status even though Host failed too (D95).
-    let darwin = to_value(sample(&mut Reducer::default(), "", &[("platform", "Darwin", 0), ("hostname", "", 1)])).unwrap();
-    assert_eq!(darwin["unsupportedPlatform"], json!("macOS (Darwin)"));
-    assert!(darwin.get("unavailableReason").is_none());
+    let bsd = to_value(sample(&mut Reducer::default(), "", &[("platform", "FreeBSD", 0), ("hostname", "", 1)])).unwrap();
+    assert_eq!(bsd["unsupportedPlatform"], json!("FreeBSD"));
+    assert!(bsd.get("unavailableReason").is_none());
 }
