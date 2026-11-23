@@ -38,7 +38,8 @@ impl Reducer {
     pub fn reduce(&mut self, raw: RawSample<'_>) -> Metrics {
         if let Some(reason) = raw.platform.unavailable_reason() {
             self.reset();
-            return Metrics::unavailable(&reason);
+            let host = host(&raw);
+            return Metrics::unsupported(&reason, host, raw.platform.unsupported_label());
         }
         let stat = rows(&raw, "stat");
         let uptime = rows(&raw, "uptime").and_then(parse_uptime);
@@ -81,11 +82,7 @@ impl Reducer {
         let ram = rows(&raw, "meminfo").and_then(memory).into();
         let users = rows(&raw, "who").and_then(users).into();
         Metrics {
-            host: raw.hostname.map(|hostname| Host {
-                hostname,
-                os: raw.os.map(|name| Name { name }).into(),
-                architecture: raw.architecture.map(|name| Name { name }).into(),
-            }).into(),
+            host: host(&raw),
             cpu: cpu.into(),
             ram,
             net_up: net.map(|rates| Network { bytes_per_second: rates[1] }).into(),
@@ -94,8 +91,19 @@ impl Reducer {
             users,
             partitions: raw.local.map(|mounts| Partitions { mounts }).into(),
             nfs: raw.nfs.map(|mounts| Partitions { mounts }).into(),
+            unsupported_platform: None,
         }
     }
+}
+
+/// The Host metric from the platform-neutral sections (`uname -n`, `uname -m`, OS name), which
+/// every platform's collector output carries.
+fn host(raw: &RawSample<'_>) -> Metric<Host> {
+    raw.hostname.clone().map(|hostname| Host {
+        hostname,
+        os: raw.os.clone().map(|name| Name { name }).into(),
+        architecture: raw.architecture.clone().map(|name| Name { name }).into(),
+    }).into()
 }
 
 impl Boot {
