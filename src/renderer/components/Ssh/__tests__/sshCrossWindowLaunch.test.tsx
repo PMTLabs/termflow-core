@@ -8,7 +8,7 @@ import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import { store } from '../../../store';
 import sshReducer from '../../../store/slices/sshSlice';
-import { addTabTree, removeTabTree, setActiveTabId } from '../../../store/slices/panesSlice';
+import { addTabTree, movePaneWithinTab, removeTabTree, setActiveTabId } from '../../../store/slices/panesSlice';
 import { addTab, clearAllTabs, removeTab } from '../../../store/slices/tabsSlice';
 import { hydrateCanvas, pruneCanvasGeometry, setEdges, setNodeGeom, setOverlayNode, setViewport } from '../../../store/slices/canvasSlice';
 import { setDefaultProfile, setShellProfiles } from '../../../store/slices/settingsSlice';
@@ -33,6 +33,7 @@ import { OwnedSshLaunchNotice } from '../OwnedSshLaunchNotice';
 
 import { publishSshCanvasVisible } from '../sshPresentations';
 import { buildTabDetachPayload } from '../../Panes/dnd/detach';
+import { findLeafByTerminalId } from '../../../store/slices/paneTreeOps';
 
 const SOURCE = 'tm-source';
 const sourceRect = { x: 45, y: 35, w: NODE_W, h: NODE_H };
@@ -184,7 +185,7 @@ afterEach(async () => {
 });
 afterAll(() => inputHandler.destroy());
 
-test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cancelled'])('restored SSH launch: %s', async scenario => {
+test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cancelled', 'swapped', 'fresh'])('restored SSH launch: %s', async scenario => {
   const connection = saved('restore');
   await setup([connection]);
   const tabId = 'restore-tab';
@@ -194,7 +195,7 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cance
   const launchCounts = () => ['ssh_session_open', 'ssh_terminal_launch'].map(command =>
     ops(command).filter(call => call.args?.terminalId === id).length);
   await act(async () => {
-    paneIncarnations.prepare([{ paneId, leaf: id, restore: true }]);
+    paneIncarnations.prepare([{ paneId, leaf: id, restore: scenario !== 'fresh' }]);
     store.dispatch(addTabTree({ tabId, tree: {
       id: paneId, type: 'terminal', terminalId: id, ssh: { connectionId: connection.id, browserCollapsed: true, followCd: false, hiddenMetrics: [] },
     } }));
@@ -207,8 +208,10 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cance
   }
   const shell = await mountShell(connection.id);
   if (scenario === 'attach') expect(store.getState().sshSession.byTerminal[id]?.reattachedProcessId).toBe(shell.pc);
-  expect(launchCounts()).toEqual(scenario === 'active' ? [1, 1] : [0, 0]);
-  const deferred = scenario !== 'active' && scenario !== 'attach';
+  // Only a restored pane waits; a new SSH pane in a background tab launches at once.
+  const immediate = scenario === 'active' || scenario === 'fresh';
+  expect(launchCounts()).toEqual(immediate ? [1, 1] : [0, 0]);
+  const deferred = !immediate && scenario !== 'attach';
   // Only this pane's tab or this pane's Canvas node counts as its activation.
   const unrelated = 'unrelated-tab';
   await act(async () => {
@@ -218,7 +221,7 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cance
     publishSshCanvasVisible('tm-unrelated', true)();
     publishSshCanvasVisible(id, false)();
   });
-  expect(launchCounts()).toEqual(scenario === 'active' ? [1, 1] : [0, 0]);
+  expect(launchCounts()).toEqual(immediate ? [1, 1] : [0, 0]);
   // A pane carried to another window before activation tells that window to launch it.
   expect(buildTabDetachPayload(tabId, tabId)!.terminals[0].sshLaunchDeferred).toBe(deferred ? true : undefined);
   if (scenario === 'cancelled') {
@@ -228,6 +231,18 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cance
       await paneIncarnations.cancel('tx-cancelled', [{ paneId, leaf: id, restore: true }], new Map([[id, shell.pc]]));
     });
     expect(paneIncarnations.capture(id, paneId)).not.toBe(before);
+    expect(launchCounts()).toEqual([0, 0]);
+  }
+  if (scenario === 'swapped') {
+    // A center drop swaps leaves: the terminal now lives under the other pane id.
+    await act(async () => {
+      const leaf = store.getState().panes.treesByTabId[tabId]!;
+      store.dispatch(addTabTree({ tabId, tree: { id: 'swap-split', type: 'split', direction: 'horizontal', children: [
+        leaf, { id: 'swap-pane', type: 'terminal', terminalId: 'tm-swap' },
+      ] } as any }));
+      store.dispatch(movePaneWithinTab({ tabId, sourcePaneId: paneId, targetPaneId: 'swap-pane', zone: 'center' }));
+    });
+    expect(findLeafByTerminalId(store.getState().panes.treesByTabId, id)?.id).toBe('swap-pane');
     expect(launchCounts()).toEqual([0, 0]);
   }
   if (scenario === 'moved') {
@@ -256,6 +271,27 @@ test.each(['background', 'active', 'attach', 'closed', 'canvas', 'moved', 'cance
     store.dispatch(setActiveTabId(tabId));
   });
   expect(launchCounts()).toEqual(expected);
+});
+
+test('a pane carried in but not yet mounted stays owed when it moves on (A to B to C)', async () => {
+  const tabId = 'relay-tab';
+  const id = 'tm-relay';
+  localTerminals.add(id);
+  await act(async () => {
+    store.dispatch(addTabTree({ tabId, tree: { id: 'relay-pane', type: 'terminal', terminalId: id } }));
+    store.dispatch(addTab({ id: tabId, title: tabId, shellType: profile.id, icon: '' }));
+  });
+  // Window B: attached from A's payload, launch still owed, never mounted.
+  terminalService.attachExistingTerminal(id, 'pc-relay');
+  terminalService.stashCarriedSshLaunch(id, 'pc-relay');
+  expect(buildTabDetachPayload(tabId, tabId)!.terminals[0].sshLaunchDeferred).toBe(true);
+  // Only for that process, and gone once B lets the pane go.
+  terminalService.attachExistingTerminal(id, 'pc-later');
+  expect(buildTabDetachPayload(tabId, tabId)!.terminals[0].sshLaunchDeferred).toBeUndefined();
+  terminalService.attachExistingTerminal(id, 'pc-relay');
+  terminalService.detachTerminal(id);
+  terminalService.attachExistingTerminal(id, 'pc-relay');
+  expect(buildTabDetachPayload(tabId, tabId)!.terminals[0].sshLaunchDeferred).toBeUndefined();
 });
 
 test('sshCrossWindowSave_updatesBothMenus_withoutReload', async () => {

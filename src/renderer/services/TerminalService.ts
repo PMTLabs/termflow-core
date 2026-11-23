@@ -47,11 +47,11 @@ export class TerminalServiceClass {
   private hostWaitStates = new Map<string, HostWaitState>();
   private sshReconnects = new WeakMap<PaneCapture, { pc: string; work: Promise<ReconnectSshResult> }>();
   private sshLaunches = new WeakMap<PaneCapture, { pc: string; work: Promise<SshLaunchObservation | undefined> }>();
-  // D105: restored SSH panes in this window whose launch waits for first activation,
-  // and panes another window handed over while still waiting. A handed-over pane
-  // launches on its first launch query here: the move itself is the user's activation.
-  private deferredSshLaunches = new Set<string>();
-  private carriedSshLaunches = new Map<string, string>(); // terminalId -> pc
+  // D105: the one home for SSH launches this window still owes, keyed by terminalId and
+  // valid only for that exact process. 'wait': a restored pane here waits for its first
+  // activation. 'carried': another window handed the pane over while it waited; it
+  // launches on its first launch query here, because the move is the user's activation.
+  private owedSshLaunches = new Map<string, { pc: string; how: 'wait' | 'carried' }>();
   // Keep the raw placement outcome even when its original copy leaves. A replacement
   // must wait for that work and bind its exact process, not race a Parked placement.
   private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
@@ -118,6 +118,7 @@ export class TerminalServiceClass {
           // a later fresh session on the same id could wrongly inherit a stale gate.
           this.promptGateHandoff.delete(terminalId);
           this.keyboardProtocolHandoff.delete(terminalId);
+          this.owedSshLaunches.delete(terminalId);
 
           // Also clean up from the global terminal init map (if available)
           // This allows re-creation if the same terminalId is used again
@@ -451,10 +452,9 @@ export class TerminalServiceClass {
       this.bindCreated(terminalId, processId, owningTabId);
 
       if (freshSsh && sshLaunchConnectionId && attemptPi) {
-        const connectionId = sshLaunchConnectionId;
-        const launch = (owner: PaneCapture) => {
+        const launch = (owner: PaneCapture, launchPaneId: string | undefined, connectionId: string) => {
           if (this.sshLaunches.get(owner)?.pc === processId) return; // A carried launch already ran here.
-          const placement = this.sshPlacement(terminalId, paneId, owner, processId, connectionId);
+          const placement = this.sshPlacement(terminalId, launchPaneId, owner, processId, connectionId);
           const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
           this.sshLaunches.set(owner, { pc: processId, work });
           // Launch failure does not discard the successfully created local shell.
@@ -462,38 +462,40 @@ export class TerminalServiceClass {
         };
         const store = (window as Window & { __REDUX_STORE__?: typeof rendererStore }).__REDUX_STORE__;
         if (coldRestore && store) {
-          // Watch the owning tab, not the pane layout (maximize, split, etc.).
-          // Canvas has its own visibility signal for individual nodes. A drag stashes the
-          // pane, and a cancelled drag re-mints its owner and rebinds the same process, so
-          // the wait follows the pane's current owner. It ends without launching only when
-          // the pane leaves this window or changes process or connection, or the page ends.
+          // Watch the owning tab, not the pane layout (maximize, split, etc.); Canvas has its
+          // own visibility signal for individual nodes. Only terminalId and this process are
+          // kept: a drag stashes the pane, a cancelled drag re-mints its owner, and a swap
+          // moves it to another pane id, so each check re-reads the leaf, its pane id,
+          // connection and current owner. The wait ends without launching only when the pane
+          // leaves this window, changes process or loses its SSH tag, or the page ends.
           let settled = false;
-          this.deferredSshLaunches.add(terminalId);
+          this.owedSshLaunches.set(terminalId, { pc: processId, how: 'wait' });
           const check = () => {
             if (settled) return; // A nested notification can retain an older listener snapshot.
             const tabId = findTabIdByTerminalId(this.paneTrees(), terminalId);
-            const stays = !!tabId && !protocol.ended && protocol === this.incarnations()
-              && this.getProcessId(terminalId) === processId
-              && findLeafByTerminalId(this.paneTrees(), terminalId)?.ssh?.connectionId === connectionId;
-            const owner = stays ? protocol.capture(terminalId, paneId) : undefined;
+            const leaf = findLeafByTerminalId(this.paneTrees(), terminalId);
+            const connectionId = leaf?.ssh?.connectionId;
+            const stays = !!tabId && !!leaf && !!connectionId && !protocol.ended && protocol === this.incarnations()
+              && this.owedSshLaunch(terminalId)?.how === 'wait';
+            const owner = stays ? protocol.capture(terminalId, leaf!.id) : undefined;
             if (stays) {
               // Stashed for a transfer, between copies, or a re-minted owner not yet rebound.
-              if (!owner || !protocol.isCurrent(terminalId, paneId, owner) || protocol.hasPendingRestore(owner)) return;
+              if (!owner || !protocol.isCurrent(terminalId, leaf!.id, owner) || protocol.hasPendingRestore(owner)) return;
               if (store.getState().panes.activeTabId !== tabId && !isSshCanvasVisible(terminalId)) return;
             }
             settled = true;
-            this.deferredSshLaunches.delete(terminalId);
+            if (this.owedSshLaunches.get(terminalId)?.pc === processId) this.owedSshLaunches.delete(terminalId);
             unsubscribeStore();
             unsubscribeCanvas();
             unsubscribeOwner();
-            if (owner) launch(owner);
+            if (owner) launch(owner, leaf!.id, connectionId!);
           };
           const unsubscribeStore = store.subscribe(check);
           const unsubscribeCanvas = subscribeSshCanvasVisibility(check);
           const unsubscribeOwner = protocol.subscribe(check);
           check();
         } else {
-          launch(attemptPi);
+          launch(attemptPi, paneId, sshLaunchConnectionId);
         }
       }
 
@@ -537,7 +539,8 @@ export class TerminalServiceClass {
   async querySshLaunch(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted: () => boolean) {
     const placement = this.sshPlacement(terminalId, paneId, owner, pc, connectionId, mounted);
     if (!placement.current()) return;
-    if (this.carriedSshLaunches.get(terminalId) === pc && this.carriedSshLaunches.delete(terminalId)
+    const owed = this.owedSshLaunch(terminalId);
+    if (owed?.how === 'carried' && owed.pc === pc && this.owedSshLaunches.delete(terminalId)
         && this.sshLaunches.get(owner)?.pc !== pc) {
       const work = observeOwnedSshLaunch(this.api(), placement, 'open');
       this.sshLaunches.set(owner, { pc, work });
@@ -834,22 +837,28 @@ export class TerminalServiceClass {
     return this.win32InputModeHandoff.delete(terminalId);
   }
 
+  /** The launch this window still owes `terminalId`, only while it is the same process (D105). */
+  private owedSshLaunch(terminalId: string) {
+    const owed = this.owedSshLaunches.get(terminalId);
+    return owed && owed.pc === this.getProcessId(terminalId) ? owed : undefined;
+  }
+
+  /** True while this window still owes the pane its first SSH launch, waiting or carried in (D105). */
+  hasDeferredSshLaunch(terminalId: string): boolean {
+    return !!this.owedSshLaunch(terminalId);
+  }
+
+  /** The source window never launched this carried SSH pane; launch it on its first query here. */
+  stashCarriedSshLaunch(terminalId: string, pc: string): void {
+    this.owedSshLaunches.set(terminalId, { pc, how: 'carried' });
+  }
+
   /**
    * Stash the Kitty / modifyOtherKeys state a cross-window detach carried for
    * `terminalId`'s first-ever mount in this window. The app pushed its flags once
    * in the SOURCE window and will not repeat them here; without this the pane
    * sends legacy encodings to a TUI that negotiated CSI u. Null clears any stash.
    */
-  /** True while a restored SSH pane here still waits for its first activation (D105). */
-  hasDeferredSshLaunch(terminalId: string): boolean {
-    return this.deferredSshLaunches.has(terminalId);
-  }
-
-  /** The source window never launched this carried SSH pane; launch it on its first query here. */
-  stashCarriedSshLaunch(terminalId: string, pc: string): void {
-    this.carriedSshLaunches.set(terminalId, pc);
-  }
-
   stashKeyboardProtocol(terminalId: string, data: KeyboardProtocolStateData | null): void {
     if (data) this.keyboardProtocolHandoff.set(terminalId, data);
     else this.keyboardProtocolHandoff.delete(terminalId);
@@ -880,6 +889,7 @@ export class TerminalServiceClass {
     // window before it ever mounted, would otherwise leak this entry forever.
     this.promptGateHandoff.delete(terminalId);
     this.keyboardProtocolHandoff.delete(terminalId);
+    this.owedSshLaunches.delete(terminalId);
     console.log(`TerminalService: Detached terminal ${terminalId} (PTY left running)`);
   }
 
