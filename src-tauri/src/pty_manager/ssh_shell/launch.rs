@@ -211,6 +211,10 @@ fn ps_quote(path: &str) -> io::Result<String> {
 // so neither the local prompt nor this echoed command stays on screen. Column 1 first:
 // a prompt theme that saves/restores the cursor itself (a right prompt) can replace
 // that save with one on the same row, after the prompt text.
+// Known limits: if that theme save lands on a later row (a multi-line or wrapped prompt),
+// the rows above it stay. cmd prints its own blank line before each prompt while echo is
+// on, before PROMPT (and so the save) renders; that row stays too. Erasing above the save
+// is not done because it would delete real output whenever that row is not blank.
 fn ps_launch(json_source: &str) -> String {
     format!("& {{ [Console]::Write([string][char]27 + '8' + [string][char]27 + '[1G' + [string][char]27 + '[J'); \
         $data = ({json_source}) | ConvertFrom-Json; \

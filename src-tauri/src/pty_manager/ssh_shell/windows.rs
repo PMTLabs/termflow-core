@@ -166,11 +166,13 @@ const CMD_SAVE: &str = "$ED$ED$ED$ED$ED$ED$E[6A$E7";
 // Detect the existing delayed expansion state and keep it. In the off case,
 // expand under setlocal, then return a FOR variable (expanded after metachar
 // parsing) across endlocal. The assignment prefix protects leading EOL chars.
+// `do @(`: with echo on, cmd echoes each FOR iteration's body even under `@for`; without
+// the `@` the pane would show this block, nonce included, above the first prompt.
 const CMD_SCRIPT: &str = "@set \"__TERMFLOW_SSH_CMD_BOOTSTRAP=\"\r\n\
 @if not defined PROMPT set \"PROMPT=$P$G\"\r\n\
 @if \"!\"==\"\" goto :delayed\r\n\
 @setlocal EnableDelayedExpansion\r\n\
-@for /f \"delims=\" %%P in (\"PROMPT=@CMD_SAVE@!PROMPT!$E]633;TermFlowSshReady;@NONCE@;$T$E\\\") do (\r\n\
+@for /f \"delims=\" %%P in (\"PROMPT=@CMD_SAVE@!PROMPT!$E]633;TermFlowSshReady;@NONCE@;$T$E\\\") do @(\r\n\
     endlocal\r\n\
     set \"%%P\"\r\n\
 )\r\n\
