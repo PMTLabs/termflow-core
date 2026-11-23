@@ -4,6 +4,7 @@ use super::protocol::{decimal, RawSample, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use uuid::Uuid;
+mod darwin;
 
 const CPU_INVALID: &str = "Invalid CPU counters";
 const CPU_STALLED: &str = "CPU counters did not advance";
@@ -16,6 +17,7 @@ pub struct Reducer {
     boot: Boot,
     cpu: Option<[u64; 8]>,
     net: Option<Interfaces>,
+    darwin: darwin::Baseline,
 }
 
 #[derive(Default)]
@@ -46,6 +48,11 @@ impl Reducer {
             let host = host(&raw);
             return Metrics::unsupported(&reason, host, raw.platform.unsupported_label());
         }
+        if raw.platform == super::protocol::Platform::Darwin { return darwin::reduce(self, raw); }
+        self.linux(raw)
+    }
+
+    fn linux(&mut self, raw: RawSample<'_>) -> Metrics {
         let stat = rows(&raw, "stat");
         let uptime = rows(&raw, "uptime").and_then(parse_uptime);
         let boot = Boot {
