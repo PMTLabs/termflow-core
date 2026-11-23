@@ -12,7 +12,7 @@ import { installSshMetricsWatch, useSshMetricsWatch } from '../../../services/ss
 import { writeClipboardText } from '../../../utils/clipboard';
 import type { SshMetricsAPI, SshMetricsSample, SshMetricsControl, SshState } from '../../../types/ssh';
 import { SshMetricsStatusBar } from '../SshMetricsStatusBar';
-import { SSH_METRIC_KEYS, SSH_METRIC_LABELS } from '../sshMetricKeys';
+import { SSH_METRIC_KEYS, SSH_METRIC_LABELS, SSH_METRIC_SHORT_LABELS } from '../sshMetricKeys';
 import { formatSshMetricsCopy } from '../metricFormat';
 
 jest.mock('../../../utils/clipboard', () => ({ writeClipboardText: jest.fn() }));
@@ -79,12 +79,12 @@ test.each(states)('connected_values_disappear_on_disconnect_before_next_sample (
     else h.session(state);
   });
   expect(bar().textContent).not.toMatch(/61%|3\.2KB\/s|db-beta/);
-  expect(bar().textContent).toContain('CPU: —');
+  expect(bar().textContent).toContain('CPU —');
   expect(bar().querySelector('.is-live')).toBeNull();
   expect(row('Copy all metrics').disabled).toBe(true);
   act(() => h.session('connected', 2));
   expect(bar().textContent).toContain('Collecting first sample');
-  expect(bar().textContent).toContain('CPU: …');
+  expect(bar().textContent).toContain('CPU …');
   act(() => h.publish(sample(29)));
   expect(bar().textContent).toContain('29%');
   expect(row('Copy all metrics').disabled).toBe(false);
@@ -124,7 +124,7 @@ test('hidden_values_are_copied_and_targeted_checkbox_persists', async () => {
   await click('RAM');
   expect(selectSshHiddenMetrics(h.store.getState(), A)).toEqual(['nfs', 'cpu']);
   expect(selectSshHiddenMetrics(h.store.getState(), B)).toEqual(['uptime', 'ram']);
-  expect(bar().textContent).not.toContain('RAM:');
+  expect(bar().querySelector('[data-metric=ram]')).toBeNull();
 });
 
 test('clipboard_rejection_never_shows_copied', async () => {
@@ -153,8 +153,8 @@ test('nonlinux_and_partial_failure_tooltips_explain_na', async () => {
   act(() => h.session('connected', 2));
   act(() => h.publish(sample(34)));
   expect(bar().querySelector('[title="RAM: n/a (meminfo failed)"]')).not.toBeNull();
-  expect(bar().querySelector('[title*="n/a (load failed)"]')?.textContent).toBe('CPU: 34%');
-  expect(bar().querySelector('[title*="n/a (arch failed)"]')?.textContent).toBe('Host: db-beta');
+  expect(bar().querySelector('[title*="n/a (load failed)"]')?.textContent).toBe('CPU 34%');
+  expect(bar().querySelector('[title*="n/a (arch failed)"]')?.textContent).toBe('db-beta');
   expect(bar().querySelector('[title="Network upload: 3.2 KB/s"]')).not.toBeNull();
   expect(bar().querySelector('[title*="Linux-only metrics"]')).toBeNull();
 });
@@ -197,7 +197,9 @@ test('F3 resumes via the verified lease, starts with a fresh baseline, and never
   }
   h.render(<Owner copy={1} />); await act(flush);
   expect(bar().textContent).toContain(reason);
-  expect(bar().textContent).toContain('CPU: —');
+  expect(bar().textContent).toContain('CPU —');
+  // D93: the Resume action sits right after the status, so overflow drops metric values first.
+  expect(bar().querySelector('.ssh-metrics-state')!.nextElementSibling!.tagName).toBe('BUTTON');
   key('ContextMenu'); expect(row('Resume metrics').textContent).toContain('F3');
   expect(row('Copy all metrics').disabled).toBe(true);
   h.render(<></>); await act(flush);
@@ -212,8 +214,8 @@ test('F3 resumes via the verified lease, starts with a fresh baseline, and never
   act(() => emit(sample(99, B, floor)));
   expect(bar().textContent).not.toContain('99%');
   act(() => emit(sample(null, B, floor + 1)));
-  expect(bar().textContent).toContain('CPU: …');
-  expect(bar().textContent).toContain('Network upload: …');
+  expect(bar().textContent).toContain('CPU …');
+  expect(bar().textContent).toContain('↑ …');
   act(() => emit(sample(35, B, floor + 2)));
   expect(bar().textContent).toContain('35%');
   expect(bar().textContent).toContain('3.2KB/s');
@@ -241,7 +243,7 @@ test('restored_reattached_pane_reports_metrics_unavailable_not_disconnected', ()
   const shown = visibleValues().map(v => v.dataset.metric as typeof SSH_METRIC_KEYS[number]);
   expect(shown.length).toBeGreaterThan(1);
   expect(visibleValues().map(v => [v.dataset.metric, v.textContent, v.title])).toEqual(shown.map(k => [k,
-    k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved · n/a` : `${SSH_METRIC_LABELS[k]}: n/a`,
+    k === 'host' ? 'saved · n/a' : `${SSH_METRIC_SHORT_LABELS[k]} n/a`,
     k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved (configured) · n/a` : `${SSH_METRIC_LABELS[k]}: n/a`]));
   expect(bar().textContent).not.toMatch(/…|—|Collecting first sample|Disconnected/);
   open();
@@ -253,7 +255,7 @@ test('restored_reattached_pane_reports_metrics_unavailable_not_disconnected', ()
 test('fresh_unconnected_pane_without_reattach_keeps_disconnected_dashes', () => {
   const h = setup(); h.render(<SshMetricsStatusBar terminalId={A} />);
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('○ Disconnected');
-  expect(bar().textContent).toContain('RAM: —');
+  expect(bar().textContent).toContain('RAM —');
   expect(bar().textContent).not.toContain('n/a');
 });
 
@@ -264,9 +266,22 @@ test('restored_pane_resumes_normal_flow_once_an_app_session_is_observed', () => 
   expect(bar().textContent).toContain('Metrics unavailable');
   act(() => h.session('connected', 1, A));
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('○ Collecting first sample');
-  expect(bar().textContent).toContain('RAM: …');
+  expect(bar().textContent).toContain('RAM …');
   act(() => h.publish(sample(44, A)));
   expect(bar().textContent).toContain('3.2KB/s');
+});
+
+test('D93: bar items are compact and value-first; the full label stays in title and aria-label; dividers are CSS-only', () => {
+  const css = require('fs').readFileSync(require('path').resolve(__dirname, '../SshMetricsStatusBar.css'), 'utf8').replace(/\s+/g, ' ');
+  // The divider is a border on every item after the first, never a DOM node a screen reader could announce.
+  expect(css).toContain('.ssh-metrics-status-bar > * + * { border-left: 1px solid');
+  // Overflow drops whole items from the end (wrap onto a hidden line) instead of truncating CPU/RAM.
+  expect(css).toMatch(/\.ssh-metrics-status-bar \{[^}]*flex-wrap: wrap;[^}]*overflow: hidden;/);
+  expect(css).toContain(".ssh-metrics-value[data-metric='cpu'], .ssh-metrics-value[data-metric='ram'], .ssh-metrics-value[data-metric='netUp'], .ssh-metrics-value[data-metric='netDown'] { flex: none; }");
+  const { SSH_METRIC_KEYS, SSH_METRIC_LABELS, SSH_METRIC_SHORT_LABELS } = require('../sshMetricKeys');
+  // Lowest priority last, so it is the first to drop.
+  expect(SSH_METRIC_KEYS.slice(-4)).toEqual(['uptime', 'users', 'partitions', 'nfs']);
+  for (const key of SSH_METRIC_KEYS) expect(SSH_METRIC_SHORT_LABELS[key].length).toBeLessThanOrEqual(SSH_METRIC_LABELS[key].length);
 });
 
 test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', async () => {
@@ -282,8 +297,9 @@ test('a host with no collector says so instead of Connected, and still shows its
   expect(state.title).toBe(`Metrics not supported on macOS (Darwin) — ${reason}`);
   expect(bar().querySelector('.is-live')).toBeNull();
   expect(state.textContent).not.toContain('Connected');
-  expect(bar().querySelector('[data-metric="host"]')!.textContent).toBe(`${SSH_METRIC_LABELS.host}: mymac`);
-  expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toBe(`${SSH_METRIC_LABELS.cpu}: n/a`);
+  // D93 value-first items: the host item is the bare hostname, the rest lead with the short label.
+  expect(bar().querySelector('[data-metric="host"]')!.textContent).toBe('mymac');
+  expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toBe(`${SSH_METRIC_SHORT_LABELS.cpu} n/a`);
   expect(row('Copy all metrics').disabled).toBe(false);
   await click('Copy all metrics');
   const copied = write.mock.calls[0][0];
