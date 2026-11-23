@@ -3,7 +3,7 @@ use crate::ssh::metrics::reduce::{tests::sample, Reducer};
 use serde_json::{json, to_value};
 
 #[test]
-fn snapshot_json_has_exact_nine_camelcase_keys_and_finite_values() {
+fn snapshot_json_has_nine_camelcase_metric_keys_plus_only_the_platform_label_and_finite_values() {
     let mut reducer = Reducer::default();
     let first = MetricsSnapshot {
         terminal_id: "derived-A".into(),
@@ -75,6 +75,9 @@ fn snapshot_json_has_exact_nine_camelcase_keys_and_finite_values() {
     // An unknown platform is not "unsupported": nothing names it, and Host keeps its own reading.
     let unknown = to_value(sample(&mut reducer, "", &[("platform", "", 1)])).unwrap();
     assert!(unknown.get("unsupportedPlatform").is_none());
+    assert_eq!(unknown.as_object().unwrap().len(), 9);
+    assert_eq!(unknown["host"], json!({"available": true, "hostname": "derived-host",
+        "os": {"available": false, "reason": "Remote OS metadata unavailable"}, "architecture": {"available": true, "name": "arm64"}}));
     assert_eq!(unknown["cpu"], json!({"available": false, "reason": "Remote platform unavailable"}));
     let after = to_value(sample(&mut reducer, "16", &[])).unwrap();
     assert_eq!(after["cpu"]["percent"], json!(null));

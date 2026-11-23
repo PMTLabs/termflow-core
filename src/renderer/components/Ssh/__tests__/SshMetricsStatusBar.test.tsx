@@ -269,7 +269,7 @@ test('restored_pane_resumes_normal_flow_once_an_app_session_is_observed', () => 
   expect(bar().textContent).toContain('3.2KB/s');
 });
 
-test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', () => {
+test('a host with no collector says so instead of Connected, and still shows its measured hostname (D95)', async () => {
   const reason = 'Metrics are supported only on Linux (Darwin)';
   const darwin: SshMetricsSample = { terminalId: B, sampledAt: Date.now(), metrics: {
     host: { available: true, hostname: 'mymac', os: { available: true, name: 'Darwin' }, architecture: { available: true, name: 'arm64' } },
@@ -285,6 +285,13 @@ test('a host with no collector says so instead of Connected, and still shows its
   expect(bar().querySelector('[data-metric="host"]')!.textContent).toBe(`${SSH_METRIC_LABELS.host}: mymac`);
   expect(bar().querySelector('[data-metric="cpu"]')!.textContent).toBe(`${SSH_METRIC_LABELS.cpu}: n/a`);
   expect(row('Copy all metrics').disabled).toBe(false);
+  await click('Copy all metrics');
+  const copied = write.mock.calls[0][0];
+  expect(copied).toBe(formatSshMetricsCopy(darwin));
+  expect(copied).toContain('mymac (Darwin, arm64)');
+  expect(copied).toContain(`n/a (${reason})`);
+  expect(copied).not.toContain('unsupportedPlatform');
+  open();
 
   // A Linux sample right after goes back to the live, Connected bar.
   act(() => h.publish(sample(12)));
