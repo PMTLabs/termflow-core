@@ -283,10 +283,12 @@ fn windows_watchdog_after_a_baseline_drops_rates_and_rewarms() {
 fn windows_qpc_frequency_change_resets_both_baselines() {
     let mut reducer = Reducer::default();
     frame(&mut reducer, 0, 0, "A", 0);
-    let changed = frame_at(&mut reducer, 1, 1, "A", 1, 3_000_000, false);
+    // A higher frequency keeps uptimeTicks increasing (1.0e9 -> 3.6e9), so the
+    // backwards-uptime guard cannot mask a missing frequency check.
+    let changed = frame_at(&mut reducer, 1, 1, "A", 1, 30_000_000, false);
     assert_eq!(cpu_percent_of(&changed), None);
     assert_eq!(rate(&changed.net_down), None);
-    let same = frame_at(&mut reducer, 2, 2, "A", 2, 3_000_000, false);
+    let same = frame_at(&mut reducer, 2, 2, "A", 2, 30_000_000, false);
     assert_eq!(cpu_percent_of(&same), Some(80.0));
     assert!(rate(&same.net_down).is_some());
 }
