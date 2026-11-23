@@ -97,6 +97,26 @@ fn replay(visible: &[u8], rows: u16, cols: u16) -> vt100::Parser {
     parser
 }
 
+/// Gives the shell a prompt the oracle can count and returns how its rows start. zsh and
+/// fish fixtures keep their own prompts, and a caller's own PROMPT or ~/.bashrc wins: not
+/// counted. bash takes PS1 from ~/.bashrc because a system bashrc (Git Bash) replaces an
+/// inherited one.
+fn prompt_mark(f: &Fixture, ordinary: &mut SpawnSpec) -> Option<&'static str> {
+    let base = ordinary.shell.rsplit(['/', '\\']).next().unwrap_or_default().to_ascii_lowercase();
+    match base.trim_end_matches(".exe") {
+        "pwsh" | "powershell" => Some("PS "),
+        "cmd" if !ordinary.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("PROMPT")) => {
+            ordinary.env.push(("PROMPT".into(), "TFP$G".into()));
+            Some("TFP")
+        }
+        "bash" if !f.0.join(".bashrc").exists() => {
+            fs::write(f.0.join(".bashrc"), "PS1='TFP$ '\n").unwrap();
+            Some("TFP")
+        }
+        _ => None,
+    }
+}
+
 fn assert_launch_echo_erased(screen: &str) {
     // The last two are the cmd bootstrap: its block must never be echoed (it carries the nonce).
     for typed in ["builtin printf", "ConvertFrom-Json", "ssh-helpers-v1", "TermFlowSshReady", "endlocal"] {
@@ -114,6 +134,7 @@ fn exercise_after(
     marker: &str,
 ) -> Vec<u8> {
     let (rows, cols) = (ordinary.rows, ordinary.cols);
+    let mark = prompt_mark(f, &mut ordinary);
     let record = f.0.join("argv.json");
     ordinary.env.push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
     ordinary.env.push(("TF_PERCENT".into(), "expanded".into()));
@@ -153,6 +174,14 @@ fn exercise_after(
     assert_launch_echo_erased(&screen);
     let kept = history(&prompts.visible, rows, cols).join("\n");
     assert_launch_echo_erased(&kept);
+    if let Some(mark) = mark {
+        // Above the marker output only the prompt `following` was typed at may remain (plus
+        // the one the fill was typed at): the ready prompt, under the launch, must be gone.
+        // Capture stops at the marker, so later prompts are not counted.
+        let shown = kept.lines().take_while(|line| line.trim_end() != marker)
+            .filter(|line| line.starts_with(mark)).count();
+        assert_eq!(shown, 1 + usize::from(fill.is_some()), "the ready prompt must be erased:\n{kept}");
+    }
     if fill.is_some() {
         // Exact count: an erase that starts above the prompt would delete on-screen FILL rows.
         let fills = kept.lines().filter(|line| line.trim_end() == "FILL").count();

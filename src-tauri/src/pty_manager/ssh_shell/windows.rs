@@ -130,7 +130,7 @@ fn cmd_flags(ordinary: &[String]) -> io::Result<Vec<String>> {
 }
 
 const PS_HOOK_PREFIX: &str = "$script:__termflowSshReadyNonce = [System.IO.File]::ReadAllText('";
-const PS_HOOK_SUFFIX: &str = "; $script:__termflowSshReadySequence++; $__tfWin = $Host.UI.RawUI.WindowSize; $__tfRows = [Math]::Max(1, [Math]::Min($__tfWin.Height - 1, [Math]::Ceiling(1200 / [Math]::Max(20, $__tfWin.Width)) + 1)); [Console]::Write(([string][char]27 + 'D') * $__tfRows + [string][char]27 + '[' + $__tfRows + 'A' + [string][char]27 + '7' + [string][char]27 + ']633;TermFlowSshReady;' + $script:__termflowSshReadyNonce + ';' + $script:__termflowSshReadySequence + [string][char]27 + '\\') }";
+const PS_HOOK_SUFFIX: &str = "; $script:__termflowSshReadySequence++; $__tfRows = 1; try { $__tfWin = $Host.UI.RawUI.WindowSize; $__tfRows = [Math]::Max(1, [Math]::Min($__tfWin.Height - 1, [Math]::Ceiling(1200 / [Math]::Max(20, $__tfWin.Width)) + 1)) } catch {}; [Console]::Write(([string][char]27 + 'D') * $__tfRows + [string][char]27 + '[' + $__tfRows + 'A' + [string][char]27 + '7' + [string][char]27 + ']633;TermFlowSshReady;' + $script:__termflowSshReadyNonce + ';' + $script:__termflowSshReadySequence + [string][char]27 + '\\') }";
 
 fn powershell_hook_tail() -> String {
     let wrapper = PS_CWD_INTEGRATION.strip_suffix(" }").expect("PowerShell prompt wrapper");

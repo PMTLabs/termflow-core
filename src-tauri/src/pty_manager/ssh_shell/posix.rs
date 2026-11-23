@@ -378,9 +378,13 @@ function __termflow_ssh_ready --on-event fish_prompt
     set -l fish_trace
     set -gu __termflow_ssh_seq (math $__termflow_ssh_seq + 1)
     # Quiet launch: reserve rows, then save the cursor at the prompt start (see BASH_HOOK).
-    set -l __termflow_ssh_c (math "max(20, $COLUMNS)")
+    # Unset or empty COLUMNS/LINES would be a math syntax error before the readiness OSC.
+    set -l __termflow_ssh_c 80
+    test -n "$COLUMNS"; and set __termflow_ssh_c (math "max(20, $COLUMNS)")
+    set -l __termflow_ssh_l 24
+    test -n "$LINES"; and set __termflow_ssh_l $LINES
     set -l __termflow_ssh_k (math --scale=0 "(@ECHO_MAX@ + $__termflow_ssh_c - 1) / $__termflow_ssh_c + 1")
-    set __termflow_ssh_k (math "max(1, min($__termflow_ssh_k, $LINES - 1))")
+    set __termflow_ssh_k (math "max(1, min($__termflow_ssh_k, $__termflow_ssh_l - 1))")
     builtin printf '%s\033[%dA\033%s' (string repeat -n $__termflow_ssh_k \eD) $__termflow_ssh_k 7
     builtin printf '\033]633;TermFlowSshReady;@NONCE@;%s\007' $__termflow_ssh_seq
 end
