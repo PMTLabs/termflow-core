@@ -142,13 +142,7 @@ impl StoreAdapter {
                     .as_deref()
                     .ok_or(SessionError::InvalidTarget)?,
             );
-            Some(
-                ssh_key::PrivateKey::read_openssh_file(path)
-                    .map_err(|_| SessionError::IdentityUnreadable)?
-                    .public_key()
-                    .fingerprint(ssh_key::HashAlg::Sha256)
-                    .to_string(),
-            )
+            Some(super::identity::read_identity(&path)?.fingerprint())
         } else {
             None
         };

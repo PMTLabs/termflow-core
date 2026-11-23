@@ -255,6 +255,58 @@ async fn key_identity_and_every_auth_binding_field_are_compared_on_fresh_store()
     std::fs::write(identity, include_str!("../fixtures/client_rsa")).unwrap();
     assert_eq!(s.adapter.load(&b).await, Err(SessionError::StaleAttempt));
 }
+#[tokio::test]
+async fn encrypted_pkcs8_remember_accepts_session_binding_until_file_changes() {
+    let fixture = include_str!("../fixtures/key_formats/rsa_pkcs8_enc");
+    let (binding, ciphertext) =
+        crate::ssh::auth_tests::encrypted_key_flow(fixture, "fixture-pass").await;
+    let s = Setup::new();
+    let identity = s.path.join("identity");
+    std::fs::write(&identity, fixture).unwrap();
+    s.store
+        .transact(
+            |d| {
+                d.connections[0].auth = Auth::KeyFile;
+                d.connections[0].identity_file = Some(identity.to_string_lossy().into());
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+    s.adapter
+        .set_secret_if_binding_matches(&binding, ciphertext.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(s.adapter.load(&binding).await.unwrap(), Some(ciphertext));
+    std::fs::write(&identity, include_str!("../fixtures/key_formats/ecdsa_pkcs8_enc")).unwrap();
+    assert_eq!(s.adapter.load(&binding).await, Err(SessionError::StaleAttempt));
+
+    std::fs::write(&identity, include_str!("../fixtures/key_formats/rsa_pkcs8_enc_resaved")).unwrap();
+    assert_eq!(s.adapter.load(&binding).await, Err(SessionError::StaleAttempt));
+    let mut server = Server::new(1, "alice");
+    server.client = ssh_key::PublicKey::from_openssh(include_str!("../fixtures/key_formats/rsa_pkcs8_enc.pub")).unwrap();
+    let f = Fixture::new(server.clone(), vec![hop("c-a", "alice")], true);
+    let adapter = Arc::new(s.adapter.clone());
+    f.registry.configure(Dependencies {
+        targets: adapter.clone(),
+        streams: Arc::new(MemoryStreams(server)),
+        agents: Arc::new(NativeAgent),
+        secrets: adapter,
+        events: f.events.clone(),
+        known_hosts: crate::ssh::known_hosts::KnownHosts { path: f.path.clone() },
+        home: s.path.clone(),
+    }).unwrap();
+    let id = f.registry.probe("c-a").unwrap();
+    let prompt = wait_state(&f.registry, &id, true, SessionState::NeedsSecret).await;
+    assert_eq!(prompt.secret_kind, Some(crate::ssh::auth::SecretKind::Passphrase));
+    assert_eq!(prompt.error_code.as_deref(), Some("saved-credential-unavailable"));
+    use std::sync::atomic::Ordering::SeqCst;
+    assert_eq!(f.server.counters.auth.load(SeqCst), 0);
+    f.registry.submit_secret(&id, true, None, prompt.prompt_id.as_deref(), "fixture-pass".into(), false).unwrap();
+    wait_state(&f.registry, &id, true, SessionState::Connected).await;
+    assert_eq!(f.server.counters.auth.load(SeqCst), 1);
+    f.registry.shutdown().await;
+}
 #[test]
 fn cancellation_at_final_commit_fence_keeps_candidate_unpublished() {
     let s = Setup::new();

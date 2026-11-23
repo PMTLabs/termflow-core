@@ -58,6 +58,7 @@ pub enum SessionError {
     OutputTooLarge,
     MissingExitStatus,
     IdentityUnreadable,
+    IdentityEncryptionUnsupported,
     UnsupportedAuthentication,
     RememberUnavailable,
     StoreUnavailable,
@@ -89,6 +90,7 @@ impl SessionError {
             Self::OutputTooLarge => "output-too-large",
             Self::MissingExitStatus => "missing-exit-status",
             Self::IdentityUnreadable => "identity-unreadable",
+            Self::IdentityEncryptionUnsupported => "identity-encryption-unsupported",
             Self::UnsupportedAuthentication => "unsupported-authentication",
             Self::RememberUnavailable => "remember-unavailable",
             Self::StoreUnavailable => "store-unavailable",
@@ -119,6 +121,7 @@ impl SessionError {
             Self::OutputTooLarge => "The SSH response was too large. Try an operation that returns less output.".into(),
             Self::MissingExitStatus => "The server did not report how the command ended. Check its SSH logs before retrying.".into(),
             Self::IdentityUnreadable => "Could not read the selected key file. Check its location, permissions and format.".into(),
+            Self::IdentityEncryptionUnsupported => "The selected key file uses an encryption this app can't read. Re-save it with `ssh-keygen -p -o -f <file>` (OpenSSH format) and try again.".into(),
             Self::UnsupportedAuthentication => "This sign-in method is not supported. Check which methods the server allows and select a supported one.".into(),
             Self::RememberUnavailable => "The credential was not saved. Check access to the system keyring before using Remember again.".into(),
             Self::StoreUnavailable => "The SSH connection store is unavailable. Check that saved connections can be opened.".into(),
@@ -1536,12 +1539,7 @@ async fn authenticate(
         Some(
             entry
                 .wait(Duration::from_secs(15), async {
-                    tokio::task::spawn_blocking(move || {
-                        let bytes = std::fs::read_to_string(path)
-                            .map_err(|_| SessionError::IdentityUnreadable)?;
-                        ssh_key::PrivateKey::from_openssh(Zeroizing::new(bytes).as_bytes())
-                            .map_err(|_| SessionError::IdentityUnreadable)
-                    })
+                    tokio::task::spawn_blocking(move || super::identity::read_identity(&path))
                     .await
                     .map_err(|_| SessionError::IdentityUnreadable)?
                 })
@@ -1550,11 +1548,7 @@ async fn authenticate(
     } else {
         None
     };
-    let fingerprint = identity.as_ref().map(|k| {
-        k.public_key()
-            .fingerprint(ssh_key::HashAlg::Sha256)
-            .to_string()
-    });
+    let fingerprint = identity.as_ref().map(super::identity::Identity::fingerprint);
     let binding = AuthBinding::for_hop(hop, fingerprint);
     let kind = if hop.auth == AuthMethod::Password {
         SecretKind::Password
@@ -1563,7 +1557,7 @@ async fn authenticate(
     };
     let cipher = CredentialCipher::default();
     let needs_secret =
-        hop.auth == AuthMethod::Password || identity.as_ref().is_some_and(|k| k.is_encrypted());
+        hop.auth == AuthMethod::Password || identity.as_ref().is_some_and(|key| key.needs_passphrase());
     let mut remember_unavailable = false;
     let mut saved = if needs_secret {
         match entry
@@ -1636,14 +1630,7 @@ async fn authenticate(
             let pass = secret.clone();
             let decoded = entry
                 .wait(Duration::from_secs(30), async {
-                    tokio::task::spawn_blocking(move || {
-                        if key.is_encrypted() {
-                            key.decrypt(pass.as_bytes())
-                                .map_err(|_| SessionError::AuthRejected)
-                        } else {
-                            Ok(key)
-                        }
-                    })
+                    tokio::task::spawn_blocking(move || key.unlock(&pass))
                     .await
                     .map_err(|_| SessionError::IdentityUnreadable)?
                 })
