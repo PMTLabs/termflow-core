@@ -197,7 +197,7 @@ test('Test dialog and prompt pick copy from errorCode, never from the reason tex
   };
   const failed = (errorCode?: string): SshSessionView => ({ ...view('error'), hostKey: undefined, reason: odd, errorCode });
   expect(await dialogFor(failed('host-key-revoked'))).toContain("The host key has been revoked. Contact the server's administrator before trying again.");
-  expect(await dialogFor(failed('cancelled'))).toContain('The SSH attempt was cancelled. Run Test connection again when ready.');
+  expect(await dialogFor(failed('cancelled'))).toContain('The SSH attempt was cancelled. Run Test again when ready.');
   // No prompt was seen in this probe, so the final auth copy is the generic one for the code.
   expect(await dialogFor(failed('auth-rejected'))).toContain("Authentication was not accepted. Check the server's allowed methods and the saved sign-in settings.");
   const fallback = await dialogFor(failed(undefined));

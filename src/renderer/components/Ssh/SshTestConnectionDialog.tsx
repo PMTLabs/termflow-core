@@ -77,12 +77,12 @@ export const failureCopy = new Map([
 // The backend reasons above are context-neutral because they also reach SSH panes, the file
 // browser and metrics. In this dialog the next step is a specific action, so these codes say so.
 export const testDialogCopy = new Map([
-  ["not-connected","The SSH connection is not open. Run Test connection again."],
+  ["not-connected","The SSH connection is not open. Run Test again."],
   ["not-found","The saved connection could not be found. Reopen SSH Connections and select a saved connection."],
-  ["cancelled","The SSH attempt was cancelled. Run Test connection again when ready."],
-  ["stale-attempt","This SSH attempt is no longer current. Run Test connection again."],
-  ["owner-retired","The SSH attempt was closed. Run Test connection again."],
-  ["trust-already-pinned","The host already has a saved key. Run Test connection again to verify it."],
+  ["cancelled","The SSH attempt was cancelled. Run Test again when ready."],
+  ["stale-attempt","This SSH attempt is no longer current. Run Test again."],
+  ["owner-retired","The SSH attempt was closed. Run Test again."],
+  ["trust-already-pinned","The host already has a saved key. Run Test again to verify it."],
 ]);
 const fallback = 'The SSH test could not finish. Check the saved connection settings and try again.';
 function authCopy(kind?: string, auth?: SshConnection['auth'], final = false) {
