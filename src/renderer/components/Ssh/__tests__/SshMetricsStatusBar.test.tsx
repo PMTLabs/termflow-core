@@ -298,3 +298,18 @@ test('a host with no collector says so instead of Connected, and still shows its
   expect(bar().querySelector('.ssh-metrics-state')!.textContent).toBe('● Connected');
   expect(bar().querySelector('.is-live')).not.toBeNull();
 });
+
+test.each(['Metrics collector unavailable', 'Metrics command failed', 'Metrics exec unavailable'])(
+  'whole sample failure is not live: %s', reason => {
+    const reading = sample(null);
+    for (const key of SSH_METRIC_KEYS) Object.assign(reading.metrics, { [key]: na(reason) });
+    reading.metrics.unavailableReason = reason;
+    const h = setup(); h.publish(reading); h.render();
+    const state = bar().querySelector<HTMLElement>('.ssh-metrics-state')!;
+    expect(state.textContent).toBe('○ Metrics unavailable');
+    expect(state.title).toBe(`Metrics unavailable — ${reason}`);
+    expect(bar().querySelector('.is-live')).toBeNull();
+    act(() => h.publish(sample(12)));
+    expect(state.textContent).toBe('● Connected');
+  },
+);

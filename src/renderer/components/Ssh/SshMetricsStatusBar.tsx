@@ -23,9 +23,10 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
   const canReconnect = ended || canResume || session?.state === 'disconnected' || session?.state === 'error';
   // A host with no collector answers every sample, so "Connected" over a row of n/a would hide why (D95).
   const unsupported = sample?.metrics.unsupportedPlatform;
-  const live = !!sample && !unsupported;
+  const failureReason = unavailable ?? sample?.metrics.unavailableReason;
+  const live = !!sample && !unsupported && !failureReason;
   const status = !connected ? (ended ? 'SSH session ended' : session ? SESSION_LABELS[session.state] : restored ? 'Metrics unavailable' : 'Disconnected')
-    : paused ?? (unavailable ? 'Metrics unavailable' : unsupported ? `Metrics not supported on ${unsupported}`
+    : paused ?? (failureReason ? 'Metrics unavailable' : unsupported ? `Metrics not supported on ${unsupported}`
       : sample ? 'Connected' : delayed ? 'Metrics delayed' : 'Collecting first sample');
   const unsupportedReason = unsupported && sample?.metrics.cpu.available === false ? sample.metrics.cpu.reason : undefined;
   const waiting = connected && !canResume && !delayed && !unavailable;
@@ -75,7 +76,7 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
       }}>
       {!!visible.length && <>
         <span className={`ssh-metrics-state${live ? ' is-live' : ''}`}
-          title={[status, connected ? unavailable ?? unsupportedReason : restored ? RESTORED_REASON : session?.reason].filter(Boolean).join(' — ')}>
+          title={[status, connected ? failureReason ?? unsupportedReason : restored ? RESTORED_REASON : session?.reason].filter(Boolean).join(' — ')}>
           <span aria-hidden="true">{live ? '●' : '○'}</span> {status}
         </span>
         {visible.map(key => {

@@ -92,6 +92,7 @@ impl Reducer {
             partitions: raw.local.map(|mounts| Partitions { mounts }).into(),
             nfs: raw.nfs.map(|mounts| Partitions { mounts }).into(),
             unsupported_platform: None,
+            unavailable_reason: None,
         }
     }
 }

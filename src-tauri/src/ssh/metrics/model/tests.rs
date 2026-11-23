@@ -83,3 +83,15 @@ fn snapshot_json_has_nine_camelcase_metric_keys_plus_only_the_platform_label_and
     assert_eq!(after["cpu"]["percent"], json!(null));
     assert_eq!(after["netUp"]["bytesPerSecond"], json!(null));
 }
+
+#[test]
+fn whole_sample_unavailable_has_explicit_reason_without_unsupported_label() {
+    for reason in ["Metrics collector unavailable", "Metrics command failed", "Metrics exec unavailable"] {
+        let value = to_value(Metrics::unavailable(reason)).unwrap();
+        assert_eq!(value["unavailableReason"], json!(reason));
+        assert!(value.get("unsupportedPlatform").is_none());
+        for key in ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
+            assert_eq!(value[key], json!({"available": false, "reason": reason}));
+        }
+    }
+}

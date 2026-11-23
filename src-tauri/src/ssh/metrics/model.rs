@@ -61,11 +61,16 @@ pub struct Metrics {
     /// so instead of "Connected" over a row of n/a. Absent from the wire otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsupported_platform: Option<String>,
+    /// Whole-exec failure: no measurements were obtained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 impl Metrics {
     pub fn unavailable(reason: &str) -> Self {
-        Self::unsupported(reason, Metric::Unavailable(reason.into()), None)
+        let mut metrics = Self::unsupported(reason, Metric::Unavailable(reason.into()), None);
+        metrics.unavailable_reason = Some(reason.into());
+        metrics
     }
 
     /// Every collected metric unavailable for `reason`; `host` is what the platform-neutral
@@ -82,6 +87,7 @@ impl Metrics {
             partitions: Metric::Unavailable(reason.into()),
             nfs: Metric::Unavailable(reason.into()),
             unsupported_platform: platform,
+            unavailable_reason: None,
         }
     }
 }
