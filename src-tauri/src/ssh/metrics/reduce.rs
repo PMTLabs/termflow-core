@@ -4,6 +4,7 @@ use super::protocol::{decimal, RawSample, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use uuid::Uuid;
+mod darwin;
 
 const CPU_INVALID: &str = "Invalid CPU counters";
 const CPU_STALLED: &str = "CPU counters did not advance";
@@ -13,6 +14,7 @@ const NET_ELAPSED: &str = "Remote uptime did not advance";
 
 #[derive(Default)]
 pub struct Reducer {
+    darwin: darwin::Baseline,
     boot: Boot,
     cpu: Option<[u64; 8]>,
     net: Option<Interfaces>,
@@ -36,16 +38,26 @@ impl Reducer {
     /// One instance per terminal/session. A completed watchdog run can retain
     /// instantaneous readings, but neither uses nor seeds a rate baseline.
     pub fn reduce(&mut self, raw: RawSample<'_>) -> Metrics {
-        // Every platform's reading passes here, so a sample that measured nothing is marked once.
-        self.reduce_platform(raw).flag_unmeasured()
+        self.reduce_at(raw, std::time::Instant::now())
     }
 
-    fn reduce_platform(&mut self, raw: RawSample<'_>) -> Metrics {
+    /// `started` is the exec's reserved start, the Darwin rate clock.
+    pub fn reduce_at(&mut self, raw: RawSample<'_>, started: std::time::Instant) -> Metrics {
+        // Every platform's reading passes here, so a sample that measured nothing is marked once.
+        self.reduce_platform(raw, started).flag_unmeasured()
+    }
+
+    fn reduce_platform(&mut self, raw: RawSample<'_>, started: std::time::Instant) -> Metrics {
+        if raw.platform == super::protocol::Platform::Darwin { return darwin::reduce(self, raw, started); }
         if let Some(reason) = raw.platform.unavailable_reason() {
             self.reset();
             let host = host(&raw);
             return Metrics::unsupported(&reason, host, raw.platform.unsupported_label());
         }
+        self.linux(raw)
+    }
+
+    fn linux(&mut self, raw: RawSample<'_>) -> Metrics {
         let stat = rows(&raw, "stat");
         let uptime = rows(&raw, "uptime").and_then(parse_uptime);
         let boot = Boot {

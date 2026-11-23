@@ -125,5 +125,41 @@ EOF
         timeout -s KILL 2 df -P -t nfs -t nfs4
         section_end dfNfs "$?"
     fi
+elif [ "$status" -eq 0 ] && [ "$platform" = Darwin ]; then
+    section swVers /usr/bin/sw_vers
+    section ncpu /usr/sbin/sysctl -n hw.logicalcpu
+    section memsize /usr/sbin/sysctl -n hw.memsize
+    section pagesize /usr/sbin/sysctl -n hw.pagesize
+    section boottime /usr/sbin/sysctl -n kern.boottime
+    section now /bin/date -u +%s
+    section loadavg /usr/sbin/sysctl -n vm.loadavg
+    section vmstat /usr/bin/vm_stat
+    section netstat /usr/sbin/netstat -ibn
+    section iostat /usr/sbin/iostat -c 2 -w 1
+    section who /usr/bin/who
+    inventory=$(/sbin/mount)
+    inventory_status=$?
+    section_begin mounts
+    printf '%s' "$inventory"
+    section_end mounts "$inventory_status"
+    section dfLocal /bin/df -P -l -k
+    has_nfs=no
+    case "$inventory" in *' (nfs,'*|*' (nfs)'*) has_nfs=yes ;; esac
+    section_begin dfNfs
+    watchdog=
+    for candidate in /usr/local/bin/timeout /usr/local/bin/gtimeout /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout; do
+        if [ -x "$candidate" ]; then watchdog=$candidate; break; fi
+    done
+    if [ "$inventory_status" -ne 0 ]; then
+        section_end dfNfs 125
+    elif [ "$has_nfs" = no ]; then
+        section_end dfNfs 0
+    elif [ -n "$watchdog" ]; then
+        "$watchdog" -s KILL 2 /bin/df -P -k -T nfs
+        section_end dfNfs "$?"
+    else
+        section_end dfNfs 127
+    fi
+
 fi
 printf '%sV1_END__\n' "$prefix"
