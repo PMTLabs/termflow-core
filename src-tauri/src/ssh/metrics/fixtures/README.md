@@ -60,6 +60,28 @@ the sanitized bytes independently and fill the literal oracles
 `UBUNTU_FIELDS`, `ALPINE_MEM_TOTAL`, `NFS_LOCAL_IDENTITIES`, and
 `NFS_REMOTE_IDENTITIES`; do not derive expected values from parser output.
 
+## Windows
+
+`windows.txt`: **local console capture; sshd capture pending live test**.
+Windows 11 Pro 10.0.26300, Windows PowerShell 5.1, non-elevated console.
+The final collector and committed gzip payload were run using the production
+UTF-16LE bootstrap under `cmd.exe /d /c` (6,546 command bytes). Stdout was
+captured with LF line endings. Host, users, adapter names (including the
+brackets and numbered suffixes), and the UNC host/share were pseudonymized;
+the measurements and section statuses were not changed. A mapped network
+drive in the console is not evidence of a mapping in the sshd logon session.
+
+The `windows-*.txt` variants are derived, not additional captures: CRLF,
+no quser (127), an empty Size drive, watchdog (137), and an escaped Unicode
+hostname. The latter includes a UTF-16 surrogate pair.
+
+Windows collection uses the same ten-second cadence and five-second deadline.
+The first tick tries POSIX; a framing-free command failure can move Windows
+detection to the next tick. The bootstrap assumes `powershell` is on the outer
+shell's PATH and is not shadowed by a profile alias or function. Outer profile
+startup counts against the deadline. Encoded commands may be blocked by
+endpoint policy; load average is unavailable, and quser excludes SSH sessions.
+
 `derived-malformed.txt` is a handwritten malformed section fragment.
 `derived-who-permission.txt` is a handwritten partial stdout fragment inserted
 under a nonzero permission status. In-memory protocol variants and recording

@@ -21,7 +21,7 @@ use tokio::{
 const A: &str = "tm-a";
 const B: &str = "tm-b";
 const C: &str = "tm-c";
-const WAIT: Duration = Duration::from_secs(super::super::sampler::CADENCE.as_secs() + 8);
+const WAIT: Duration = Duration::from_secs(super::super::sampler::CADENCE.as_secs() * 2 + 8);
 const QUIET: Duration =
     Duration::from_millis(super::super::sampler::CADENCE.as_millis() as u64 + 200);
 
@@ -527,7 +527,13 @@ async fn hidden_or_minimized_owner_exec_count_stops_visible_unfocused_continues(
     rig.sample(B, 4).await;
     assert_eq!(rig.starts(A), 0);
     rig.windows.set(a.label, Some(true), Some(false), false);
-    rig.sample(A, 1).await;
+    // No new registration or native event wakes the sampler; this is the hidden-owner poll.
+    timeout(
+        super::super::sampler::ELIGIBILITY_WAKE + Duration::from_millis(200),
+        rig.sample(A, 1),
+    )
+    .await
+    .expect("restored pane did not collect on the no-exec eligibility wake");
     assert!(rig.starts(B) >= 4);
     let wiring = include_str!("../watch.rs");
     assert!(

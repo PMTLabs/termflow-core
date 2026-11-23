@@ -57,6 +57,9 @@ pub struct Metrics {
     pub users: Metric<Users>,
     pub partitions: Metric<Partitions>,
     pub nfs: Metric<Partitions>,
+    /// Present when a platform uses different names for the same metric slots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<&'static str>,
     /// Set only for a host whose platform has no collector (e.g. `macOS (Darwin)`): the bar says
     /// so instead of "Connected" over a row of n/a. Absent from the wire otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +116,7 @@ impl Metrics {
             users: Metric::Unavailable(reason.into()),
             partitions: Metric::Unavailable(reason.into()),
             nfs: Metric::Unavailable(reason.into()),
+            platform: None,
             unsupported_platform: platform,
             unavailable_reason: None,
         }

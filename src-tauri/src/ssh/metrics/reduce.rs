@@ -1,9 +1,11 @@
 //! Pure reduction of one parsed sample and consecutive per-terminal baselines.
 use super::model::*;
-use super::protocol::{decimal, RawSample, Reading};
+use super::protocol::{decimal, Platform, RawSample, Reading};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use uuid::Uuid;
+
+mod windows;
 
 const CPU_INVALID: &str = "Invalid CPU counters";
 const CPU_STALLED: &str = "CPU counters did not advance";
@@ -16,6 +18,7 @@ pub struct Reducer {
     boot: Boot,
     cpu: Option<[u64; 8]>,
     net: Option<Interfaces>,
+    windows: windows::WindowsRates,
 }
 
 #[derive(Default)]
@@ -41,11 +44,19 @@ impl Reducer {
     }
 
     fn reduce_platform(&mut self, raw: RawSample<'_>) -> Metrics {
-        if let Some(reason) = raw.platform.unavailable_reason() {
-            self.reset();
-            let host = host(&raw);
-            return Metrics::unsupported(&reason, host, raw.platform.unsupported_label());
+        match raw.platform {
+            Platform::Linux => self.reduce_linux(raw),
+            Platform::Windows => windows::reduce_windows(&mut self.windows, raw),
+            _ => {
+                self.reset();
+                let reason = raw.platform.unavailable_reason().expect("unsupported platform");
+                Metrics::unsupported(&reason, host(&raw), raw.platform.unsupported_label())
+            }
         }
+    }
+
+    fn reduce_linux(&mut self, raw: RawSample<'_>) -> Metrics {
+        self.windows = windows::WindowsRates::default();
         let stat = rows(&raw, "stat");
         let uptime = rows(&raw, "uptime").and_then(parse_uptime);
         let boot = Boot {
@@ -96,6 +107,7 @@ impl Reducer {
             users,
             partitions: raw.local.map(|mounts| Partitions { mounts }).into(),
             nfs: raw.nfs.map(|mounts| Partitions { mounts }).into(),
+            platform: None,
             unsupported_platform: None,
             unavailable_reason: None,
         }

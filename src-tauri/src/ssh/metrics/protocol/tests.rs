@@ -166,7 +166,7 @@ fn darwin_capture_marks_every_metric_linux_only() {
 
 fn assert_darwin(s: &RawSample<'_>, hostname: &str, architecture: &str) {
     assert_eq!(s.platform, Platform::Unsupported("Darwin".into()));
-    assert_eq!(s.platform.unavailable_reason().as_deref(), Some("Metrics are supported only on Linux (Darwin)"));
+    assert_eq!(s.platform.unavailable_reason().as_deref(), Some("Metrics are not supported on this platform (Darwin)"));
     assert_eq!(s.platform.unsupported_label().as_deref(), Some("macOS (Darwin)"));
     // T1 is raw: one platform gate supplies the same reason for the eight Linux
     // metrics; all Linux dependencies must be absent rather than zero-filled.

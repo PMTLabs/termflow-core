@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 mod reader;
 mod scheduler;
+mod windows;
 
 const A: &str = "tm-a";
 const B: &str = "tm-b";
@@ -75,6 +76,8 @@ enum Reply {
     Hang,
     Gate(Arc<Notify>),
     Exit(u32),
+    UnframedExit(u32),
+    WindowsWatchdog,
     BadBytes(Vec<u8>),
     NoAck,
     NoStatus,
@@ -89,6 +92,7 @@ enum Reply {
 struct ExecStart {
     at: Instant,
     stopped: CancellationToken,
+    windows: bool,
 }
 
 #[derive(Default)]
@@ -126,13 +130,19 @@ impl Wire {
         host: &str,
     ) -> Result<(), russh::Error> {
         let command = std::str::from_utf8(command).unwrap();
-        let (prefix, suffix) = command.rsplit_once(" || /bin/sh -c 'exit 125'").unwrap();
-        assert!(suffix.is_empty());
-        let (_, nonce) = prefix.rsplit_once(' ').unwrap();
-        assert_eq!(
-            command,
-            super::super::encode(nonce, super::super::COLLECT).unwrap()
-        );
+        let (nonce, windows) =
+            if let Some(nonce) = super::super::windows_command::extract_nonce(command) {
+                (nonce, true)
+            } else {
+                let (prefix, suffix) = command.rsplit_once(" || /bin/sh -c 'exit 125'").unwrap();
+                assert!(suffix.is_empty());
+                let (_, nonce) = prefix.rsplit_once(' ').unwrap();
+                assert_eq!(
+                    command,
+                    super::super::encode(nonce, super::super::COLLECT).unwrap()
+                );
+                (nonce.to_owned(), false)
+            };
         let ch = channel.id();
         let stopped = CancellationToken::new();
         let index = {
@@ -141,6 +151,7 @@ impl Wire {
             starts.push(ExecStart {
                 at: Instant::now(),
                 stopped: stopped.clone(),
+                windows,
             });
             index
         };
@@ -153,7 +164,18 @@ impl Wire {
             Reply::Nfs(exit) | Reply::WatchdogWithChild { exit, .. } => *exit,
             _ => 0,
         };
-        let valid = frame(nonce, host, index, nfs);
+        let valid = if windows {
+            let fixture = if matches!(reply, Reply::WindowsWatchdog) {
+                include_str!("../fixtures/windows-watchdog.txt")
+            } else {
+                include_str!("../fixtures/windows.txt")
+            };
+            fixture
+                .replace("0123456789abcdef0123456789abcdef", &nonce)
+                .into_bytes()
+        } else {
+            frame(&nonce, host, index, nfs)
+        };
         let flood = match reply {
             Reply::Flood { stdout, stderr } => Some((stdout, stderr)),
             _ => None,
@@ -217,6 +239,7 @@ impl Wire {
         });
         match &reply {
             Reply::Hang => return Ok(()),
+            Reply::UnframedExit(_) => {}
             Reply::WatchdogWithChild { ping, pong, .. } => {
                 let (ping, pong) = (ping.clone(), pong.clone());
                 tokio::spawn(async move {
@@ -270,7 +293,7 @@ impl Wire {
         if !matches!(reply, Reply::NoStatus) {
             session.exit_status_request(
                 ch,
-                if let Reply::Exit(code) = reply {
+                if let Reply::Exit(code) | Reply::UnframedExit(code) = reply {
                     code
                 } else {
                     0
@@ -382,9 +405,10 @@ fn admit(worker: &Terminal, f: &Fixture, capture: &Capture, wall: u64) -> Tick {
 }
 
 async fn deliver(worker: &Terminal, f: &Fixture, capture: &Capture, tick: &Tick) {
-    let (result, nonce) = collect(&f.registry, &worker.id, tick.lease.clone()).await;
+    let (result, nonce) =
+        collect(&f.registry, &worker.id, tick.lease.clone(), tick.collector).await;
     worker
-        .finish(&f.registry, capture, tick, classify(&result, &nonce))
+        .finish(&f.registry, capture, tick, &result, &nonce)
         .unwrap();
 }
 
@@ -502,7 +526,7 @@ async fn healthy_start_to_start_and_overruns_skip_without_bursts_or_overlap() {
         );
         tokio::spawn(async move {
             worker
-                .run(&sessions, &*events, None, |_| {
+                .run(&sessions, &*events, None, |_, _| {
                     let (ms, error) = simulated
                         .lock()
                         .pop_front()
@@ -548,7 +572,7 @@ async fn disconnected_cannot_exec_or_emit_even_when_completion_is_late() {
         f.registry.lease(A),
         Err(SessionError::NotConnected)
     ));
-    let (outcome, _) = collect(&f.registry, A, lease).await;
+    let (outcome, _) = collect(&f.registry, A, lease, Collector::FirstPosix).await;
     assert_eq!(outcome.result, Err(SessionError::NotConnected));
     sleep(CADENCE + Duration::from_millis(100)).await;
     // The generation cancelled and joined the real reader; no next work or late telemetry.
@@ -580,7 +604,7 @@ async fn lease_recheck_blocks_emit_before_transition_observer_runs() {
     let first = admit(&worker, &f, &events, 100);
     deliver(&worker, &f, &events, &first).await;
     let late = admit(&worker, &f, &events, 101);
-    let (result, nonce) = collect(&f.registry, A, late.lease.clone()).await;
+    let (result, nonce) = collect(&f.registry, A, late.lease.clone(), late.collector).await;
     assert!(result.result.is_ok());
     f.registry.disconnect(A, "ended before observer");
     assert!(observer.has_changed().unwrap());
@@ -590,7 +614,7 @@ async fn lease_recheck_blocks_emit_before_transition_observer_runs() {
     ));
     assert_eq!(worker.state.lock().generation, Some(first_generation));
     assert_eq!(
-        worker.finish(&f.registry, &*events, &late, classify(&result, &nonce)),
+        worker.finish(&f.registry, &*events, &late, &result, &nonce),
         Err(SessionError::NotConnected)
     );
     assert_eq!(events.events.lock().len(), 1);
@@ -599,7 +623,7 @@ async fn lease_recheck_blocks_emit_before_transition_observer_runs() {
     let fresh = admit(&worker, &f, &events, 102);
     deliver(&worker, &f, &events, &fresh).await;
     assert_eq!(
-        worker.finish(&f.registry, &*events, &late, classify(&result, &nonce)),
+        worker.finish(&f.registry, &*events, &late, &result, &nonce),
         Err(SessionError::NotConnected)
     );
     assert_eq!(events.events.lock().len(), 3);
@@ -638,7 +662,7 @@ async fn watch_floor_survives_backward_wall_clock_and_late_event() {
 }
 
 #[tokio::test]
-async fn resume_clears_baseline_and_samples_within_two_seconds() {
+async fn resume_clears_baseline_and_samples_within_one_cadence() {
     let (f, wire, events, sampler) = rig([]);
     let generation = connect(&f, A).await;
     sampler.set_eligible(A, true).unwrap();

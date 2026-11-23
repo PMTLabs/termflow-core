@@ -150,8 +150,8 @@ test('ssh_metrics_fixture_to_bar_to_clipboard_roundtrip', async () => {
   expect(reading('cpu')).toBe('CPU: …');
   act(() => { advance(1); publish(rates); });
   expect([...host.querySelectorAll('[data-metric]')].map(el => el.textContent)).toEqual([
-    'Host: sample-host', 'CPU: 25%', 'RAM: 0.0 / 0.0 GiB', 'Network upload: 30B/s',
-    'Network download: 15B/s', 'Uptime: 0m 12s', 'Connected users: 3', 'Partitions: / 22%', 'NFS partitions: none mounted',
+    'Host: sample-host', 'CPU: 25%', 'RAM: 0.0 / 0.0 GiB', 'Network upload: 6B/s',
+    'Network download: 3B/s', 'Uptime: 0m 20s', 'Connected users: 3', 'Partitions: / 22%', 'NFS partitions: none mounted',
   ]);
   await menuClick('Uptime');
   await menuClick('Connected users');
@@ -163,9 +163,9 @@ test('ssh_metrics_fixture_to_bar_to_clipboard_roundtrip', async () => {
     'Host:        sample-host (Test Linux 12, arm64)',
     'CPU:         25% · 4 cores · load 1.25',
     'RAM:         0.0 / 0.0 GiB (25%)',
-    'Upload:      30 B/s',
-    'Download:    15 B/s',
-    'Uptime:      0m 12s',
+    'Upload:      6 B/s',
+    'Download:    3 B/s',
+    'Uptime:      0m 20s',
     'Users:       3 (alex, zoe)',
     'Partitions:  / 22% of 100 K',
     'NFS:         none mounted',
@@ -206,8 +206,8 @@ test.each([8, 7])('exec_inflight_disconnect_reconnect_flow_never_resurrects_snap
   expect(reading('netUp')).toBe('Network upload: …');
   act(() => { advance(1); publish({ ...rates, sampledAt: wall }); });
   expect(reading('cpu')).toBe('CPU: 25%');
-  expect(reading('netUp')).toBe('Network upload: 30B/s');
-  expect(reading('netDown')).toBe('Network download: 15B/s');
+  expect(reading('netUp')).toBe('Network upload: 6B/s');
+  expect(reading('netDown')).toBe('Network download: 3B/s');
 });
 
 test('page_hide_is_a_pause_not_a_delay_and_restore_shows_a_fresh_baseline', async () => {
