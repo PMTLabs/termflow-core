@@ -453,3 +453,13 @@ esac");
     assert!(!trace.contains("df -P -k -t nfs"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn production_command_runs_with_original_awk() {
+    let host = Host::new();
+    let original = find_executable("original-awk").expect("install original-awk (BWK) for production encoder coverage");
+    host.utility("awk", &format!("exec '{}' \"$@\"", original.display()));
+    let (command, nonce) = collector_command();
+    let output = host.invoke(&command, &[]);
+    assert_eq!(parse(output.as_bytes(), &nonce).unwrap().platform, Platform::Linux);
+}
