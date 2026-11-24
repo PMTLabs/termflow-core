@@ -1,5 +1,5 @@
 .ssh-pane-shell { position:relative; display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; color:var(--text-primary); background:var(--bg-primary); }
-/* Keep in sync with SSH_PANE_CHROME_H. Plan 070 must add it to its frozen Canvas envelope. */
+/* Keep in sync with SSH_PANE_CHROME_H and the conditional Canvas chrome allocation. */
 .ssh-pane-chrome { position:relative; z-index:5; display:flex; align-items:center; gap:6px; padding:0 6px; flex:none; height:36px; box-sizing:border-box; }
 .ssh-pane-chrome > [role="status"] { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ssh-pane-chrome > button { flex:none; white-space:nowrap; }
@@ -23,6 +23,13 @@
    (sshPaneLayout.ts); canvasSshGeometry.ts SSH_CSS_STATUS_H and sshCanvasGeometry.test.ts pin it.
    Never wraps or grows with its contents. */
 .ssh-status { flex:none; box-sizing:border-box; height:26px; display:flex; align-items:stretch; min-width:0; overflow:hidden; white-space:nowrap; border-top:1px solid var(--border-color); }
+.ssh-watch-item { flex:0 1 auto; min-width:0; max-width:45%; display:flex; align-items:stretch; background:var(--bg-secondary); }
+.ssh-watch-item > .au-btn { display:flex; align-items:center; min-width:0; overflow:hidden; white-space:pre; padding:0 8px; font-size:12px; color:var(--text-primary); }
+.ssh-watch-item > button > svg { flex:none; }
+.ssh-watch-name { overflow:hidden; text-overflow:ellipsis; }
+.ssh-watch-item .ssh-pane-popover { top:auto; bottom:26px; max-height:min(calc(100% - 26px), 360px); white-space:normal; }
+.light-theme .ssh-watch-item { background:var(--tab-bar-background); }
+.light-theme .ssh-watch-item > .au-btn { color:var(--tab-foreground); background:var(--tab-bar-background); }
 .ssh-status > .ssh-status-text { flex:none; display:flex; align-items:center; padding:0 8px; }
 /* The bar fills the rest of the row; the row owns the height and the border, so they never stack. */
 .ssh-status > .ssh-metrics-status-bar { flex:1 1 auto; height:auto; min-width:0; border-top:none; }

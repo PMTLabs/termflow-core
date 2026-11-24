@@ -6,7 +6,8 @@ import { SshSecretPrompt } from './SshSecretPrompt';
 import { SshHostKeyPrompt } from './SshHostKeyPrompt';
 import { SshDisconnectedBanner } from './SshDisconnectedBanner';
 import { SshEditWarning } from './SshEditWarning';
-import type { EditOpen } from './sshFileTypes';
+import { SshIcon } from './SshIcons';
+import type { EditOpen, EditStatus } from './sshFileTypes';
 import { sshStatusMarkerVisible } from './sshStatusLiveness';
 import './SshPaneShell.css';
 import '../Settings/Automations/AutomationsPanel.css'; // house .au-btn styles for prompt and banner buttons
@@ -42,8 +43,8 @@ export interface SshPaneShellProps {
   preferredBrowserWidth?: number;
   onBrowserWidthChange?(width: number): void;
 }
-function SshPaneChrome({ interactive, summaries, children }: {
-  interactive: boolean; summaries: string[]; children: React.ReactNode;
+function SshNoticeDisclosure({ interactive, summaries, edits, children }: {
+  interactive: boolean; summaries: string[]; edits?: EditStatus[]; children: React.ReactNode;
 }) {
   const [requested, setRequested] = React.useState(false);
   const dialogId = React.useId();
@@ -51,7 +52,7 @@ function SshPaneChrome({ interactive, summaries, children }: {
   const invoker = React.useRef<HTMLButtonElement>(null);
   const dialog = React.useRef<HTMLDivElement>(null);
   const open = interactive && requested;
-  const hasItems = summaries.length > 0;
+  const hasItems = (edits?.length ?? summaries.length) > 0;
   // Escape and the Close button return focus to the invoker. An outside click does not: the
   // user just put focus where they clicked (the terminal, the path box) and it stays there.
   const close = React.useCallback((restoreFocus = true) => {
@@ -84,19 +85,27 @@ function SshPaneChrome({ interactive, summaries, children }: {
     };
   }, [open, close]);
 
-  // Always reserve this height, even before the initial snapshot and on the non-owning
-  // presentation. Neither notice changes nor ownership transfers should trigger a fit.
-  return <div className="ssh-pane-chrome" ref={row} tabIndex={interactive ? -1 : undefined}
-    data-canvas-passthrough={interactive ? 'scroll' : undefined} data-ssh-keyboard-owner={interactive ? '' : undefined}>
-    {interactive && hasItems && <span role="status" title={summaries[0]}>{summaries[0]}</span>}
-    {interactive && (hasItems || open) && <button ref={invoker} type="button" className="au-btn"
-      aria-label={summaries.length > 1 ? `SSH notice details (+${summaries.length - 1} more)` : "SSH notice details"} aria-haspopup="dialog" aria-expanded={open}
-      aria-controls={open ? dialogId : undefined} onClick={() => open ? close() : setRequested(true)}>
-      {summaries.length > 1 ? `+${summaries.length - 1} more` : 'Details'}
-    </button>}
-    {open && <div id={dialogId} ref={dialog} className="ssh-pane-popover" role="dialog" aria-label="SSH notices" tabIndex={-1}>
-      <button type="button" className="au-btn" onClick={() => close()}>Close SSH notices</button>
-      {!hasItems && <p>No SSH notices.</p>}
+  // Give idle space back to the terminal. A notice appearing or disappearing may refit it.
+  if (!open && (!interactive || !hasItems)) return null;
+  const count = edits?.length ?? 0;
+  const file = count === 1 ? edits?.[0] : undefined;
+  const basename = file?.path.split(/[\\/]/).filter(Boolean).pop() ?? file?.path;
+  const label = edits ? 'Remote file edits' : 'SSH notices';
+  return <div className={edits ? 'ssh-watch-item' : 'ssh-pane-chrome'} ref={row} tabIndex={interactive ? -1 : undefined}
+    data-canvas-passthrough="scroll" data-ssh-keyboard-owner="">
+    {!edits && hasItems && <span role="status" title={summaries[0]}>{summaries[0]}</span>}
+    <button ref={invoker} type="button" className="au-btn"
+      title={edits?.map(edit => `${edit.path} — ${edit.state}`).join('\n')}
+      aria-label={edits ? `${count} remote ${file ? `file: ${basename} (${file.state})` : 'files'}`.replace(/[\r\n]+/g, ' ')
+        : summaries.length > 1 ? `SSH notice details (+${summaries.length - 1} more)` : 'SSH notice details'}
+      aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? dialogId : undefined}
+      onClick={() => open ? close() : setRequested(true)}>
+      {edits ? <><SshIcon name="disk" size={12} /> {file ? <><span className="ssh-watch-name">{basename}</span><span> · {file.state}</span></> : `${count} files`}</>
+        : summaries.length > 1 ? `+${summaries.length - 1} more` : 'Details'}
+    </button>
+    {open && <div id={dialogId} ref={dialog} className="ssh-pane-popover" role="dialog" aria-label={label} tabIndex={-1}>
+      <button type="button" className="au-btn" onClick={() => close()}>Close {label}</button>
+      {!hasItems && <p>{edits ? 'No remote file edits.' : 'No SSH notices.'}</p>}
       {children}
     </div>}
   </div>;
@@ -171,24 +180,20 @@ export function SshPaneShell(props: SshPaneShellProps) {
   const status = view.state === 'connecting' ? 'Connecting…' : connected ? view.reason : undefined;
   // The chrome follows `owner`, not `interactive`: an inactive surface closes its popover without
   // moving focus and drops its document Escape/click listeners, so they never act on the hidden pane.
-  const renderChrome = (summaries: string[], details: React.ReactNode) => <SshPaneChrome
+  const renderChrome = (summaries: string[], details: React.ReactNode) => <SshNoticeDisclosure
     interactive={owner} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
     {secret && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {hostKey && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {disconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
     {status && <div>{status}</div>}
     {details}
-  </SshPaneChrome>;
+  </SshNoticeDisclosure>;
   // Markers read by Canvas (`canvasGestures.ts`): `data-canvas-passthrough="scroll"` lets a wheel
   // scroll this content instead of the canvas, `data-ssh-keyboard-owner` keeps Canvas shortcuts
   // out of its controls, `data-ssh-interaction-owner` gates dialog focus restore (068 F5).
   // Inert in a pane, where nothing reads them.
-  return <section className="ssh-pane-shell" aria-label="SSH session" data-ssh-interaction-owner={owner ? 'true' : 'false'}>
-    {interactive && view.terminalId
-      ? <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult}>
-          {(summaries, details) => renderChrome(summaries, details)}
-        </SshEditWarning>
-      : renderChrome([], null)}
+  const renderShell = (summaries: string[], details: React.ReactNode, edits: EditStatus[]) => <section className="ssh-pane-shell" aria-label="SSH session" data-ssh-interaction-owner={owner ? 'true' : 'false'}>
+    {renderChrome(summaries, details)}
     <div className="ssh-pane-body" ref={body} data-resizing={preview ? '' : undefined}>
       <aside ref={aside} className={`ssh-browser${props.browserCollapsed ? ' collapsed' : ''}${live ? '' : ' offline'}`} aria-label="Remote browser"
         style={browserStyle} data-canvas-passthrough="scroll" data-ssh-keyboard-owner="">
@@ -235,7 +240,10 @@ export function SshPaneShell(props: SshPaneShellProps) {
     <div className="ssh-status" aria-label="SSH status" data-ssh-keyboard-owner={owner ? '' : undefined}>
       {sshStatusMarkerVisible({ terminalLive: live, barShown: !!props.status, barConnected: !props.statusShowsNotLive })
         && <span className="ssh-status-text">—</span>}
+      <SshNoticeDisclosure interactive={owner} summaries={[]} edits={edits}>{details}</SshNoticeDisclosure>
       {props.status}
     </div>
   </section>;
+  return <SshEditWarning terminalId={view.terminalId ?? ''} enabled={interactive && !!view.terminalId}
+    openResult={view.terminalId ? props.editOpenResult : undefined}>{renderShell}</SshEditWarning>;
 }

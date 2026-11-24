@@ -89,7 +89,6 @@ test.each([
   ['waiting-ready', 'Waiting for the local shell prompt…', 'Cancel'],
   ['waiting-trust', 'Waiting for host verification…', 'Cancel'],
   ['typed', 'SSH command queued for the terminal.', undefined],
-  ['running', 'SSH is running in the terminal.', undefined],
   ['ended', 'SSH has ended.', 'Reconnect'],
   ['blocked', 'SSH launch blocked.', 'Retry'],
   ['error', 'SSH launch failed.', 'Retry'],
@@ -199,4 +198,12 @@ test('a Connect refused for a missing Windows OpenSSH Client shows how to instal
   const message = 'Windows OpenSSH Client is not installed. Turn it on in Settings > System > Optional features > OpenSSH Client, then try again.';
   act(() => root.render(<SshLaunchNotice {...props()} snapshot={{ ...base, stage: 'error', error: { code: 'SshClientMissing', message } }} />));
   expect([...el.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual([message]);
+});
+
+
+test.each(['connected', 'disconnected'] as const)('running SSH with a %s session', state => {
+  act(() => root.render(<SshLaunchNotice {...props()} snapshot={{ ...base, stage: 'running' }}
+    view={{ terminalId: base.terminalId, connectionId: base.connectionId, state, generation: 3, gate: 'blocked', promptId: 'none' }} />));
+  if (state === 'connected') expect(el.querySelector('.ssh-launch-strip')).toBeNull();
+  else { expectFixedStrip(); expect(button('Reconnect')).toBeTruthy(); }
 });

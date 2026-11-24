@@ -31,11 +31,15 @@ function capacity(bytes: number): string {
 }
 
 function mountsText(mounts: MountUsage[], nfs: boolean, compact: boolean): string {
+  return mountLines(mounts, nfs, compact).join(' · ') || 'none mounted';
+}
+
+function mountLines(mounts: MountUsage[], nfs: boolean, compact: boolean): string[] {
   return mounts.map(mount => {
     const location = nfs ? [mount.source, compact ? '' : mount.mountPoint].filter(Boolean).join(' ') : mount.mountPoint;
     const usage = percent(mount.usedPercent);
     return `${location} ${usage}${compact ? '' : ` of ${capacity(mount.totalBytes)}`}`;
-  }).join(' · ') || 'none mounted';
+  });
 }
 
 export interface FormattedMetric {
@@ -43,6 +47,7 @@ export interface FormattedMetric {
   text: string;
   /** Full value for tooltip/accessible description and clipboard. */
   detail: string;
+  tooltipLines?: string[];
 }
 
 /** Formats an eligible sample; the caller owns connection, freshness and loading state. */
@@ -53,12 +58,15 @@ export function formatSshMetric(metrics: SshMetrics, key: MetricKey, mountLimit 
   switch (key) {
     case 'host': {
       const { hostname, os, architecture } = metrics.host as Extract<SshMetrics['host'], { available: true }>;
-      return { text: hostname, detail: `${hostname} (${[os, architecture].map(part => part.available ? part.name : unavailable(part.reason)).join(', ')})` };
+      const parts = [os, architecture].map(part => part.available ? part.name : unavailable(part.reason));
+      return { text: hostname, detail: `${hostname} (${parts.join(', ')})`, tooltipLines: [hostname, ...parts] };
     }
     case 'cpu': {
       const { percent: usage, cores, load1 } = metrics.cpu as Extract<SshMetrics['cpu'], { available: true }>;
       const text = usage === null ? LOADING : percent(usage);
-      return { text, detail: `${text} · ${cores.available ? `${cores.count} cores` : unavailable(cores.reason)} · load ${load1.available ? load1.value.toFixed(2) : unavailable(load1.reason)}` };
+      const tooltipLines = [text, cores.available ? `${cores.count} cores` : unavailable(cores.reason),
+        `load ${load1.available ? load1.value.toFixed(2) : unavailable(load1.reason)}`];
+      return { text, detail: tooltipLines.join(' · '), tooltipLines };
     }
     case 'ram': {
       const { usedBytes, totalBytes, percent: usage } = metrics.ram as Extract<SshMetrics['ram'], { available: true }>;
@@ -76,12 +84,15 @@ export function formatSshMetric(metrics: SshMetrics, key: MetricKey, mountLimit 
     case 'users': {
       const { count, names } = metrics.users as Extract<SshMetrics['users'], { available: true }>;
       const unique = [...new Set(names)].sort();
-      return { text: String(count), detail: unique.length ? `${count} (${unique.join(', ')})` : String(count) };
+      return { text: String(count), detail: unique.length ? `${count} (${unique.join(', ')})` : String(count),
+        tooltipLines: [String(count), ...unique] };
     }
     case 'partitions': case 'nfs': {
       const { mounts } = metrics[key] as Extract<SshMetrics['partitions'], { available: true }>;
       const compact = mountsText(mounts.slice(0, mountLimit), key === 'nfs', true);
-      return { text: mounts.length > mountLimit ? `${compact} · …` : compact, detail: mountsText(mounts, key === 'nfs', false) };
+      const tooltipLines = mountLines(mounts, key === 'nfs', false);
+      return { text: mounts.length > mountLimit ? `${compact} · …` : compact,
+        detail: tooltipLines.join(' · ') || 'none mounted', tooltipLines: tooltipLines.length ? tooltipLines : undefined };
     }
   }
 }

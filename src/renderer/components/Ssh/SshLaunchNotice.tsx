@@ -77,6 +77,7 @@ export function SshLaunchNotice(props: SshLaunchNoticeProps) {
   const reason = stage === 'ended' ? sshLaunchEndReason(snapshot?.error) : shown?.message;
   const cancel = () => { if (snapshot) props.onCancel(snapshot.attempt); };
   const reconnect = stage === 'ended' || ((stage === 'typed' || stage === 'running') && currentView?.state === 'disconnected');
+  if (stage === 'running' && !host && !secret && !reconnect && !reason && !failure && snapshot?.error?.code !== 'Timeout') return null;
   return <SshLaunchStrip status={stageCopy[stage]} overlay={<div className="ssh-launch-overlay">
       {snapshot?.error?.code === 'Timeout' && <div role="status">Return to the local shell prompt</div>}
       {reason && <div role="alert">{reason}</div>}
