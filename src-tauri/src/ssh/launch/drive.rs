@@ -221,7 +221,11 @@ impl Candidate {
                 args[0] = crate::pty_manager::ssh_shell::posix::native_ssh_outer_path(&self.shell, &args[0])?;
             }
             encode_for_shell(
-                &self.shell, args, &root, owner, self.definition.target.hops.len(),
+                &self.shell,
+                args,
+                &root,
+                owner,
+                self.definition.target.hops.len(),
                 native_powershell_launcher(&self.shell, &self.identity),
             )
         })();

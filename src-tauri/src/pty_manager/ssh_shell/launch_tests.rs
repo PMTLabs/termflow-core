@@ -110,7 +110,11 @@ fn prompt_mark(f: &Fixture, ordinary: &mut SpawnSpec) -> Option<&'static str> {
             Some("TFP")
         }
         "bash" if !f.0.join(".bashrc").exists() => {
-            let prompt = if ordinary.rows <= 12 { "PS1='TFP \\w $ '\n" } else { "PS1='TFP$ '\n" };
+            let prompt = if ordinary.rows <= 12 {
+                "PS1='TFP \\w $ '\n"
+            } else {
+                "PS1='TFP$ '\n"
+            };
             fs::write(f.0.join(".bashrc"), prompt).unwrap();
             Some("TFP")
         }
@@ -140,8 +144,11 @@ fn exercise_after(
     let prompt_cols = if ps {
         ordinary.cwd.as_deref().unwrap_or_default().chars().count() + "PS > ".len()
     } else {
-        if matrix { ordinary.cwd.as_deref().unwrap_or_default().chars().count() + "TFP  $ ".len() }
-        else { "TFP$ ".len() }
+        if matrix {
+            ordinary.cwd.as_deref().unwrap_or_default().chars().count() + "TFP  $ ".len()
+        } else {
+            "TFP$ ".len()
+        }
     };
     let mark = prompt_mark(f, &mut ordinary);
     let record = f.0.join("argv.json");
@@ -197,15 +204,24 @@ fn exercise_after(
         .count()
         .div_ceil(width);
     if matrix && (cols, rows) == (40, 6) {
-        eprintln!("{} {cols}x{rows}: {prompt_rows} prompt + {typed_rows} typed rows; {reserve} reserved", ordinary.shell);
+        eprintln!(
+            "{} {cols}x{rows}: {prompt_rows} prompt + {typed_rows} typed rows; {reserve} reserved",
+            ordinary.shell
+        );
     }
     if matrix {
         // vt100's row text omits padding from empty cells, so join wraps
         // without stripping actual spaces from the typed line.
         let joined_history = kept.replace('\n', "");
         let joined_screen = screen.replace('\n', "");
-        let typed = launch_line.trim_end_matches('\r').chars().collect::<Vec<_>>();
-        for fragment in typed.windows(12).map(|window| window.iter().collect::<String>()) {
+        let typed = launch_line
+            .trim_end_matches('\r')
+            .chars()
+            .collect::<Vec<_>>();
+        for fragment in typed
+            .windows(12)
+            .map(|window| window.iter().collect::<String>())
+        {
             assert!(
                 !joined_history.contains(&fragment) && !joined_screen.contains(&fragment),
                 "{cols}x{rows}: leaked {fragment:?}\n{kept}\n{screen}"
@@ -586,8 +602,14 @@ fn powershell_launcher_is_constant_and_missing_launcher_fails_closed() {
             hook.as_str(),
             "$script:__termflowSshLaunch = { 'TF_REPLACED' }",
         ),
-        (hook.as_str(), "Remove-Variable -Name __termflowSshLaunch -Scope Script -Force"),
-        (hook.as_str(), "Set-Variable -Name __termflowSshLaunch -Scope Script -Force -Value { 'TF_REPLACED' }"),
+        (
+            hook.as_str(),
+            "Remove-Variable -Name __termflowSshLaunch -Scope Script -Force",
+        ),
+        (
+            hook.as_str(),
+            "Set-Variable -Name __termflowSshLaunch -Scope Script -Force -Value { 'TF_REPLACED' }",
+        ),
         (legacy_hook.as_str(), call),
     ] {
         let record = f.0.join("argv.json");
@@ -632,7 +654,9 @@ fn native_sampler_detects_the_instrumented_powershell_process() {
     let spec = ordinary(&f, &pwsh, &["-NoLogo", "-NoProfile"]);
     let adapter = f.instrument(&spec);
     let mut unrelated = spec.clone();
-    unrelated.args.extend(["-NoExit".into(), "-Command".into(), "$null".into()]);
+    unrelated
+        .args
+        .extend(["-NoExit".into(), "-Command".into(), "$null".into()]);
     for (spec, expected) in [(&adapter.spec, true), (&spec, false), (&unrelated, false)] {
         let mut shell = Running::start(spec);
         let identity = ProcessIdentity::capture(shell.child.process_id().unwrap()).unwrap();
@@ -651,9 +675,13 @@ fn native_sampler_detects_the_instrumented_powershell_process() {
 #[test]
 fn unix_native_sampler_detects_the_instrumented_powershell_process() {
     use crate::ssh::launch::native_powershell_launcher;
-    let pwsh = std::env::var_os("TERMFLOW_TEST_PWSH").map(PathBuf::from).or_else(|| {
-        std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join("pwsh")).find(|path| path.is_file())
-    });
+    let pwsh = std::env::var_os("TERMFLOW_TEST_PWSH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::split_paths(&std::env::var_os("PATH")?)
+                .map(|dir| dir.join("pwsh"))
+                .find(|path| path.is_file())
+        });
     let Some(pwsh) = pwsh else {
         eprintln!("skipping Unix native PowerShell sampler: pwsh is not on PATH");
         return;
@@ -665,7 +693,9 @@ fn unix_native_sampler_detects_the_instrumented_powershell_process() {
     plain.args = vec!["-NoLogo".into(), "-NoProfile".into()];
     let adapter = f.instrument(&plain);
     let mut unrelated = plain.clone();
-    unrelated.args.extend(["-NoExit".into(), "-Command".into(), "$null".into()]);
+    unrelated
+        .args
+        .extend(["-NoExit".into(), "-Command".into(), "$null".into()]);
     for (spec, expected) in [(&adapter.spec, true), (&plain, false), (&unrelated, false)] {
         use std::process::{Command, Stdio};
         let mut shell = Command::new(&spec.shell)
@@ -690,7 +720,15 @@ fn unix_two_hop_powershell_uses_short_launch_only_when_hook_is_present() {
     use crate::ssh::launch::encode_for_shell;
     let f = Fixture::new();
     for (gate, prefix) in [(true, "& ([scriptblock]"), (false, "& { [Console]")] {
-        let launch = encode_for_shell("pwsh", vec!["/usr/bin/ssh".into()], &f.root(), owner(), 2, gate).unwrap();
+        let launch = encode_for_shell(
+            "pwsh",
+            vec!["/usr/bin/ssh".into()],
+            &f.root(),
+            owner(),
+            2,
+            gate,
+        )
+        .unwrap();
         let typed = std::str::from_utf8(launch.bytes()).unwrap();
         assert!(typed.starts_with(prefix));
         if gate {
@@ -699,9 +737,21 @@ fn unix_two_hop_powershell_uses_short_launch_only_when_hook_is_present() {
         launch.finish_after_quiescence().unwrap();
     }
     let root = f.root();
-    let launch = encode_for_shell("/bin/bash", vec!["/usr/bin/ssh".into()], &root, owner(), 2, false).unwrap();
-    let id = std::str::from_utf8(launch.bytes()).unwrap()
-        .strip_prefix(r"\__tfssh ").unwrap().strip_suffix('\r').unwrap();
+    let launch = encode_for_shell(
+        "/bin/bash",
+        vec!["/usr/bin/ssh".into()],
+        &root,
+        owner(),
+        2,
+        false,
+    )
+    .unwrap();
+    let id = std::str::from_utf8(launch.bytes())
+        .unwrap()
+        .strip_prefix(r"\__tfssh ")
+        .unwrap()
+        .strip_suffix('\r')
+        .unwrap();
     assert_eq!(uuid::Uuid::parse_str(id).unwrap().to_string(), id);
     let helper = fs::read_to_string(root.path().join(id).join("helper.sh")).unwrap();
     assert!(helper.contains("command /usr/bin/env SHELL=/bin/sh "));
@@ -709,8 +759,10 @@ fn unix_two_hop_powershell_uses_short_launch_only_when_hook_is_present() {
 }
 
 fn assert_powershell_id_call(typed: &str) {
-    let id = typed.strip_prefix("& ([scriptblock]$script:__termflowSshLaunch) '")
-        .and_then(|tail| tail.strip_suffix("'\r")).unwrap();
+    let id = typed
+        .strip_prefix("& ([scriptblock]$script:__termflowSshLaunch) '")
+        .and_then(|tail| tail.strip_suffix("'\r"))
+        .unwrap();
     assert_eq!(uuid::Uuid::parse_str(id).unwrap().to_string(), id);
 }
 
@@ -733,10 +785,22 @@ fn powershell_launch_selection_requires_the_exact_current_hook() {
     for (argv, prefix) in [
         (vec!["-NoExit".into()], "& { [Console]"),
         (vec!["-Command".into(), legacy], "& { [Console]"),
-        (vec!["-Command".into(), format!("{hook}; 'x'")], "& { [Console]"),
-        (vec!["-Command".into(), format!("'x'; {hook}")], "& { [Console]"),
+        (
+            vec!["-Command".into(), format!("{hook}; 'x'")],
+            "& { [Console]",
+        ),
+        (
+            vec!["-Command".into(), format!("'x'; {hook}")],
+            "& { [Console]",
+        ),
         (vec!["-File".into(), hook.clone()], "& { [Console]"),
-        (vec!["-Command".into(), windows::powershell_hook_command(f.0.join("other.txt").to_str().unwrap()).unwrap()], "& { [Console]"),
+        (
+            vec![
+                "-Command".into(),
+                windows::powershell_hook_command(f.0.join("other.txt").to_str().unwrap()).unwrap(),
+            ],
+            "& { [Console]",
+        ),
         (
             vec!["-Command".into(), hook],
             "& ([scriptblock]$script:__termflowSshLaunch) ",
@@ -760,22 +824,34 @@ fn powershell_launch_selection_requires_the_exact_current_hook() {
     }
 }
 
-
 // Snapshot within one interactive input line, so no readiness prompt runs
 // between snapshots and all hook state is already present in the baseline.
 fn assert_launch_state(mut spec: SpawnSpec, f: &Fixture, dialect: Option<Dialect>) {
     let record = f.0.join("argv.json");
-    spec.env.push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
+    spec.env
+        .push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
     let exe = recorder(f);
     let exe = if dialect.is_some() {
         shell_path(&exe, classify(&spec.shell).unwrap().1).unwrap()
-    } else { exe.to_str().unwrap().to_owned() };
+    } else {
+        exe.to_str().unwrap().to_owned()
+    };
     let adapter = f.instrument(&spec);
-    let encode = if dialect.is_some() { encode_launch } else {
+    let encode = if dialect.is_some() {
+        encode_launch
+    } else {
         super::super::launch::encode_launch_with_powershell_hook
     };
-    let launch = encode(&spec.shell, vec![exe, "state-check".into()], &f.root(), owner()).unwrap();
-    let typed = std::str::from_utf8(launch.bytes()).unwrap().trim_end_matches('\r');
+    let launch = encode(
+        &spec.shell,
+        vec![exe, "state-check".into()],
+        &f.root(),
+        owner(),
+    )
+    .unwrap();
+    let typed = std::str::from_utf8(launch.bytes())
+        .unwrap()
+        .trim_end_matches('\r');
     let (prefix, id) = typed.rsplit_once(' ').unwrap();
     let volatile = if dialect.is_none() {
         // Execute at the interactive shell's top level, after its first prompt,
@@ -784,7 +860,9 @@ fn assert_launch_state(mut spec: SpawnSpec, f: &Fixture, dialect: Option<Dialect
         spec.args.last_mut().unwrap().push_str(&format!(r#"; prompt | Out-Null; function tfSnapshot {{ Get-Variable -Scope Global | Where-Object Name -NotIn @('_','PSItem','?','^','$','Error','LASTEXITCODE','StackTrace') | ForEach-Object {{ $_.Name + ':' + $_.Options + ':' + $(if ($_.Name -eq 'Host') {{ $_.Value.InstanceId }} else {{ ConvertTo-Json -InputObject $_.Value -Compress -Depth 2 -WarningAction SilentlyContinue }}) }} }}; tfSnapshot > tf-before; {typed}; tfSnapshot > tf-success; try {{ & $script:__termflowSshLaunch '../x' }} catch {{ [Console]::WriteLine($_.Exception.Message) }}; tfSnapshot > tf-refused; prompt | Out-Null; exit 0"#));
         let mut shell = Running::start(&spec);
         let mut prompts = Prompts::new();
-        prompts.until(&shell, |p| String::from_utf8_lossy(&p.visible).contains("Invalid SSH launch id"));
+        prompts.until(&shell, |p| {
+            String::from_utf8_lossy(&p.visible).contains("Invalid SSH launch id")
+        });
         assert!(String::from_utf8_lossy(&prompts.visible).contains("Invalid SSH launch id"));
         shell.wait_success();
         &[][..]
@@ -810,22 +888,43 @@ fn assert_launch_state(mut spec: SpawnSpec, f: &Fixture, dialect: Option<Dialect
         shell.send(&format!("{setup}{snapshot} > tf-before; {typed}; {snapshot} > tf-success; {refused}; {snapshot} > tf-refused\r"));
         prompts.until(&shell, |p| p.count > ready);
         let output = String::from_utf8_lossy(&prompts.visible[before..]);
-        assert!(output.contains("Invalid SSH launch id"), "{dialect:?}: {output}");
+        assert!(
+            output.contains("Invalid SSH launch id"),
+            "{dialect:?}: {output}"
+        );
         shell.send("exit 0\r");
         shell.wait_success();
         volatile
     };
-    assert_eq!(serde_json::from_slice::<Vec<String>>(&fs::read(record).unwrap()).unwrap(), ["state-check"]);
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&fs::read(record).unwrap()).unwrap(),
+        ["state-check"]
+    );
     let read = |name| {
         let text = fs::read_to_string(f.0.join(name)).unwrap();
-        let mut lines = text.lines().filter(|line| {
-            let name = if line.starts_with("declare ") || line.starts_with("typeset ") || line.starts_with("export ") {
-                line.split_ascii_whitespace().skip(1).find(|word| !word.starts_with('-')).unwrap_or("").split('=').next().unwrap()
-            } else if let Some(fish) = line.strip_prefix('$') {
-                fish.split([':', '[']).next().unwrap()
-            } else { line };
-            !volatile.contains(&name)
-        }).map(str::to_owned).collect::<Vec<_>>();
+        let mut lines = text
+            .lines()
+            .filter(|line| {
+                let name = if line.starts_with("declare ")
+                    || line.starts_with("typeset ")
+                    || line.starts_with("export ")
+                {
+                    line.split_ascii_whitespace()
+                        .skip(1)
+                        .find(|word| !word.starts_with('-'))
+                        .unwrap_or("")
+                        .split('=')
+                        .next()
+                        .unwrap()
+                } else if let Some(fish) = line.strip_prefix('$') {
+                    fish.split([':', '[']).next().unwrap()
+                } else {
+                    line
+                };
+                !volatile.contains(&name)
+            })
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         lines.sort();
         lines
     };
@@ -833,39 +932,67 @@ fn assert_launch_state(mut spec: SpawnSpec, f: &Fixture, dialect: Option<Dialect
     assert!(!baseline.is_empty());
     for name in ["tf-success", "tf-refused"] {
         let after = read(name);
-        let removed = baseline.iter().filter(|line| !after.contains(line)).collect::<Vec<_>>();
-        let added = after.iter().filter(|line| !baseline.contains(line)).collect::<Vec<_>>();
-        assert!(baseline == after, "{dialect:?} {name}: removed {removed:?}; added {added:?}");
+        let removed = baseline
+            .iter()
+            .filter(|line| !after.contains(line))
+            .collect::<Vec<_>>();
+        let added = after
+            .iter()
+            .filter(|line| !baseline.contains(line))
+            .collect::<Vec<_>>();
+        assert!(
+            baseline == after,
+            "{dialect:?} {name}: removed {removed:?}; added {added:?}"
+        );
     }
     launch.finish_after_quiescence().unwrap();
     adapter.finish_after_shell_quiescence().unwrap();
 }
 
 fn posix_launcher_state(dialect: Dialect) {
-    if !matrix().contains(&dialect) { return; }
+    if !matrix().contains(&dialect) {
+        return;
+    }
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     assert_launch_state(spec(&f, dialect, false), &f, Some(dialect));
 }
 
 #[test]
-fn bash_launcher_preserves_state() { posix_launcher_state(Dialect::Bash); }
+fn bash_launcher_preserves_state() {
+    posix_launcher_state(Dialect::Bash);
+}
 #[cfg(unix)]
 #[test]
-fn zsh_launcher_preserves_state() { posix_launcher_state(Dialect::Zsh); }
+fn zsh_launcher_preserves_state() {
+    posix_launcher_state(Dialect::Zsh);
+}
 #[cfg(unix)]
 #[test]
-fn fish_launcher_preserves_state() { posix_launcher_state(Dialect::Fish); }
+fn fish_launcher_preserves_state() {
+    posix_launcher_state(Dialect::Fish);
+}
 
 fn test_pwsh() -> Option<String> {
     #[cfg(windows)]
-    { Some(super::windows_tests::installed("TERMFLOW_TEST_PWSH", PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join(r"PowerShell\7\pwsh.exe"))) }
+    {
+        Some(super::windows_tests::installed(
+            "TERMFLOW_TEST_PWSH",
+            PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join(r"PowerShell\7\pwsh.exe"),
+        ))
+    }
     #[cfg(unix)]
     {
-        let path = std::env::var_os("TERMFLOW_TEST_PWSH").map(PathBuf::from).or_else(|| {
-            std::env::split_paths(&std::env::var_os("PATH")?).map(|dir| dir.join("pwsh")).find(|path| path.is_file())
-        });
-        if path.is_none() { eprintln!("skipping PowerShell test: pwsh unavailable"); }
+        let path = std::env::var_os("TERMFLOW_TEST_PWSH")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::split_paths(&std::env::var_os("PATH")?)
+                    .map(|dir| dir.join("pwsh"))
+                    .find(|path| path.is_file())
+            });
+        if path.is_none() {
+            eprintln!("skipping PowerShell test: pwsh unavailable");
+        }
         path.map(|p| p.to_str().unwrap().to_owned())
     }
 }
@@ -882,24 +1009,42 @@ fn powershell_launcher_preserves_state() {
 }
 
 const HOSTILE_IDS: &[&str] = &[
-    "../x", "..", "/etc/passwd", r"C:\Windows\x", "a/b", r"a\b",
+    "../x",
+    "..",
+    "/etc/passwd",
+    r"C:\Windows\x",
+    "a/b",
+    r"a\b",
     "ABCDEF12-3456-7890-abcd-123456789abc",
     "abcdef12-3456-7890-abcd-123456789abc;whoami",
-    "abcdef12-3456-7890-abcd-123456789abc x", "",
+    "abcdef12-3456-7890-abcd-123456789abc x",
+    "",
     "abcdef12-3456-7890-abcd-123456789abc\n",
     "abcdef12-3456-7890-abcd-123456789abc",
 ];
 
 fn hostile_posix_words(dialect: Dialect, id: &str, extra: bool) -> String {
-    let quote = if dialect == Dialect::Fish { fish_quote } else { sh_typed_quote };
+    let quote = if dialect == Dialect::Fish {
+        fish_quote
+    } else {
+        sh_typed_quote
+    };
     let word = if let Some(base) = id.strip_suffix('\n') {
         // Pass a literal newline to the launcher without sending Enter to the editor.
-        let newline = if dialect == Dialect::Fish { r"\n" } else { r"$'\n'" };
+        let newline = if dialect == Dialect::Fish {
+            r"\n"
+        } else {
+            r"$'\n'"
+        };
         format!("{}{newline}", quote(base))
     } else {
         quote(id)
     };
-    if extra { format!("{word} extra") } else { word }
+    if extra {
+        format!("{word} extra")
+    } else {
+        word
+    }
 }
 
 #[test]
@@ -909,7 +1054,8 @@ fn posix_launch_refuses_hostile_ids() {
         let f = Fixture::new();
         let mut spec = spec(&f, dialect, false);
         let record = f.0.join("argv.json");
-        spec.env.push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
+        spec.env
+            .push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
         spec.env.push(("LC_ALL".into(), "C".into()));
         let exe = shell_path(&recorder(&f), classify(&spec.shell).unwrap().1).unwrap();
         let launch = encode_launch(&spec.shell, vec![exe], &f.root(), owner()).unwrap();
@@ -926,8 +1072,15 @@ fn posix_launch_refuses_hostile_ids() {
             shell.send(&format!("{prefix} {quoted}\r"));
             prompts.until(&shell, |p| p.count > ready);
             let output = String::from_utf8_lossy(&prompts.visible[before..]);
-            let error = if i + 1 == HOSTILE_IDS.len() { "no such file" } else { "invalid ssh launch id" };
-            assert!(output.to_ascii_lowercase().contains(error), "{dialect:?} {id:?}: {output}");
+            let error = if i + 1 == HOSTILE_IDS.len() {
+                "no such file"
+            } else {
+                "invalid ssh launch id"
+            };
+            assert!(
+                output.to_ascii_lowercase().contains(error),
+                "{dialect:?} {id:?}: {output}"
+            );
             assert!(!record.exists());
         }
         shell.send("exit 0\r");
@@ -952,12 +1105,24 @@ fn powershell_launch_refuses_hostile_ids() {
         let id = id.replace('\'', "''");
         let extra = if i == HOSTILE_IDS.len() { " extra" } else { "" };
         let command = format!("{hook}; $ErrorActionPreference = 'Stop'; try {{ & $script:__termflowSshLaunch '{id}'{extra}; 'TF_NO_ERROR' }} catch {{ [Console]::Error.WriteLine($_.Exception.Message) }}; 'TF_SURVIVED'");
-        let output = std::process::Command::new(&pwsh).args(["-NoProfile", "-Command", &command]).env("TF_ARGV_RECORD", &record).output().unwrap();
+        let output = std::process::Command::new(&pwsh)
+            .args(["-NoProfile", "-Command", &command])
+            .env("TF_ARGV_RECORD", &record)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let error = if i + 1 == HOSTILE_IDS.len() { "helper.json" } else { "Invalid SSH launch id" };
+        let error = if i + 1 == HOSTILE_IDS.len() {
+            "helper.json"
+        } else {
+            "Invalid SSH launch id"
+        };
         assert!(stderr.contains(error), "{id:?}: {stderr}");
-        assert!(output.status.success() && stdout.contains("TF_SURVIVED") && !stdout.contains("TF_NO_ERROR"));
+        assert!(
+            output.status.success()
+                && stdout.contains("TF_SURVIVED")
+                && !stdout.contains("TF_NO_ERROR")
+        );
         assert!(!record.exists());
     }
     adapter.finish_after_shell_quiescence().unwrap();
@@ -1022,7 +1187,11 @@ fn small_pane_launch_matrix() {
                             "echo 'TF_MATRIX_'\"RETURNED\"\r",
                         )
                     };
-                    let cwd = parent.0.parent().unwrap().join(format!("cwd-{}", uuid::Uuid::new_v4().simple()));
+                    let cwd = parent
+                        .0
+                        .parent()
+                        .unwrap()
+                        .join(format!("cwd-{}", uuid::Uuid::new_v4().simple()));
                     fs::create_dir(&cwd).unwrap();
                     let cwd_fixture = Fixture(cwd);
                     let cwd = &cwd_fixture.0;

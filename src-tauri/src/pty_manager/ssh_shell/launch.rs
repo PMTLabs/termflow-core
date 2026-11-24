@@ -136,7 +136,9 @@ fn encode(
                 let quoted = ps_quote(path)?;
                 if powershell_hook {
                     let id = entry_id(Path::new(path))?;
-                    Ok(format!("& ([scriptblock]$script:__termflowSshLaunch) '{id}'"))
+                    Ok(format!(
+                        "& ([scriptblock]$script:__termflowSshLaunch) '{id}'"
+                    ))
                 } else {
                     Ok(ps_launch(&format!("[IO.File]::ReadAllText({quoted})")))
                 }
@@ -238,8 +240,14 @@ pub(super) fn sh_typed_quote(value: &str) -> String {
 }
 
 fn entry_id(path: &Path) -> io::Result<uuid::Uuid> {
-    path.parent().and_then(Path::file_name).and_then(|entry| entry.to_str())
-        .and_then(|entry| uuid::Uuid::parse_str(entry).ok().filter(|id| id.to_string() == entry))
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|entry| entry.to_str())
+        .and_then(|entry| {
+            uuid::Uuid::parse_str(entry)
+                .ok()
+                .filter(|id| id.to_string() == entry)
+        })
         .ok_or_else(|| adapter_error("invalid SSH launch entry id"))
 }
 

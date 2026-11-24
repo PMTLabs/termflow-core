@@ -124,9 +124,19 @@ end
                 // Apple_Terminal session script runs).
                 let home = effective_env("HOME").ok_or_else(|| adapter_error("SSH readiness requires HOME for a bash login shell"))?;
                 // bash derives the default HISTFILE from HOME before any startup file.
-                let history = if effective_env("HISTFILE").is_some() { "" } else { "HISTFILE=$HOME/.bash_history\n" };
-                let hook = format!("builtin export HOME={}\n{history}{}{launcher}{}", sh_quote(&home),
-                    BASH_LOGIN_RC.split_once('\n').expect("login rc lines").1, BASH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX));
+                let history = if effective_env("HISTFILE").is_some() {
+                    ""
+                } else {
+                    "HISTFILE=$HOME/.bash_history\n"
+                };
+                let hook = format!(
+                    "builtin export HOME={}\n{history}{}{launcher}{}",
+                    sh_quote(&home),
+                    BASH_LOGIN_RC.split_once('\n').expect("login rc lines").1,
+                    BASH_HOOK
+                        .replace("@NONCE@", nonce)
+                        .replace("@ECHO_MAX@", ECHO_MAX)
+                );
                 let helper = output.publish(root, &supervisor, paths, ".bash_profile", &hook)?;
                 let dir = helper.rsplit_once('/').ok_or_else(|| adapter_error("invalid bash hook directory"))?.0;
                 output.spec.env.retain(|(key, _)| key != "HOME");
@@ -141,7 +151,11 @@ end
                 } else {
                     "if [[ -r $HOME/.bashrc ]]; then builtin source \"$HOME/.bashrc\"; fi\n".into()
                 };
-                let hook = source + &launcher + &BASH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX);
+                let hook = source
+                    + &launcher
+                    + &BASH_HOOK
+                        .replace("@NONCE@", nonce)
+                        .replace("@ECHO_MAX@", ECHO_MAX);
                 let helper = output.publish(root, &supervisor, paths, "sh", &hook)?;
                 if args.login {
                     // bash ignores --rcfile on a native login. Use its interactive ENV
@@ -184,8 +198,20 @@ end
                 output.spec.env.push(("ZDOTDIR".into(), next.expect("zsh has startup phases")));
             }
             Dialect::Fish => {
-                let helper = output.publish(root, &supervisor, paths, "fish", &(launcher + &FISH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX)))?;
-                output.spec.args.extend(["--init-command".into(), format!("source {}", fish_quote(&helper))]);
+                let helper = output.publish(
+                    root,
+                    &supervisor,
+                    paths,
+                    "fish",
+                    &(launcher
+                        + &FISH_HOOK
+                            .replace("@NONCE@", nonce)
+                            .replace("@ECHO_MAX@", ECHO_MAX)),
+                )?;
+                output.spec.args.extend([
+                    "--init-command".into(),
+                    format!("source {}", fish_quote(&helper)),
+                ]);
             }
         }
         Ok(())
@@ -200,7 +226,8 @@ end
 const LAUNCH_ID_REGEX: &str = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
 fn bourne_id_launcher(root: &str) -> String {
-    format!(r#"
+    format!(
+        r#"
     local id_re='^{LAUNCH_ID_REGEX}$' id="$1"
     local lower="${{id//A/a}}"
     lower="${{lower//B/b}}"; lower="${{lower//C/c}}"; lower="${{lower//D/d}}"
@@ -211,7 +238,9 @@ fn bourne_id_launcher(root: &str) -> String {
         return 1
     fi
     builtin . {}"/$1/helper.sh"
-"#, sh_quote(root))
+"#,
+        sh_quote(root)
+    )
 }
 
 pub(super) fn is_powershell(executable: &str) -> bool {
