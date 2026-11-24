@@ -254,6 +254,10 @@ struct RegisteredPrompt {
 /// and the local FIFO-head decision. It must be acquired before the input locks.
 pub(crate) trait InputFence<E> {
     fn qualify<T>(&self, work: impl FnOnce() -> Result<T, E>) -> Result<T, E>;
+
+    // Only the bare-shell check may identify its refusal as retryable.
+    fn refused_not_bare(&self) -> bool { false }
+    fn possibly_written(&self) -> bool { true }
 }
 
 struct Unfenced;
@@ -371,6 +375,42 @@ impl ProcessInput {
         self.attempt = None;
         self.lease_epoch = next_epoch;
         Ok(())
+    }
+}
+
+struct LaunchConsume {
+    ready: ReadyEpoch,
+    prompt_epoch: u64,
+    stdin_writes: Option<u64>,
+}
+
+impl LaunchConsume {
+    /// Restore only a zero-byte refusal: the FIFO head refused before entering
+    /// write(), and nothing else was admitted since this launch consumed readiness.
+    fn restore(
+        self, state: &mut ProcessInput, ticket: &LaunchTicket, turn: u64,
+        not_bare: bool, possibly_written: bool,
+    ) -> bool {
+        if !not_bare
+            || possibly_written
+            || state.next_local_turn != turn + 1
+            || state.input_generation != self.ready.input_generation + 1
+            || state.ssh_prompt.as_ref().map(|prompt| prompt.stdin_writes) != self.stdin_writes.map(|n| n + 1)
+            || state.prompt_epoch != self.prompt_epoch
+            || state.check_lease(&self.ready.process, &ticket.lease).is_err()
+            || !state.attempt.as_ref().is_some_and(|a| a.id == ticket.id && a.submitted)
+        {
+            return false;
+        }
+
+        state.attempt.as_mut().unwrap().submitted = false;
+        state.input_generation = self.ready.input_generation;
+        if let (Some(prompt), Some(writes)) = (&mut state.ssh_prompt, self.stdin_writes) {
+            prompt.stdin_writes = writes;
+        }
+        state.ready = Some(self.ready);
+        // The LocalTurn guard advances the head even on refusal. Never reuse turn.
+        true
     }
 }
 
@@ -706,15 +746,17 @@ impl crate::state::HostKeys {
         enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
         self.input_write_fenced(process, kind, &Unfenced, enqueue)
+            .map(|result| result.expect("an unfenced write cannot restore launch readiness"))
     }
 
+    /// Ok(None) means the local FIFO head refused without consuming readiness.
     pub(crate) fn submit_ssh_input_fenced<'io, T, E: From<Refusal>>(
         &self,
         ticket: &LaunchTicket,
         ready: &ReadyEpoch,
         fence: &impl InputFence<E>,
         enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
-    ) -> Result<T, E> {
+    ) -> Result<Option<T>, E> {
         self.input_write_fenced(&ticket.lease.process, WriteKind::Launch(ticket, ready), fence, enqueue)
     }
 
@@ -724,7 +766,7 @@ impl crate::state::HostKeys {
         kind: WriteKind<'_>,
         fence: &impl InputFence<E>,
         enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
-    ) -> Result<T, E> {
+    ) -> Result<Option<T>, E> {
         let missing = if matches!(&kind, WriteKind::Launch(..) | WriteKind::Ordinary(Some(_))) {
             Refusal::StaleAttempt
         } else {
@@ -737,6 +779,7 @@ impl crate::state::HostKeys {
             let mut state = entry.lock();
             state.owner(&owner)?;
             let is_protocol = matches!(&kind, WriteKind::Protocol);
+            let mut consumed = None;
             match &kind {
                 WriteKind::Ordinary(lease) => {
                     if let Some(lease) = lease {
@@ -771,6 +814,11 @@ impl crate::state::HostKeys {
                     {
                         return Err(Refusal::NotReady.into());
                     }
+                    consumed = Some(LaunchConsume {
+                        ready: state.ready.clone().expect("qualified ready epoch"),
+                        prompt_epoch: state.prompt_epoch,
+                        stdin_writes: state.ssh_prompt.as_ref().map(|prompt| prompt.stdin_writes),
+                    });
                     // Consume BEFORE enqueue: an I/O error may mean a partial write. Never retry it.
                     state.attempt.as_mut().unwrap().submitted = true;
                 }
@@ -790,15 +838,15 @@ impl crate::state::HostKeys {
             state.next_local_turn = turn.checked_add(1).ok_or(Refusal::StaleAttempt)?;
             let fifo = state.local_fifo.get_or_insert_with(Default::default).clone();
             drop(state);
-            Ok(Err((owner, entry, fifo, turn, write)))
+            Ok(Err((owner, entry, fifo, turn, write, consumed)))
         })?;
-        let (owner, entry, fifo, turn, write) = match admitted {
-            Ok(result) => return Ok(result),
+        let (owner, entry, fifo, turn, write, consumed) = match admitted {
+            Ok(result) => return Ok(Some(result)),
             Err(local) => local,
         };
 
         let _turn = fifo.wait(turn);
-        fence.qualify(|| {
+        let qualified = fence.qualify(|| {
             let _start = self.input.ownership.read();
             let current = self.input_stamp(process).ok_or(missing)?;
             if current != owner {
@@ -819,8 +867,19 @@ impl crate::state::HostKeys {
             // close cannot retract it. It can revoke queued launches and close may
             // interrupt the in-flight OS write. Keep only the FIFO turn across I/O.
             Ok(())
-        })?;
-        write()
+        });
+        if let Err(error) = qualified {
+            if let (WriteKind::Launch(ticket, _), Some(consumed)) = (kind, consumed) {
+                let _order = self.input.ownership.read();
+                if self.input_stamp(process).as_ref() == Some(&owner)
+                    && consumed.restore(&mut entry.lock(), ticket, turn, fence.refused_not_bare(), fence.possibly_written())
+                {
+                    return Ok(None);
+                }
+            }
+            return Err(error);
+        }
+        write().map(Some)
     }
 }
 

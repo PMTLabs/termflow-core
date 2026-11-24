@@ -378,7 +378,7 @@ impl<P: LaunchPort> Driver<'_, P> {
         let waiting_shell = Cell::new(false);
         let bytes = payload.encoded.bytes();
         let result = self.keys().submit_ssh_input_fenced(&candidate.ticket, &candidate.ready,
-            &Fence { driver: self, candidate: &candidate, waiting_trust: &waiting_trust, waiting_shell: &waiting_shell }, |permit| {
+            &Fence { driver: self, candidate: &candidate, waiting_trust: &waiting_trust, waiting_shell: &waiting_shell, possibly_written: &possibly_written }, |permit| {
                 admitted.set(true);
                 if self.keys().mounted_launch_owner(self.terminal, &candidate.process)
                     != Some((candidate.owner, candidate.placement))
@@ -407,7 +407,7 @@ impl<P: LaunchPort> Driver<'_, P> {
             payload.finish_unsubmitted();
             None
         };
-        if waiting_shell.get() && !admitted.get() {
+        if matches!(result, Ok(None)) || (waiting_shell.get() && !admitted.get()) {
             return self.wait_ready(now);
         }
         // A live trust wait discovered before admission has not consumed the
@@ -416,7 +416,7 @@ impl<P: LaunchPort> Driver<'_, P> {
         if waiting_trust.get() && !admitted.get() {
             return true;
         }
-        self.finish(result, payload);
+        self.finish(result.map(|_| ()), payload);
         false
     }
 
@@ -683,8 +683,12 @@ struct Fence<'a, 'd, P> {
     candidate: &'a Candidate,
     waiting_trust: &'a Cell<bool>,
     waiting_shell: &'a Cell<bool>,
+    possibly_written: &'a Cell<bool>,
 }
 impl<P: LaunchPort> InputFence<LaunchError> for Fence<'_, '_, P> {
+    fn refused_not_bare(&self) -> bool { self.waiting_shell.get() }
+    fn possibly_written(&self) -> bool { self.possibly_written.get() }
+
     fn qualify<T>(&self, work: impl FnOnce() -> Result<T, LaunchError>) -> Result<T, LaunchError> {
         let c = self.candidate;
         let d = self.driver;
