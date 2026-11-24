@@ -133,6 +133,9 @@ function Browser(props: SshFileBrowserProps & { browser: SshBrowserController })
         expanded={browser.expanded} selected={browser.selected} disabled={!browser.canUseRows}
         onSelect={browser.setSelected} onNavigate={browser.navigate} onToggle={browser.toggleFolder}
         onEntryContextMenu={(entry, event) => {
+          // D109: select like a left click before the menu opens; disabled rows can't be selected either.
+          // Focusing the row first also makes it the menu's invoker, which gets focus back on close.
+          if (browser.canUseRows && entry.path) browser.setSelected(entry.path);
           const button = event.currentTarget.querySelector<HTMLButtonElement>('.ssh-file-name:not(:disabled)');
           const trigger = button ?? event.currentTarget;
           trigger.focus();
