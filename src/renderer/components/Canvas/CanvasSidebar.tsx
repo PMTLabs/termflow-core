@@ -8,6 +8,7 @@ import { getAllCwdSnapshots } from '../../services/cwdSnapshot';
 import { buildSidebarTree, SidebarRow } from './sidebarModel';
 import { useSidebarDrag } from './useSidebarDrag';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
+import { SshTabStatusIcon } from '../Ssh/SshTabStatusIcon';
 import { EyeIcon } from './EyeIcon';
 import type { CanvasModel } from './canvasSelectors';
 import { titleColorStyle } from '../../store/titleColor';
@@ -125,7 +126,7 @@ const Row: React.FC<RowProps> = ({
     >
       {/* The tab strip's own icon, reused (Req 6, `plan/020` §3) — `.canvas-srow.running`
           above is what makes it blink; the icon itself is unconditional, same as a tab's. */}
-      <ShellProfileIcon shellType={row.shellType} />
+      <SshTabStatusIcon terminalId={row.terminalId} fallback={<ShellProfileIcon shellType={row.shellType} />} />
       <span
         className="canvas-srow-title"
         style={titleColorStyle(row.titleColor)}

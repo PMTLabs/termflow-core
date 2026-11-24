@@ -19,7 +19,7 @@ import {
   collectTabCloseTerminalIds,
 } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
-import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
+import { findLeaf, getAllTerminalIds, getSelectedPaneId } from '../../store/slices/paneTreeOps';
 import { AutomationArmedForTerminals } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminals } from '../Canvas/CanvasHiddenBadge';
 import { PreviousHostForTerminals } from './HostGenerationMarker';
@@ -32,6 +32,7 @@ import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
 import { dropTabAcrossWindows, detachTabToNewWindow, captureDetachGesture } from '../Panes/dnd/detach';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
+import { SshTabStatusIcon } from '../Ssh/SshTabStatusIcon';
 import { titleColorStyle, useTabEffectiveTitleColors } from '../../store/titleColor';
 import './TabManager.css';
 
@@ -407,6 +408,15 @@ const TabItem: React.FC<TabItemProps> = ({
    */
   const isCanvasHere = useSelector((state: RootState) => state.canvas.nearestGroupId === tab.id);
   const tabTitleColors = useTabEffectiveTitleColors(tab.id);
+  const iconTerminalId = useSelector((state: RootState) => {
+    const { treesByTabId, activePaneByTabId, activeTabId, activePaneId, maximizedPaneByTabId } = state.panes;
+    const tree = treesByTabId[tab.id] ?? null;
+    const maximized = maximizedPaneByTabId[tab.id];
+    const focused = activeTabId === tab.id && activePaneId ? findLeaf(tree, activePaneId) : null;
+    const paneId = getSelectedPaneId(treesByTabId, activePaneByTabId, tab.id);
+    const pane = (maximized ? findLeaf(tree, maximized) : null) ?? focused ?? (paneId ? findLeaf(tree, paneId) : null);
+    return pane?.ssh ? pane.terminalId : undefined;
+  });
 
   return (
     <>
@@ -425,9 +435,9 @@ const TabItem: React.FC<TabItemProps> = ({
         data-tab-target={tab.id}
         title={tab.title}
       >
-        {tab.exited
+        <SshTabStatusIcon terminalId={iconTerminalId} exited={tab.exited} fallback={tab.exited
           ? <span className="tab-exited-icon" title="Process exited — kept open for review">⊘</span>
-          : <ShellProfileIcon shellType={tab.shellType} emoji={tab.icon} />}
+          : <ShellProfileIcon shellType={tab.shellType} emoji={tab.icon} />} />
         {/* Plan 045: distinct from the window-title "[Administrator]" suffix (profile.rs)
             — that decorates a whole-instance elevation, this decorates one tab. */}
         {tab.elevated && (
