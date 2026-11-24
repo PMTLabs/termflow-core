@@ -587,7 +587,7 @@ pub struct AppState<R: Runtime = Wry> {
     // Authoritative live screen per terminal: a vt100 parser fed every PTY chunk.
     // This is the single source of truth for the *visible* screen and is used to
     // produce faithful, styled snapshots when the WebView reconnects (hydration).
-    pub terminal_screens: Arc<DashMap<String, Mutex<vt100::Parser>>>,
+    pub terminal_screens: Arc<DashMap<String, Mutex<super::TerminalScreen>>>,
     // Focus-event-reporting (DECSET/DECRST 1004) per terminal. vt100 ignores mode
     // 1004, but a rehydrating client needs it: it is the only mode some agent CLIs
     // (claude, codex) set, and the renderer's command-suggest suppression keys off it.

@@ -40,6 +40,13 @@ mod storage_wiring_tests;
 #[cfg(test)]
 mod inherit_cursor_wiring_tests;
 mod render;
+mod screen_parser;
+#[cfg(test)]
+pub(crate) mod screen_parser_tests;
+pub use screen_parser::{new_screen_parser, TerminalScreen};
+pub(crate) use screen_parser::visible_text;
+#[cfg(test)]
+use screen_parser::{feed_screen_parser, resize_screen_parser, MIN_SCREEN_COLS, MIN_SCREEN_ROWS};
 mod restore_frame;
 mod engine_host;
 mod reattach;

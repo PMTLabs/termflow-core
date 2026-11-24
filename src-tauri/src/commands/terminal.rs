@@ -1103,6 +1103,19 @@ pub async fn close_terminal(
 mod scrollback_restore_tests {
     use crate::state::{AppState, CursorFrame};
 
+    #[test]
+    fn one_row_screen_survives_wrapping_and_resize() {
+        let (_app, state) = mock_state();
+        let id = "pc-one-row";
+        state.init_screen(id, 1, 41);
+        state.feed_screen(id, b"earlier wrapped line that runs beyond forty-one columns\r\n");
+        state.resize_screen(id, 1, 24);
+        state.feed_screen(id, b"another long output line that wraps\r\nlatest");
+        assert_eq!(state.screen_text(id).as_deref(), Some("latest"));
+        let blob = state.full_scrollback_snapshot(id).expect("history");
+        crate::state::screen_parser_tests::assert_one_row_replay(&blob);
+    }
+
     fn temp_db(tag: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!("termflow_ratchet_{}_{}.db", std::process::id(), tag));
@@ -1242,7 +1255,7 @@ mod scrollback_restore_tests {
                 let parser_row = {
                     let screen = state.terminal_screens.get(&key).expect("parser");
                     let parser = screen.lock().unwrap();
-                    parser.screen().cursor_position().0 + 1
+                    parser.parser.screen().cursor_position().0 + 1
                 };
                 match frame {
                     CursorFrame::Inherited => {

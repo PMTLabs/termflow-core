@@ -280,11 +280,8 @@ fn typed_line_span(
 ///    EVALUATION. The clone-then-walk shape `full_scrollback_snapshot` uses is fine at the 30 s
 ///    persist cadence and is not fine at 250 ms.
 /// 2. **No indexing, no slicing, no `unwrap`.** A panic inside this walk would poison
-///    `terminal_screens[id]`, and `feed_screen` responds to a poisoned lock by logging a warning and
-///    DROPPING THE BYTES — that terminal's authoritative parser would be dead for the life of the
-///    process: no snapshot, no scrollback persist, no hydration. A read-only feature would have
-///    silently destroyed the terminal it was watching. `tail_text_with` is the second half of that
-///    guard.
+///    `terminal_screens[id]`, forcing the next reader or feed to rebuild the parser and discard the
+///    current grid and scrollback. `tail_text_with` catches the unwind before it reaches the guard.
 ///
 /// Bounded at `max_lines` because the walk holds the per-terminal parser mutex that `feed_screen`
 /// contends on, and this file's own note above `full_scrollback_snapshot` says holding it across an
