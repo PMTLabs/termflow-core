@@ -301,12 +301,14 @@ describe('SSH node layout', () => {
 describe('two presentations, one owner', () => {
   it('sshCanvas_presentationDoesNotAcquireSecondSession', async () => {
     const id = 'tm-owner';
+    type EditNotice = import('../../Ssh/sshFileTypes').EditNotice;
+    let editEvent: ((notice: EditNotice) => void) | undefined;
     setTree(sshTree([{ terminalId: id, ssh: sshTag({ followCd: true, browserPath: '/home' }) }]));
     let cwd: ((event: { terminalId: string; path: string; host: string; sessionGeneration: number }) => void) | undefined;
     const ssh = {
       fsList: jest.fn(async ({ path: p }: { path: string }) => ({ path: p, entries: [], sessionGeneration: 1 })),
       fsEditList: jest.fn(async () => []),
-      onFsEditState: jest.fn(async () => () => {}),
+      onFsEditState: jest.fn(async (listener: typeof editEvent) => { editEvent = listener; return () => {}; }),
       onFsCwd: jest.fn(async (listener: typeof cwd) => { cwd = listener; return () => {}; }),
     };
     const bridge = {
@@ -345,6 +347,11 @@ describe('two presentations, one owner', () => {
     expect(ssh.fsList).toHaveBeenCalledTimes(1);                                // ...not a second one
     expect(ssh.onFsCwd).toHaveBeenCalledTimes(1);
     expect(canvasShell.textContent).toContain('Current directory: /home');
+    await act(async () => { editEvent!({ terminalId: id, path: '/home/.viminfo', editId: 'watch-1',
+      sessionGeneration: 1, state: 'watching' }); await flush(); });
+    expect(canvasShell.querySelector('.ssh-status .ssh-watch-item button')?.textContent).toContain('.viminfo · watching');
+    expect(container.querySelectorAll('.ssh-watch-item')).toHaveLength(1);
+    expect(canvasShell.querySelector('.ssh-pane-chrome')).toBeNull();
 
     // One Follow-cd report produces exactly one navigation, whichever surface shows it.
     await act(async () => { cwd!({ terminalId: id, path: '/srv', host: 'h', sessionGeneration: 1 }); await new Promise(r => setTimeout(r, 120)); await flush(); });
