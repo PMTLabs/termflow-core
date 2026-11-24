@@ -11,6 +11,11 @@ import '../Settings/Automations/AutomationsPanel.css';
 const sshSessions = (): SshSessionsState =>
   (window as any).__REDUX_STORE__?.getState().sshSession ?? { byTerminal: {} };
 
+const editState = (edit: EditStatus) => edit.state === 'error' && edit.error === 'The server does not support atomic replacement.'
+  ? 'unsupported' : edit.state;
+/** One edit as one line: the chrome notice and the status-bar item's tooltip share this text. */
+export const sshEditSummary = (edit: EditStatus) => `${edit.path} — ${editState(edit)}${edit.retained ? ' (retained)' : ''}`;
+
 /** The backend canonicalizes the edit root, so Windows copies carry a verbatim prefix
  *  (`\\?\C:\…` or `\\?\UNC\server\share\…`). Valid, but noise to a reader: strip it for display
  *  only; the path the backend uses is unchanged (P068-6). */
@@ -112,11 +117,8 @@ function EditWarnings({ terminalId, enabled = true, openResult, api, children }:
   };
 
   const needsEditor = openResult?.state === 'needsEditor';
-  const editState = (edit: EditStatus) => edit.state === 'error' && edit.error === 'The server does not support atomic replacement.'
-    ? 'unsupported' : edit.state;
-  const summary = (edit: EditStatus) => `${edit.path} — ${editState(edit)}${edit.retained ? ' (retained)' : ''}`;
   const routine = edits.filter(edit => edit.state !== 'conflict' && edit.state !== 'error');
-  const summaries = edits.filter(edit => edit.state === 'conflict' || edit.state === 'error').reverse().map(summary);
+  const summaries = edits.filter(edit => edit.state === 'conflict' || edit.state === 'error').reverse().map(sshEditSummary);
   if (needsEditor) summaries.unshift('Configure a default editor to open remote files.');
   if (failure) summaries.unshift(failure);
   const details = summaries.length > 0 || edits.length > 0 ? <section className="ssh-edit-warning" aria-label="Remote file edits">
@@ -131,7 +133,7 @@ function EditWarnings({ terminalId, enabled = true, openResult, api, children }:
         const state = editState(edit);
         const showCopy = edit.retained || ['paused', 'conflict', 'error', 'unsupported'].includes(state);
         return <li key={edit.editId}>
-          <span role="status">{summary(edit)}</span>
+          <span role="status">{sshEditSummary(edit)}</span>
           {edit.error && <div>{edit.error}</div>}
           {showCopy && edit.localPath && <div>Local copy: <code>{displayLocalPath(edit.localPath)}</code></div>}
           <button type="button" className="au-btn"

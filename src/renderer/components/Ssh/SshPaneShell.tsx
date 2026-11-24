@@ -5,7 +5,7 @@ import type { SshSessionView, SshPromptReceipt } from '../../types/ssh';
 import { SshSecretPrompt } from './SshSecretPrompt';
 import { SshHostKeyPrompt } from './SshHostKeyPrompt';
 import { SshDisconnectedBanner } from './SshDisconnectedBanner';
-import { SshEditWarning } from './SshEditWarning';
+import { SshEditWarning, sshEditSummary } from './SshEditWarning';
 import { SshIcon } from './SshIcons';
 import type { EditOpen, EditStatus } from './sshFileTypes';
 import { sshStatusMarkerVisible } from './sshStatusLiveness';
@@ -43,8 +43,11 @@ export interface SshPaneShellProps {
   preferredBrowserWidth?: number;
   onBrowserWidthChange?(width: number): void;
 }
-function SshNoticeDisclosure({ interactive, summaries, edits, children }: {
-  interactive: boolean; summaries: string[]; edits?: EditStatus[]; children: React.ReactNode;
+function SshNoticeDisclosure({ interactive, summaries, edits, focusFallback, children }: {
+  interactive: boolean; summaries: string[]; edits?: EditStatus[];
+  /** Where focus goes when this disclosure unmounts while holding it (the pane's terminal). */
+  focusFallback(): void;
+  children: React.ReactNode;
 }) {
   const [requested, setRequested] = React.useState(false);
   const dialogId = React.useId();
@@ -55,10 +58,19 @@ function SshNoticeDisclosure({ interactive, summaries, edits, children }: {
   const hasItems = (edits?.length ?? summaries.length) > 0;
   // Escape and the Close button return focus to the invoker. An outside click does not: the
   // user just put focus where they clicked (the terminal, the path box) and it stays there.
+  // Without items the row unmounts on close, so focus goes to the terminal, never to <body>.
   const close = React.useCallback((restoreFocus = true) => {
     setRequested(false);
-    if (restoreFocus) (hasItems ? invoker.current : row.current)?.focus();
-  }, [hasItems]);
+    if (restoreFocus) hasItems ? invoker.current?.focus() : focusFallback();
+  }, [hasItems, focusFallback]);
+  // Items drained while open (the last routine edit went to conflict or was stopped, the last
+  // notice cleared): close before paint, so no "0 files" invoker or empty popover is ever shown.
+  React.useLayoutEffect(() => {
+    if (!open || hasItems) return;
+    const held = !!row.current?.contains(document.activeElement);
+    setRequested(false);
+    if (held) focusFallback();
+  }, [open, hasItems, focusFallback]);
   React.useEffect(() => {
     if (!interactive) setRequested(false);
   }, [interactive]);
@@ -95,7 +107,7 @@ function SshNoticeDisclosure({ interactive, summaries, edits, children }: {
     data-canvas-passthrough="scroll" data-ssh-keyboard-owner="">
     {!edits && hasItems && <span role="status" title={summaries[0]}>{summaries[0]}</span>}
     <button ref={invoker} type="button" className="au-btn"
-      title={edits?.map(edit => `${edit.path} — ${edit.state}`).join('\n')}
+      title={edits?.map(sshEditSummary).join('\n')}
       aria-label={edits ? `${count} remote ${file ? `file: ${basename} (${file.state})` : 'files'}`.replace(/[\r\n]+/g, ' ')
         : summaries.length > 1 ? `SSH notice details (+${summaries.length - 1} more)` : 'SSH notice details'}
       aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? dialogId : undefined}
@@ -105,7 +117,6 @@ function SshNoticeDisclosure({ interactive, summaries, edits, children }: {
     </button>
     {open && <div id={dialogId} ref={dialog} className="ssh-pane-popover" role="dialog" aria-label={label} tabIndex={-1}>
       <button type="button" className="au-btn" onClick={() => close()}>Close {label}</button>
-      {!hasItems && <p>{edits ? 'No remote file edits.' : 'No SSH notices.'}</p>}
       {children}
     </div>}
   </div>;
@@ -180,8 +191,11 @@ export function SshPaneShell(props: SshPaneShellProps) {
   const status = view.state === 'connecting' ? 'Connecting…' : connected ? view.reason : undefined;
   // The chrome follows `owner`, not `interactive`: an inactive surface closes its popover without
   // moving focus and drops its document Escape/click listeners, so they never act on the hidden pane.
+  const focusTerminal = React.useCallback(() => {
+    host.current?.querySelector<HTMLElement>('textarea, [tabindex]')?.focus();
+  }, []);
   const renderChrome = (summaries: string[], details: React.ReactNode) => <SshNoticeDisclosure
-    interactive={owner} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
+    interactive={owner} focusFallback={focusTerminal} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
     {secret && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {hostKey && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {disconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
@@ -240,7 +254,7 @@ export function SshPaneShell(props: SshPaneShellProps) {
     <div className="ssh-status" aria-label="SSH status" data-ssh-keyboard-owner={owner ? '' : undefined}>
       {sshStatusMarkerVisible({ terminalLive: live, barShown: !!props.status, barConnected: !props.statusShowsNotLive })
         && <span className="ssh-status-text">—</span>}
-      <SshNoticeDisclosure interactive={owner} summaries={[]} edits={edits}>{details}</SshNoticeDisclosure>
+      <SshNoticeDisclosure interactive={owner} focusFallback={focusTerminal} summaries={[]} edits={edits}>{details}</SshNoticeDisclosure>
       {props.status}
     </div>
   </section>;

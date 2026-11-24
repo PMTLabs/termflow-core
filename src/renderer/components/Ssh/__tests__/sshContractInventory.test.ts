@@ -134,7 +134,7 @@ const LEDGER_SSH_CSS_DEFINED: readonly string[] = [
 const LEDGER_SSH_CSS_READ: readonly string[] = [
   '--accent-color', '--bg-hover', '--bg-primary', '--bg-secondary', '--border-color', '--error-color', '--focus-border', '--font-mono', '--tab-bar-background',
   '--ssh-amber', '--ssh-green', '--ssh-grey', '--ssh-orange', '--ssh-sky', '--ssh-violet',
-  '--tab-active-foreground', '--tab-foreground', '--text-primary', '--text-secondary',
+  '--tab-active-background', '--tab-active-foreground', '--tab-foreground', '--text-primary', '--text-secondary',
 ];
 /**
  * Theme fallbacks: read with an inline fallback value and defined nowhere in src/renderer. Allowed

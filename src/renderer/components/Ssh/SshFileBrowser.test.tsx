@@ -62,6 +62,7 @@ function createBridge() {
     onFsEditState: jest.fn(async (cb: (event: EditNotice) => void) => { editListener = cb; return () => { editListener = undefined; }; }),
     emitEdit(event: EditNotice) { editListener?.(event); },
     fsEditList: jest.fn(async () => []),
+    fsEditStop: jest.fn(async (_target: unknown) => ({ retained: true, localPath: 'C:/tmp/file-1' })),
     onFsCwd: jest.fn(async (cb: (event: CwdEvent) => void) => { cwd = cb; return () => { cwd = undefined; }; }),
     emit(path: string, sessionGeneration = 1) { cwd?.({ terminalId, path, sessionGeneration, host: 'remote' }); },
   };
@@ -111,7 +112,7 @@ afterEach(() => {
 
 const shell = (session: SshSessionView, reconnect = jest.fn(async () => {})) => root.render(<Provider store={store}>
   <SshBrowserPaneShell view={session} terminalId={terminalId} sshTag={tag} surfaceActive onPatchTag={patch}
-    terminal={<div className="terminal-pane-content"><div className="terminal-display" /></div>}
+    terminal={<div className="terminal-pane-content"><div className="terminal-display"><textarea aria-label="Terminal input" /></div></div>}
     status={<span>Host metrics</span>} onSecret={async () => {}} onTrust={async () => {}} onCancel={() => {}}
     onReconnect={reconnect} />
 </Provider>);
@@ -189,6 +190,30 @@ test('a watched edit moving to conflict leaves the status item and raises chrome
   act(() => api.emitEdit(editNotice(1, 'conflict')));
   expect(chromeRow()?.textContent).toContain('/home/file-1 — conflict');
   expect(watchItem()).toBeNull();
+});
+
+test('an open watch item whose last routine edit turns into a conflict closes, never showing 0 files, and keeps focus off body', async () => {
+  await act(async () => shell(view('connected')));
+  act(() => api.emitEdit(editNotice(1)));
+  act(() => watchItem()!.click());
+  const dialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Remote file edits"]')!;
+  expect(document.activeElement && dialog.contains(document.activeElement)).toBe(true);
+  act(() => api.emitEdit(editNotice(1, 'conflict')));
+  expect(watchItem()).toBeNull();
+  expect(container.querySelector('.ssh-watch-item')).toBeNull();
+  expect(container.textContent).not.toContain('0 files');
+  expect(container.querySelector('[role="dialog"][aria-label="Remote file edits"]')).toBeNull();
+  expect(document.activeElement).toBe(container.querySelector('.ssh-terminal-host textarea'));
+  expect(chromeRow()?.textContent).toContain('/home/file-1 — conflict');
+});
+
+test('a stopped edit that the backend retains stays in the status item tooltip as paused (retained)', async () => {
+  await act(async () => shell(view('connected')));
+  act(() => api.emitEdit(editNotice(1)));
+  act(() => watchItem()!.click());
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Stop editing /home/file-1"]')!.click());
+  expect(api.fsEditStop).toHaveBeenCalledTimes(1);
+  expect(watchItem()?.title).toBe('/home/file-1 — paused (retained)');
 });
 
 test('watch item opens the existing Stop action and restores focus on Escape and outside click', async () => {

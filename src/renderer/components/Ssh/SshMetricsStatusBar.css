@@ -27,6 +27,7 @@
 
 .light-theme .ssh-metrics-value { color: var(--tab-active-foreground); }
 .light-theme .ssh-metrics-value > svg { color: var(--tab-foreground); }
+.light-theme .ssh-metrics-status-bar > button { color: var(--tab-active-foreground); background: var(--tab-active-background); }
 
 .ssh-metrics-status-bar:focus-visible {
   outline: 1px solid var(--focus-border, var(--text-primary));

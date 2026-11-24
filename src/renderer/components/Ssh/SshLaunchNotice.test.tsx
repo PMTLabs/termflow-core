@@ -201,6 +201,31 @@ test('a Connect refused for a missing Windows OpenSSH Client shows how to instal
 });
 
 
+test.each([
+  ['needs-hostkey', 'Trust'],
+  ['needs-secret', 'Continue'],
+] as const)('running SSH keeps the %s prompt', (state, action) => {
+  const view: SshSessionView = {
+    terminalId: base.terminalId, connectionId: base.connectionId, gate: 'blocked', state,
+    generation: base.attempt.sessionGeneration, promptId: 'running-prompt',
+    ...(state === 'needs-hostkey' ? {
+      hostKey: { changed: false, algorithm: 'ssh-ed25519', fingerprintSha256: 'SHA256:fake' },
+    } : {}),
+  };
+  act(() => root.render(<SshLaunchNotice {...props()} snapshot={{ ...base, stage: 'running' }} view={view} />));
+  expectFixedStrip();
+  expect(button(action)).toBeDefined();
+});
+
+test.each(['snapshot error', 'failure prop'] as const)('running SSH keeps the %s message', source => {
+  const message = 'SSH launch failed while running.';
+  act(() => root.render(<SshLaunchNotice {...props()} snapshot={{
+    ...base, stage: 'running',
+    ...(source === 'snapshot error' ? { error: { code: 'SshClientMissing', message } } : {}),
+  }} failure={source === 'failure prop' ? { code: 'SshClientMissing', message } : undefined} />));
+  expect(expectFixedStrip()?.textContent).toContain(message);
+});
+
 test.each(['connected', 'disconnected'] as const)('running SSH with a %s session', state => {
   act(() => root.render(<SshLaunchNotice {...props()} snapshot={{ ...base, stage: 'running' }}
     view={{ terminalId: base.terminalId, connectionId: base.connectionId, state, generation: 3, gate: 'blocked', promptId: 'none' }} />));

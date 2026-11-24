@@ -28,6 +28,8 @@
 .ssh-watch-item > button > svg { flex:none; }
 .ssh-watch-name { overflow:hidden; text-overflow:ellipsis; }
 .ssh-watch-item .ssh-pane-popover { top:auto; bottom:26px; max-height:min(calc(100% - 26px), 360px); white-space:normal; }
+/* The whole bottom row follows the light palette, not only the metrics inside it. */
+.light-theme .ssh-status { background:var(--tab-bar-background); color:var(--tab-foreground); }
 .light-theme .ssh-watch-item { background:var(--tab-bar-background); }
 .light-theme .ssh-watch-item > .au-btn { color:var(--tab-foreground); background:var(--tab-bar-background); }
 .ssh-status > .ssh-status-text { flex:none; display:flex; align-items:center; padding:0 8px; }
