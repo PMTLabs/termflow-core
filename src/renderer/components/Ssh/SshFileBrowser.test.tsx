@@ -404,7 +404,7 @@ async function choose(label: string, name?: string) {
 const key = (target: Element, key: string, shiftKey = false) =>
   target.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true }));
 
-test('right_clicked_B_not_selected_A_is_target_for_every_menu_action', async () => {
+test('right_clicked_B_becomes_selected_and_is_target_for_every_menu_action', async () => {
   await act(async () => render());
   // A parent outside the React root observes whether the event escaped the file row.
   const ancestor = jest.fn();
@@ -414,7 +414,9 @@ test('right_clicked_B_not_selected_A_is_target_for_every_menu_action', async () 
   await choose('Open'); expect(api.fsOpen).toHaveBeenCalledWith(entryRequest);
   expect(ancestor).not.toHaveBeenCalled();
   container.parentElement!.removeEventListener('contextmenu', ancestor);
-  expect(row('logs').getAttribute('aria-pressed')).toBe('true');
+  // D109: right-click moves the selection to the row the menu acts on.
+  expect(row().getAttribute('aria-pressed')).toBe('true');
+  expect(row('logs').getAttribute('aria-pressed')).toBe('false');
   await choose('Open with…'); expect(api.fsOpenWith).toHaveBeenCalledWith(entryRequest);
   await choose('Download…'); expect(api.fsDownload).toHaveBeenCalledWith(entryRequest);
   await choose('Copy path'); expect(writeClipboardText).toHaveBeenCalledWith(entryRequest.path);
@@ -434,6 +436,57 @@ test('right_clicked_B_not_selected_A_is_target_for_every_menu_action', async () 
   await choose('Delete…');
   await act(async () => button('Delete', dialog()).click());
   expect(api.fsDelete).toHaveBeenCalledWith({ ...entryRequest, recursive: false, confirmed: true });
+});
+
+test('right_click_selects_and_focuses_the_row_without_opening_it', async () => {
+  await act(async () => render());
+  const selected = (name: string) => row(name).getAttribute('aria-pressed') === 'true'
+    && row(name).parentElement!.getAttribute('data-selected') === 'true';
+  const menu = () => document.querySelector('[role="menu"]');
+  act(() => row().click());
+  expect(selected('.env')).toBe(true);
+  const listCalls = api.fsList.mock.calls.length;
+
+  // 1-3: a folder is selected, focused and stays highlighted under the open menu, but not opened.
+  act(() => { mouse(row('logs').parentElement!, 'contextmenu', 2); });
+  expect(menu()).not.toBeNull();
+  expect(selected('logs')).toBe(true);
+  expect(selected('.env')).toBe(false);
+  expect(menu()!.contains(document.activeElement)).toBe(true);
+  expect(api.fsList).toHaveBeenCalledTimes(listCalls);
+  expect(pathBox().value).toBe('/home');
+  expect(button('Expand logs').getAttribute('aria-expanded')).toBe('false');
+
+  // 2 + 4: Escape closes the menu, keeps the selection and returns keyboard focus to that row.
+  // async act: ContextMenu hands focus back to its invoker in a microtask after unmount.
+  await act(async () => { key(document.activeElement!, 'Escape'); });
+  expect(menu()).toBeNull();
+  expect(selected('logs')).toBe(true);
+  expect(document.activeElement).toBe(row('logs'));
+
+  // 1 for a file: right-click selects it without opening; an outside click closes and keeps it.
+  act(() => { mouse(row().parentElement!, 'contextmenu', 2); });
+  expect(selected('.env')).toBe(true);
+  expect(selected('logs')).toBe(false);
+  expect(api.fsOpen).not.toHaveBeenCalled();
+  act(() => { mouse(document.body, 'mousedown', 0); });
+  expect(menu()).toBeNull();
+  expect(selected('.env')).toBe(true);
+
+  // 5: right-clicking empty space in the list changes nothing.
+  act(() => { mouse(container.querySelector('.ssh-file-rows')!, 'contextmenu', 2); });
+  expect(menu()).toBeNull();
+  expect(selected('.env')).toBe(true);
+  expect(selected('logs')).toBe(false);
+});
+
+test('right_click_on_an_unusable_row_opens_the_menu_without_selecting', async () => {
+  await act(async () => render());
+  act(() => observe(view('disconnected', 1, 2), snapshot(1, 'ended')));
+  act(() => { mouse(row().parentElement!, 'contextmenu', 2); });
+  expect(document.querySelector('[role="menu"]')).not.toBeNull();
+  expect(row().getAttribute('aria-pressed')).toBe('false');
+  expect(row().parentElement!.getAttribute('data-selected')).toBe('false');
 });
 
 test('folder_open_disabled_but_download_enabled', async () => {

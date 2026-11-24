@@ -15,7 +15,7 @@ const SESSION_LABELS = {
 const RESTORED_REASON = 'Not available for a session restored from before TermFlow restarted';
 
 export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { terminalId: string; isTabActive?: boolean }) {
-  const { identity, hidden, sample, session, ended, connected, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect } =
+  const { identity, hidden, sample, session, ended, connected, phase, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect } =
     useSshMetrics(terminalId);
   const [menu, setMenu] = useState<{ x: number; y: number; terminalId: string } | null>(null);
   const bar = useRef<HTMLDivElement>(null);
@@ -25,7 +25,11 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
   const unsupported = sample?.metrics.unsupportedPlatform;
   const failureReason = unavailable ?? sample?.metrics.unavailableReason;
   const live = !!sample && !unsupported && !failureReason;
-  const status = !connected ? (ended ? 'SSH session ended' : session ? SESSION_LABELS[session.state] : restored ? 'Metrics unavailable' : 'Disconnected')
+  const status = phase === 'connecting'
+    ? (session?.state === 'needs-secret' || session?.state === 'needs-hostkey' || session?.state === 'connecting'
+      ? SESSION_LABELS[session.state] : 'Connecting…')
+    : !connected ? (ended ? 'SSH session ended' : session?.state === 'error' ? SESSION_LABELS.error
+      : restored ? 'Metrics unavailable' : 'Disconnected')
     : paused ?? (failureReason ? 'Metrics unavailable' : unsupported ? `Metrics not supported on ${unsupported}`
       : sample ? 'Connected' : delayed ? 'Metrics delayed' : 'Collecting first sample');
   const unsupportedReason = unsupported && sample?.metrics.cpu.available === false ? sample.metrics.cpu.reason : undefined;
