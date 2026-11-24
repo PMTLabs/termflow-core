@@ -342,6 +342,7 @@ fn bourne_typed_launch_is_ascii_for_any_argv() {
 
 #[test]
 fn posix_helper_contains_only_fixed_erase_and_argv_and_is_retired() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let spec = spec(&f, Dialect::Bash, false);
     let paths = classify(&spec.shell).unwrap().1;
@@ -904,25 +905,7 @@ fn assert_launch_state(mut spec: SpawnSpec, f: &Fixture, dialect: Option<Dialect
         let text = fs::read_to_string(f.0.join(name)).unwrap();
         let mut lines = text
             .lines()
-            .filter(|line| {
-                let name = if line.starts_with("declare ")
-                    || line.starts_with("typeset ")
-                    || line.starts_with("export ")
-                {
-                    line.split_ascii_whitespace()
-                        .skip(1)
-                        .find(|word| !word.starts_with('-'))
-                        .unwrap_or("")
-                        .split('=')
-                        .next()
-                        .unwrap()
-                } else if let Some(fish) = line.strip_prefix('$') {
-                    fish.split([':', '[']).next().unwrap()
-                } else {
-                    line
-                };
-                !volatile.contains(&name)
-            })
+            .filter(|line| !volatile.contains(&snapshot_name(line)))
             .map(str::to_owned)
             .collect::<Vec<_>>();
         lines.sort();
@@ -947,6 +930,63 @@ fn assert_launch_state(mut spec: SpawnSpec, f: &Fixture, dialect: Option<Dialect
     }
     launch.finish_after_quiescence().unwrap();
     adapter.finish_after_shell_quiescence().unwrap();
+}
+
+/// The variable a state-snapshot line describes, so volatile names can be skipped.
+/// Bash 4+ prints `declare -- _="x"`; Bash 3.2 (macOS /bin/bash) prints plain `_=x`
+/// for `declare -p` with no names; fish prints `$name: ...`. Other lines (options,
+/// shopts, function names) are matched whole.
+fn snapshot_name(line: &str) -> &str {
+    if line.starts_with("declare ") || line.starts_with("typeset ") || line.starts_with("export ") {
+        line.split_ascii_whitespace()
+            .skip(1)
+            .find(|word| !word.starts_with('-'))
+            .unwrap_or("")
+            .split('=')
+            .next()
+            .unwrap()
+    } else if let Some(fish) = line.strip_prefix('$') {
+        fish.split([':', '[']).next().unwrap()
+    } else if let Some((name, _)) = line.split_once('=').filter(|(name, _)| {
+        !name.is_empty() && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    }) {
+        name
+    } else {
+        line
+    }
+}
+
+#[test]
+fn snapshot_name_reads_every_shell_format() {
+    // Bash 3.2 format (the macOS CI failure): `_` must be found so its allowlist applies,
+    // while a planted leak keeps its own name and is still compared.
+    for (line, name) in [
+        ("_=89b83dd4-e31d-4412-ae70-160209d5a323", "_"),
+        ("_=__termflow_pc_attrs", "_"),
+        ("tf_planted_leak=x", "tf_planted_leak"),
+        (
+            "BASH_REMATCH=([0]=\"sentinel\" [1]=\"sentinel\")",
+            "BASH_REMATCH",
+        ),
+        ("declare -- _=\"x\"", "_"),
+        ("declare -ar BASH_REMATCH=([0]=\"a\")", "BASH_REMATCH"),
+        ("typeset -x LC_ALL=C.UTF-8", "LC_ALL"),
+        ("export LC_ALL=C.UTF-8", "LC_ALL"),
+        (
+            "$status: set in global scope, unexported, with 1 elements",
+            "status",
+        ),
+        ("$history[1]: |x|", "history"),
+        ("allexport      \toff", "allexport      \toff"),
+        ("shopt -u extglob", "shopt -u extglob"),
+        ("declare -f __tfssh", "__tfssh"),
+        ("set -o emacs=x", "set -o emacs=x"),
+    ] {
+        assert_eq!(snapshot_name(line), name, "{line}");
+    }
+    let volatile = ["_"];
+    assert!(volatile.contains(&snapshot_name("_=new-value")));
+    assert!(!volatile.contains(&snapshot_name("tf_planted_leak=x")));
 }
 
 fn posix_launcher_state(dialect: Dialect) {
