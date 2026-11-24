@@ -157,7 +157,24 @@ impl RegisteredAttempt {
 }
 
 #[derive(Default)]
-pub(crate) struct LaunchRegistry(Mutex<HashMap<String, RegisteredAttempt>>);
+pub(crate) struct LaunchRegistry(
+    Mutex<HashMap<String, RegisteredAttempt>>,
+    Mutex<Vec<Arc<drive::Payload>>>,
+);
+
+impl Drop for LaunchRegistry {
+    fn drop(&mut self) {
+        for entry in self.0.get_mut().values_mut() {
+            if let Some(payload) = entry.payload.take() {
+                payload.retire();
+                self.1.get_mut().push(payload);
+            }
+        }
+        // Hosted shells may survive the app. Leave their in-flight markers
+        // intact; startup sweeping cannot establish that their input is gone.
+        self.reap_payloads();
+    }
+}
 
 fn next_sequence() -> Result<u64, LaunchError> {
     // A single monotonic source avoids keeping tombstones for closed terminal
@@ -183,6 +200,32 @@ pub(crate) enum Operation<'a> {
 }
 
 impl LaunchRegistry {
+    fn retain_payload(&self, payload: Arc<drive::Payload>) {
+        payload.retire();
+        self.1.lock().push(payload);
+    }
+
+    /// Finish retained payloads whose typed line can no longer run: the shell
+    /// is gone and no live process carries the attempt's ssh marker. Called
+    /// with no registry, session or ownership lock held.
+    fn reap_payloads(&self) {
+        let pending = std::mem::take(&mut *self.1.lock());
+        let (candidates, mut retained): (Vec<_>, Vec<_>) = pending.into_iter().partition(|p| p.shell_gone());
+        // One process-table scan for every candidate, none when there is none.
+        let live = super::launch_process::live_markers(candidates.iter().map(|p| p.marker()));
+        for payload in candidates {
+            if live.contains(payload.marker()) {
+                retained.push(payload);
+                continue;
+            }
+            match Arc::try_unwrap(payload) {
+                Ok(payload) => payload.finish_quiescent(),
+                Err(payload) => retained.push(payload),
+            }
+        }
+        self.1.lock().extend(retained);
+    }
+
     /// Retire only processes that no longer have their original placement.
     /// Transfers preserve that placement even while there is no mounted pane.
     pub(crate) fn reconcile_processes(&self, keys: &HostKeys) {
@@ -196,7 +239,8 @@ impl LaunchRegistry {
                 keep
             });
         }
-        for payload in retired { payload.retire(); }
+        for payload in retired { self.retain_payload(payload); }
+        self.reap_payloads();
     }
 
     /// Validate desktop placement and reserve/coalesce the exact attempt.
@@ -317,8 +361,9 @@ impl LaunchRegistry {
             Ok(snapshot)
         });
         if let Some(payload) = retired_payload {
-            payload.retire();
+            self.retain_payload(payload);
         }
+        if matches!(op, Operation::Launch(_)) { self.reap_payloads(); }
         result
     }
 }

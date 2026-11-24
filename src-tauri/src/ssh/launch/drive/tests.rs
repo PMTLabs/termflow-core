@@ -920,7 +920,7 @@ async fn stale_ready_or_connection_edit_requires_new_verification() {
 }
 
 #[tokio::test]
-async fn returned_before_first_child_sample_after_accepted_write() {
+async fn reprompt_before_first_child_sample_is_not_a_return() {
     let f = Fixture::direct();
     f.seed(&pin("target.test", &f.server));
     let a = f.open();
@@ -932,9 +932,12 @@ async fn returned_before_first_child_sample_after_accepted_write() {
     assert_eq!(*f.port.record.calls.lock(), 1);
     assert_eq!(*f.port.child_samples.lock(), 0);
     f.ready(2);
-    assert_eq!(*f.port.child_samples.lock(), 0, "the shell returned before the first child sample");
-    f.driver(&a).observe(Instant::now());
+    assert_eq!(*f.port.child_samples.lock(), 0, "the shell re-prompted before the first child sample");
+    let now = Instant::now();
+    assert!(f.driver(&a).observe(now));
     assert_eq!(*f.port.child_samples.lock(), 1);
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::Typed);
+    f.driver(&a).observe(now + NO_START);
     let ended = f.access(&a, Operation::Query).unwrap();
     assert_eq!((ended.stage, ended.error.unwrap().code), (LaunchStage::Ended, Code::SshExitedBeforeConnecting));
     f.shutdown().await;

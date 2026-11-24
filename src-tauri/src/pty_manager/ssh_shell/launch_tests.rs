@@ -1276,3 +1276,61 @@ fn small_pane_launch_matrix() {
     check("bash", None);
     assert!(failures.is_empty(), "failed cases: {failures:?}");
 }
+
+// Backlog 054 (b), documented limit: in a pane shorter than the prompt plus the
+// launch line, i.e. ceil((prompt + line) / cols) > rows, part of the typed line
+// can stay in scrollback. Taller panes must leave nothing behind.
+#[cfg(windows)]
+#[test]
+fn reprompt_long_cwd_launch_scrollback_limit() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+    let bash = std::env::var("TERMFLOW_TEST_BASH").unwrap_or_else(|_| r"C:\Program Files\Git\bin\bash.exe".into());
+    let pwsh = std::env::var("TERMFLOW_TEST_PWSH").unwrap_or_else(|_| {
+        PathBuf::from(std::env::var_os("ProgramFiles").unwrap())
+            .join(r"PowerShell\7\pwsh.exe").to_string_lossy().into_owned()
+    });
+    let bash = bash.as_str();
+    for (binary, ps, args) in [
+        (pwsh.as_str(), true, vec!["-NoLogo", "-NoProfile"]),
+        (bash, false, vec![]),
+    ] {
+        assert!(Path::new(binary).is_file(), "required shell missing: {binary}");
+        let args: Vec<_> = args.into_iter().map(str::to_owned).collect();
+        for (cols, rows) in [(43, 6), (40, 6), (43, 2), (40, 2)] {
+            let f = Fixture::new();
+            let exe = recorder(&f);
+            let cwd = f.0.join("c".repeat(124usize.saturating_sub(f.0.to_str().unwrap().chars().count() + 1).max(1)));
+            fs::create_dir(&cwd).unwrap();
+            let mut spec = crate::pty_manager::spawn_spec::build_spawn_spec_with(PC, Some(LEAF), Some(binary), "fixture", Some(&args),
+                cwd.to_str(), cols, rows, false, |_| None);
+            prompt_mark(&f, &mut spec);
+            let record = f.0.join("argv.json");
+            spec.env.push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
+            let adapter = f.instrument(&spec);
+            let mut shell = Running::start(&adapter.spec);
+            let mut prompts = Prompts::new();
+            prompts.until(&shell, |p| p.count >= 1);
+            let before = prompts.count;
+            let encode = if ps { super::super::launch::encode_launch_with_powershell_hook } else { encode_launch };
+            let exe = if ps { exe.to_str().unwrap().to_owned() } else {
+                shell_path(&exe, classify(&adapter.spec.shell).unwrap().1).unwrap()
+            };
+            let launch = encode(&adapter.spec.shell, vec![exe, "-t".into(), "example-host".into()], &f.root(), owner()).unwrap();
+            shell.send(std::str::from_utf8(launch.bytes()).unwrap());
+            prompts.until(&shell, |p| p.count > before && record.exists());
+            let kept = history(&prompts.visible, rows, cols).join("");
+            // What each shell really types: the PowerShell hook call, or the POSIX
+            // `\__tfssh <id>` source line (its inline-body fallback starts `builtin printf`).
+            let fragments: &[&str] = if ps { &["& ([sc"] } else { &["__tfssh", "builtin printf"] };
+            assert!(fragments.iter().any(|f| std::str::from_utf8(launch.bytes()).unwrap().contains(f)),
+                "fragment marker must match the typed line: {:?}", std::str::from_utf8(launch.bytes()));
+            let count: usize = fragments.iter().map(|f| kept.matches(f).count()).sum();
+            eprintln!("{binary} {cols}x{rows}: {count} launch fragments");
+            if rows == 6 { assert_eq!(count, 0, "{binary} {cols}x{rows}: {kept}"); }
+            launch.finish_after_quiescence().unwrap();
+            shell.send("exit 0\r");
+            shell.wait_success();
+            adapter.finish_after_shell_quiescence().unwrap();
+        }
+    }
+}
