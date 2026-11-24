@@ -74,9 +74,14 @@ pub struct RestorePlan {
 /// two blank lines), so this is also where the shell's first prompt belongs.
 pub fn replayed_cursor_row(prefix: &str, rows: u16, cols: u16) -> u16 {
     // No scrollback: only the screen's cursor is wanted.
-    let mut parser = vt100::Parser::new(rows.max(1), cols.max(1), 0);
+    let mut parser = super::new_screen_parser(rows, cols, 0);
     parser.process(prefix.as_bytes());
-    parser.screen().cursor_position().0.saturating_add(1)
+    parser
+        .screen()
+        .cursor_position()
+        .0
+        .saturating_add(1)
+        .min(rows.max(1))
 }
 
 /// Decide how `prefix` (the persisted blob plus [`REPLAY_SEPARATOR`]) is seeded and anchored for
@@ -97,9 +102,10 @@ pub fn plan_restore(prefix: &str, rows: u16, cols: u16, frame: CursorFrame) -> R
             // whatever row it ended on; the cursor is then homed. (vt100 drops lines scrolled
             // inside a scroll region, so plain line feeds — not a region — are what keep the
             // history.)
-            let mut seed = String::with_capacity(prefix.len() + usize::from(rows) + 8);
+            let shadow_rows = usize::from(rows.max(super::screen_parser::MIN_SCREEN_ROWS));
+            let mut seed = String::with_capacity(prefix.len() + shadow_rows + 8);
             seed.push_str(prefix);
-            seed.extend(std::iter::repeat('\n').take(usize::from(rows.max(1))));
+            seed.extend(std::iter::repeat('\n').take(shadow_rows));
             seed.push_str("\x1b[1;1H");
             RestorePlan { seed, anchor_row: Some(1), spawn_cursor_row: None }
         }

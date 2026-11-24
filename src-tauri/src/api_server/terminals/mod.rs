@@ -700,20 +700,20 @@ pub(crate) fn render_terminal_history(
     rows: u16,
     cols: u16,
 ) -> String {
-    let mut parser = vt100::Parser::new(rows.max(1), cols.max(1), 10_000);
+    let mut parser = crate::state::new_screen_parser(rows, cols, 10_000);
 
     for chunk in history.iter() {
         parser.process(chunk.as_bytes());
     }
 
-    parser.screen().contents()
+    crate::state::visible_text(parser.screen(), rows, cols)
 }
 
 pub(crate) fn terminal_size_for_output(state: &AppState, id: &str) -> (u16, u16) {
     state
         .terminals
         .get(id)
-        .map(|terminal| (terminal.rows.max(1), terminal.cols.max(1)))
+        .map(|terminal| (terminal.rows, terminal.cols))
         .unwrap_or((24, 80))
 }
 

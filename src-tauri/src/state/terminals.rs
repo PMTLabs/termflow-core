@@ -14,6 +14,10 @@ use std::sync::Mutex;
 use super::render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, tail_text_with};
 use super::reattach::plan_reattach;
 use super::types::*;
+use super::screen_parser::{
+    append_cursor, feed_screen_parser, lock_screen_parser, new_screen_parser, one_row_snapshot,
+    projects_one_row, resize_screen_parser, visible_text, TerminalScreen,
+};
 use super::host_registry;
 use crate::elevated_host::{FrozenId, HostChannel};
 
@@ -317,7 +321,11 @@ impl<R: Runtime> AppState<R> {
     pub fn init_screen(&self, id: &str, rows: u16, cols: u16) {
         self.terminal_screens.insert(
             id.to_string(),
-            Mutex::new(vt100::Parser::new(rows.max(1), cols.max(1), SCROLLBACK_LINES)),
+            Mutex::new(TerminalScreen {
+                parser: new_screen_parser(rows, cols, SCROLLBACK_LINES),
+                rows,
+                cols,
+            }),
         );
         self.terminal_focus_reporting
             .insert(id.to_string(), FocusReportingTracker::default());
@@ -337,12 +345,7 @@ impl<R: Runtime> AppState<R> {
             tracker.scan(data);
         }
         if let Some(screen) = self.terminal_screens.get(id) {
-            match screen.lock() {
-                Ok(mut parser) => parser.process(data),
-                // A poisoned lock means a prior holder panicked; the screen would
-                // silently go stale forever, so surface it rather than swallow it.
-                Err(_) => log::warn!("feed_screen: screen parser mutex poisoned for {}", id),
-            }
+            feed_screen_parser(&screen, id, data);
         }
     }
 
@@ -350,11 +353,11 @@ impl<R: Runtime> AppState<R> {
     /// Like a real VT this clips content beyond the new bounds rather than rewrapping;
     /// the running program redraws on SIGWINCH, which re-feeds the parser correctly.
     pub fn resize_screen(&self, id: &str, rows: u16, cols: u16) {
-        if let Some(screen) = self.terminal_screens.get(id) {
-            match screen.lock() {
-                Ok(mut parser) => parser.screen_mut().set_size(rows.max(1), cols.max(1)),
-                Err(_) => log::warn!("resize_screen: screen parser mutex poisoned for {}", id),
-            }
+        if let Some(entry) = self.terminal_screens.get(id) {
+            let mut screen = lock_screen_parser(&entry, id);
+            resize_screen_parser(&mut screen.parser, rows, cols);
+            screen.rows = rows;
+            screen.cols = cols;
         }
     }
 
@@ -362,20 +365,18 @@ impl<R: Runtime> AppState<R> {
     /// blob that reproduces it exactly when written to a fresh terminal of the
     /// same size. Returns None if no parser exists for the terminal.
     ///
-    /// The snapshot is taken at the parser's current size — callers that need a
+    /// At one real row the shadow cursor's row is projected onto row 1. Callers that need a
     /// specific viewport must `resize_screen` first. We deliberately do NOT resize
     /// here: a read-side resize would let concurrent clients with different
     /// viewports fight over the single shared parser size.
     pub fn screen_snapshot(&self, id: &str) -> Option<Vec<u8>> {
         let screen = self.terminal_screens.get(id)?;
-        let parser = match screen.lock() {
-            Ok(parser) => parser,
-            Err(_) => {
-                log::warn!("screen_snapshot: screen parser mutex poisoned for {}", id);
-                return None;
-            }
-        };
-        Some(parser.screen().contents_formatted())
+        let parser = lock_screen_parser(&screen, id);
+        Some(if projects_one_row(parser.rows) {
+            one_row_snapshot(parser.parser.screen(), parser.cols)
+        } else {
+            parser.parser.screen().contents_formatted()
+        })
     }
 
     /// Render the terminal's current visible screen as PLAIN TEXT — the same grid
@@ -390,14 +391,8 @@ impl<R: Runtime> AppState<R> {
     /// alignment intact.
     pub fn screen_text(&self, id: &str) -> Option<String> {
         let screen = self.terminal_screens.get(id)?;
-        let parser = match screen.lock() {
-            Ok(parser) => parser,
-            Err(_) => {
-                log::warn!("screen_text: screen parser mutex poisoned for {}", id);
-                return None;
-            }
-        };
-        Some(parser.screen().contents())
+        let parser = lock_screen_parser(&screen, id);
+        Some(visible_text(parser.parser.screen(), parser.rows, parser.cols))
     }
 
     /// Matchable PLAIN TEXT from the tail of a terminal's buffer — the Automations engine's read.
@@ -422,14 +417,15 @@ impl<R: Runtime> AppState<R> {
     ) -> Option<String> {
         use crate::automation_engine::eval::ReadDepth;
         let entry = self.terminal_screens.get(process_id)?;
-        let mut parser = match entry.lock() {
-            Ok(parser) => parser,
-            Err(_) => {
-                log::warn!("screen_tail_text: screen parser mutex poisoned for {}", process_id);
-                return None;
-            }
-        };
-        let screen = parser.screen_mut();
+        let mut parser = lock_screen_parser(&entry, process_id);
+        if matches!(depth, ReadDepth::VisibleScreen) && projects_one_row(parser.rows) {
+            return Some(if skip_typed_line {
+                String::new()
+            } else {
+                visible_text(parser.parser.screen(), parser.rows, parser.cols)
+            });
+        }
+        let screen = parser.parser.screen_mut();
         let max_lines = match depth {
             ReadDepth::Window(n) => n,
             ReadDepth::VisibleScreen => screen.size().0 as usize,
@@ -448,9 +444,8 @@ impl<R: Runtime> AppState<R> {
     pub fn input_modes_snapshot(&self, id: &str) -> Vec<u8> {
         let mut out = Vec::new();
         if let Some(screen) = self.terminal_screens.get(id) {
-            if let Ok(parser) = screen.lock() {
-                out.extend_from_slice(&parser.screen().input_mode_formatted());
-            }
+            let parser = lock_screen_parser(&screen, id);
+            out.extend_from_slice(&parser.parser.screen().input_mode_formatted());
         }
         // Focus reporting is only a meaningful signal off Windows: ConPTY
         // asserts DECSET 1004 for EVERY session (even `cmd /c ping`), so
@@ -473,17 +468,18 @@ impl<R: Runtime> AppState<R> {
     /// the same single lock that produces the formatted snapshot.
     pub fn screen_snapshot_if_nonblank(&self, id: &str) -> Option<Vec<u8>> {
         let screen = self.terminal_screens.get(id)?;
-        let parser = match screen.lock() {
-            Ok(parser) => parser,
-            Err(_) => {
-                log::warn!("screen_snapshot_if_nonblank: screen parser mutex poisoned for {}", id);
-                return None;
-            }
-        };
-        if parser.screen().contents().trim().is_empty() {
+        let parser = lock_screen_parser(&screen, id);
+        if visible_text(parser.parser.screen(), parser.rows, parser.cols)
+            .trim()
+            .is_empty()
+        {
             return None;
         }
-        Some(parser.screen().contents_formatted())
+        Some(if projects_one_row(parser.rows) {
+            one_row_snapshot(parser.parser.screen(), parser.cols)
+        } else {
+            parser.parser.screen().contents_formatted()
+        })
     }
 
     /// Render this terminal's FULL buffer (scrollback + visible screen) as a styled,
@@ -517,16 +513,10 @@ impl<R: Runtime> AppState<R> {
     }
 
     fn render_scrollback(&self, id: &str, with_cursor: bool) -> Option<Vec<u8>> {
-        let mut screen = {
+        let (mut screen, rows, cols) = {
             let entry = self.terminal_screens.get(id)?;
-            let parser = match entry.lock() {
-                Ok(p) => p,
-                Err(_) => {
-                    log::warn!("full_scrollback_snapshot: screen parser mutex poisoned for {}", id);
-                    return None;
-                }
-            };
-            parser.screen().clone()
+            let parser = lock_screen_parser(&entry, id);
+            (parser.parser.screen().clone(), parser.rows, parser.cols)
         };
         let mut blob = render_full_scrollback(&mut screen)?;
         if !with_cursor {
@@ -541,8 +531,11 @@ impl<R: Runtime> AppState<R> {
         // terminal contents necessarily being the same" — exactly this case), plus
         // an attribute reset since restoring cursor position can itself redraw cells
         // and alter the active drawing attributes (same doc note).
-        blob.extend_from_slice(&screen.cursor_state_formatted());
-        blob.extend_from_slice(&screen.attributes_formatted());
+        if projects_one_row(rows) {
+            super::screen_parser::append_one_row_scrollback_tail(&mut blob, &screen, cols);
+        } else {
+            append_cursor(&mut blob, &screen, rows, cols);
+        }
         Some(blob)
     }
 
