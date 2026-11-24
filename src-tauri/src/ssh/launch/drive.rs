@@ -2,7 +2,7 @@
 use super::{refused, AttemptReceipt, Gate, LaunchError, LaunchErrorCode as Code, LaunchRegistry, LaunchSnapshot, LaunchStage};
 use crate::{
     pty_manager::{
-        input_gate::{InputBackend, InputDispatch, InputFence, LaunchTicket, ReadyEpoch},
+        input_gate::{BoundSshShell, InputBackend, InputDispatch, InputFence, LaunchTicket, ReadyEpoch},
         ssh_helpers::{HelperRoot, ProcessIdentity},
         ssh_shell::posix::launch::{self, EncodedLaunch},
     },
@@ -34,7 +34,7 @@ struct LaunchEvent<'a> {
 pub(super) trait LaunchPort: InputBackend {
     fn helper_root(&self) -> Result<HelperRoot, LaunchError>;
     fn open_ssh(&self) -> Result<String, LaunchError>;
-    fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool;
+    fn bare_shell(&self, bound: &BoundSshShell) -> bool;
     fn launch_state(&self, terminal: &str, state: &'static str);
     #[cfg(test)]
     fn record_child_sample(&self) {}
@@ -54,25 +54,34 @@ impl<R: Runtime> LaunchPort for AppState<R> {
         }
         Ok(path)
     }
-    fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool {
-        native_bare_shell(shell, identity)
+    fn bare_shell(&self, bound: &BoundSshShell) -> bool {
+        native_bare_shell(bound)
     }
     fn launch_state(&self, terminal: &str, state: &'static str) {
         let _ = self.app_handle.emit("ssh-launch:state", LaunchEvent { terminal_id: terminal, state });
     }
 }
 
-fn native_bare_shell(shell: &str, identity: &ProcessIdentity) -> bool {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let pid = sysinfo::Pid::from_u32(identity.pid);
-    system.process(pid).is_some_and(|process| {
-        identity.is_live()
-            && Path::new(shell).file_name().is_some_and(|name| {
-                name.to_string_lossy().eq_ignore_ascii_case(&process.name().to_string_lossy())
-            })
-            && !system.processes().values().any(|p| p.parent() == Some(pid))
-    })
+#[cfg(any(windows, test))]
+mod bare_shell;
+
+fn native_bare_shell(bound: &BoundSshShell) -> bool {
+    #[cfg(windows)]
+    return bare_shell::native(bound);
+    #[cfg(not(windows))]
+    {
+        let Some((identity, _)) = bound.effective_identity() else { return false };
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let pid = sysinfo::Pid::from_u32(identity.pid);
+        system.process(pid).is_some_and(|process| {
+            identity.is_live()
+                && Path::new(&bound.shell).file_name().is_some_and(|name| {
+                    name.to_string_lossy().eq_ignore_ascii_case(&process.name().to_string_lossy())
+                })
+                && !system.processes().values().any(|p| p.parent() == Some(pid))
+        })
+    }
 }
 
 pub(crate) fn native_powershell_launcher(shell: &str, identity: &ProcessIdentity) -> bool {
@@ -193,8 +202,7 @@ struct Candidate {
     receipt: AttemptReceipt,
     definition: LaunchDefinition,
     shell: String,
-    identity: ProcessIdentity,
-    birth: Option<launch_process::Identity>,
+    bound: BoundSshShell,
 }
 
 impl Candidate {
@@ -226,13 +234,14 @@ impl Candidate {
                 &root,
                 owner,
                 self.definition.target.hops.len(),
-                native_powershell_launcher(&self.shell, &self.identity),
+                self.bound.effective_identity()
+                    .is_some_and(|(identity, _)| native_powershell_launcher(&self.shell, &identity)),
             )
         })();
         match encoded {
             Ok(encoded) => Ok(Payload {
                 command: launch_process::Command {
-                    shell: self.birth,
+                    shell: None, posix_fork_stub: false, // Set in tick after shell resolution.
                     exe: std::fs::canonicalize(&ssh).unwrap_or_else(|_| PathBuf::from(ssh)),
                     marker,
                     intermediary: encoded.intermediary().map(<[String]>::to_vec),
@@ -268,7 +277,7 @@ struct Driver<'a, P> {
 enum Step {
     Stop,
     Wait,
-    CheckPrompt(String, ProcessIdentity),
+    CheckPrompt(BoundSshShell),
     Submit(Box<Candidate>),
 }
 
@@ -328,8 +337,8 @@ impl<P: LaunchPort> Driver<'_, P> {
         let candidate = match self.pick(now) {
             Step::Wait => return true,
             Step::Stop => return false,
-            Step::CheckPrompt(shell, identity) => {
-                if !self.port.bare_shell(&shell, &identity) {
+            Step::CheckPrompt(bound) => {
+                if !self.port.bare_shell(&bound) {
                     return self.wait_ready(now);
                 }
                 let mut attempts = self.registry.0.lock();
@@ -345,22 +354,31 @@ impl<P: LaunchPort> Driver<'_, P> {
             }
             Step::Submit(candidate) => candidate,
         };
-        if !self.port.bare_shell(&candidate.shell, &candidate.identity) {
+        if !self.port.bare_shell(&candidate.bound) {
             return self.wait_ready(now);
         }
-        let payload = match candidate.encode(self.port, self.home) {
+        let Some((_, birth)) = candidate.bound.effective_identity() else {
+            return self.wait_ready(now);
+        };
+        let mut payload = match candidate.encode(self.port, self.home) {
             Ok(payload) => payload,
             Err(err) => {
                 self.finish(Err(err), None);
                 return false;
             }
         };
+        payload.command.shell = Some(birth);
+        #[cfg(windows)]
+        {
+            payload.command.posix_fork_stub = crate::pty_manager::ssh_shell::posix::uses_native_fork_stub(&candidate.shell);
+        }
         let possibly_written = Cell::new(false);
         let admitted = Cell::new(false);
         let waiting_trust = Cell::new(false);
+        let waiting_shell = Cell::new(false);
         let bytes = payload.encoded.bytes();
         let result = self.keys().submit_ssh_input_fenced(&candidate.ticket, &candidate.ready,
-            &Fence { driver: self, candidate: &candidate, waiting_trust: &waiting_trust }, |permit| {
+            &Fence { driver: self, candidate: &candidate, waiting_trust: &waiting_trust, waiting_shell: &waiting_shell, possibly_written: &possibly_written }, |permit| {
                 admitted.set(true);
                 if self.keys().mounted_launch_owner(self.terminal, &candidate.process)
                     != Some((candidate.owner, candidate.placement))
@@ -389,13 +407,16 @@ impl<P: LaunchPort> Driver<'_, P> {
             payload.finish_unsubmitted();
             None
         };
+        if matches!(result, Ok(None)) || (waiting_shell.get() && !admitted.get()) {
+            return self.wait_ready(now);
+        }
         // A live trust wait discovered before admission has not consumed the
         // ticket or prompt. At the local FIFO head it is already consumed:
         // never replay that turn, even if no bytes reached the writer.
         if waiting_trust.get() && !admitted.get() {
             return true;
         }
-        self.finish(result, payload);
+        self.finish(result.map(|_| ()), payload);
         false
     }
 
@@ -436,12 +457,12 @@ impl<P: LaunchPort> Driver<'_, P> {
                 Ok(None) => return Self::waiting_ready(keys, entry, next, now),
                 Err(_) => return Self::end(keys, entry, next, LaunchStage::Error, Code::StaleAttempt),
             };
-            let Some((shell, identity, birth)) = keys.ssh_shell_identity(&process) else {
+            let Some(bound) = keys.ssh_shell_identity(&process) else {
                 return Self::end(keys, entry, next, LaunchStage::Error, Code::UnsupportedShell);
             };
             if !eligible(view.gate) {
                 let _ = entry.update(next);
-                return Step::CheckPrompt(shell, identity);
+                return Step::CheckPrompt(bound);
             }
             let Some(definition) = definition else {
                 return Self::end(keys, entry, next, LaunchStage::Error, Code::StoreUnavailable);
@@ -454,7 +475,7 @@ impl<P: LaunchPort> Driver<'_, P> {
             let _ = entry.update(next);
             Step::Submit(Box::new(Candidate {
                 process, owner, placement: cg, ticket, ready, nonce, receipt,
-                definition: definition.clone(), shell, identity, birth,
+                definition: definition.clone(), shell: bound.shell.clone(), bound,
             }))
         }).unwrap_or_else(|| {
             self.finish(Err(Code::TrustBlocked.into()), None);
@@ -661,12 +682,19 @@ struct Fence<'a, 'd, P> {
     driver: &'a Driver<'d, P>,
     candidate: &'a Candidate,
     waiting_trust: &'a Cell<bool>,
+    waiting_shell: &'a Cell<bool>,
+    possibly_written: &'a Cell<bool>,
 }
 impl<P: LaunchPort> InputFence<LaunchError> for Fence<'_, '_, P> {
+    fn refused_not_bare(&self) -> bool { self.waiting_shell.get() }
+    fn possibly_written(&self) -> bool { self.possibly_written.get() }
+
     fn qualify<T>(&self, work: impl FnOnce() -> Result<T, LaunchError>) -> Result<T, LaunchError> {
         let c = self.candidate;
         let d = self.driver;
-        if !d.port.bare_shell(&c.shell, &c.identity) {
+        if !d.port.bare_shell(&c.bound) {
+            // A prompt substitution can start after the readiness hook.
+            self.waiting_shell.set(true);
             return Err(Code::StaleAttempt.into());
         }
         // Store -> 067 membership/entry -> Lane A ownership barrier. Keep the

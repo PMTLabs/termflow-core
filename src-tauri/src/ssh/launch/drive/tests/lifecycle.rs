@@ -37,10 +37,29 @@ fn instrument(f: &Fixture) -> posix::PosixAdapter {
 }
 
 fn instrument_env(f: &Fixture, extra: Vec<(String, String)>) -> posix::PosixAdapter {
+    instrument_profile(f, extra, default_profile())
+}
+
+fn default_profile() -> (String, Vec<String>) {
     #[cfg(windows)]
     let (shell, args) = (crate::pty_manager::ssh_shell::system_shell("powershell.exe").unwrap(), vec!["-NoProfile".into(), "-NoLogo".into()]);
     #[cfg(not(windows))]
     let (shell, args) = ("/bin/bash".into(), vec!["-i".into()]);
+    (shell, args)
+}
+
+#[cfg(windows)]
+fn git_bash_profile() -> (String, Vec<String>) {
+    let shell = std::env::var("TERMFLOW_TEST_BASH").unwrap_or_else(|_| {
+        [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"]
+            .into_iter().find(|path| Path::new(path).is_file())
+            .expect("required Git Bash executable missing: set TERMFLOW_TEST_BASH").into()
+    });
+    assert!(Path::new(&shell).is_file(), "TERMFLOW_TEST_BASH does not name an installed executable");
+    (shell, vec!["--login".into(), "-i".into()])
+}
+
+fn instrument_profile(f: &Fixture, extra: Vec<(String, String)>, (shell, args): (String, Vec<String>)) -> posix::PosixAdapter {
     let home = f.port.home.to_str().unwrap().to_owned();
     let spec = SpawnSpec {
         shell, args, cwd: Some(home.clone()), cols: 100, rows: 30, initial_cursor_row: None,
@@ -100,10 +119,12 @@ impl NativeShell {
     }
     async fn assert_shell_usable(&mut self, f: &Fixture, expected: &ProcessIdentity) {
         // The literal output is not present in the command echo.
-        #[cfg(windows)]
-        let bytes = b"Write-Output ('local-'+'still-alive')\r";
-        #[cfg(not(windows))]
-        let bytes = b"printf '%s%s\\n' local- still-alive\r";
+        let bytes: &[u8] = if cfg!(windows) && !self.adapter.as_ref().unwrap().spec.shell
+            .rsplit(['/', char::from(92)]).next().is_some_and(|name| name.eq_ignore_ascii_case("bash.exe")) {
+            b"Write-Output ('local-'+'still-alive')\r"
+        } else {
+            b"printf '%s%s\\n' local- still-alive\r"
+        };
         write_input(&*f.port, PROCESS, InputSource::Renderer, None, bytes).unwrap();
         self.prompt(f.keys(), true).await;
         assert!(String::from_utf8_lossy(&self.visible).contains("local-still-alive"));
@@ -166,9 +187,13 @@ async fn local(port: u16) -> (Fixture, NativeShell) {
     local_with(configured(port)).await
 }
 
-async fn local_with(mut f: Fixture) -> (Fixture, NativeShell) {
+async fn local_with(f: Fixture) -> (Fixture, NativeShell) {
+    local_with_profile(f, default_profile()).await
+}
+
+async fn local_with_profile(mut f: Fixture, profile: (String, Vec<String>)) -> (Fixture, NativeShell) {
     let (cg, staged) = f.stage();
-    let mut shell = NativeShell::spawn(instrument(&f));
+    let mut shell = NativeShell::spawn(instrument_profile(&f, Vec::new(), profile));
     shell.bind(&f, cg, &staged);
     let p = Arc::get_mut(&mut f.port).unwrap();
     p.writer = Arc::new(std::sync::Mutex::new(Box::new(Tee(shell.writer.clone(), p.record.clone()))));
@@ -180,9 +205,11 @@ impl Fixture {
     async fn accepted(&self, a: &LaunchAttemptRef) -> LaunchSnapshot {
         self.register(a);
         self.gate(Gate::Verified).await;
-        assert!(!self.tick(a));
+        tokio::time::timeout(DEADLINE, async {
+            while self.tick(a) { tokio::time::sleep(CHECK_INTERVAL).await; }
+        }).await.expect("launch did not finish dispatching");
         let snapshot = self.access(a, Operation::Query).unwrap();
-        assert_eq!(snapshot.stage, LaunchStage::Typed);
+        assert_eq!(snapshot.stage, LaunchStage::Typed, "error {:?}; events {:?}", snapshot.error, self.port.events.lock().as_slice());
         assert_eq!(self.sessions.current_launch(LEAF).unwrap().state, Some(LaunchState::Typed));
         snapshot
     }
@@ -220,9 +247,19 @@ async fn incoming(listen: &TcpListener) -> TcpStream {
 
 #[tokio::test]
 async fn ssh_exit_emits_ended_while_local_shell_stays_alive() {
+    ssh_exit_emits_ended(default_profile()).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn git_bash_ssh_runs_and_ends_while_local_shell_stays_alive() {
+    ssh_exit_emits_ended(git_bash_profile()).await;
+}
+
+async fn ssh_exit_emits_ended(profile: (String, Vec<String>)) {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
-    let (f, mut shell) = local(port).await;
+    let (f, mut shell) = local_with_profile(configured(port), profile).await;
     let shell_id = ProcessIdentity::capture(shell.pid()).unwrap();
     let a = f.open();
     let typed = f.accepted(&a).await;
@@ -237,7 +274,9 @@ async fn ssh_exit_emits_ended_while_local_shell_stays_alive() {
     assert_eq!(ended.revision, ended.launch_seq);
     assert!(ended.error.is_none());
     shell.prompt(f.keys(), true).await;
-    assert!(!f.driver(&a).observe(Instant::now()));
+    tokio::time::timeout(DEADLINE, async {
+        while f.driver(&a).observe(Instant::now()) { tokio::time::sleep(CHECK_INTERVAL).await; }
+    }).await.expect("local shell did not become bare after SSH ended");
     assert!(f.launches.0.lock()[LEAF].payload.is_none());
     assert_eq!(f.stages(), [json!("typed"), json!("running"), json!("ended")]);
     shell.assert_shell_usable(&f, &shell_id).await;

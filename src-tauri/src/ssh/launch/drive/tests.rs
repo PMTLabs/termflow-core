@@ -63,6 +63,8 @@ struct Port {
     record: Arc<Recorded>,
     events: Mutex<Vec<Value>>,
     bare: AtomicBool,
+    bare_checks: Mutex<std::collections::VecDeque<bool>>,
+    second_check: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     native_bare: bool,
     // T10: an outer recording executable in place of the native ssh path.
     ssh: Option<String>,
@@ -92,9 +94,19 @@ impl LaunchPort for Port {
         HelperRoot::open_app_data(&self.home).map_err(|_| Code::UnsupportedContext.into())
     }
     fn open_ssh(&self) -> Result<String, LaunchError> { self.ssh.clone().map_or_else(native_ssh, Ok) }
-    fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool {
+    fn bare_shell(&self, bound: &BoundSshShell) -> bool {
+        let (bare, last) = {
+            let mut checks = self.bare_checks.lock();
+            (checks.pop_front(), checks.is_empty())
+        };
+        if let Some(bare) = bare {
+            if last {
+                if let Some(hook) = self.second_check.lock().take() { hook(); }
+            }
+            return bare;
+        }
         if let Some(hook) = self.before_encode.lock().take() { hook(); }
-        self.bare.load(Ordering::SeqCst) && (!self.native_bare || native_bare_shell(shell, identity))
+        self.bare.load(Ordering::SeqCst) && (!self.native_bare || native_bare_shell(bound))
     }
     fn launch_state(&self, terminal: &str, state: &'static str) {
         if let Some(sessions) = &self.at_emit {
@@ -177,7 +189,7 @@ impl Fixture {
         let writer: LocalWriter = Arc::new(std::sync::Mutex::new(Box::new(Recorder(record.clone()))));
         let port = Arc::new(Port {
             keys: HostKeys::default(), home, writer, record, events: Mutex::default(),
-            bare: AtomicBool::new(true), native_bare: false, ssh: None, before_encode: Mutex::default(),
+            bare: AtomicBool::new(true), bare_checks: Mutex::default(), second_check: Mutex::default(), native_bare: false, ssh: None, before_encode: Mutex::default(),
             host: None, at_emit: Some(sessions.clone()), ingressed: Mutex::default(), child_samples: Mutex::default(),
         });
         let owner = Self::page(&port.keys, SOURCE);
@@ -207,7 +219,7 @@ impl Fixture {
         let shell = crate::pty_manager::ssh_shell::system_shell("powershell.exe").unwrap();
         #[cfg(not(windows))]
         let shell = "/bin/bash".to_owned();
-        self.complete(cg, &staged, shell, ProcessIdentity { pid: 10, start_time: 1 });
+        self.complete(cg, &staged, shell, ProcessIdentity::capture(std::process::id()).unwrap());
         (cg, staged)
     }
     fn direct() -> Self { Self::new(Server::new(1, "alice"), false) }
@@ -666,6 +678,209 @@ async fn startup_question_that_never_reaches_a_prompt_times_out_and_a_late_promp
     f.ready(1);
     assert!(!f.tick(&a));
     assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::Error);
+    f.zero();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn dead_pinned_shell_times_out_without_typing() {
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    let a = f.open();
+    f.register(&a);
+    f.ready(1);
+    f.gate(Gate::Verified).await;
+    let bound = f.keys().ssh_shell_identity(PROCESS).unwrap();
+    let (live, _) = bound.effective_identity().unwrap();
+    bound.pin_leaf_for_test(ProcessIdentity { pid: live.pid, start_time: live.start_time + 1 });
+    let driver = f.driver(&a);
+    let start = Instant::now();
+    assert!(driver.tick(start));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::WaitingReady);
+    f.zero();
+    assert!(!driver.tick(start + READY_TIMEOUT));
+    let failed = f.access(&a, Operation::Query).unwrap();
+    assert_eq!((failed.stage, failed.error.unwrap().code), (LaunchStage::Error, Code::Timeout));
+    f.zero();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn busy_prompt_before_admission_waits_then_types_once() {
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    let a = f.open();
+    f.register(&a);
+    f.ready(1);
+    f.gate(Gate::Verified).await;
+    f.port.bare_checks.lock().extend([true, false]);
+    let waiting = f.tick(&a);
+    let view = f.access(&a, Operation::Query).unwrap();
+    assert!(waiting && view.stage == LaunchStage::WaitingReady, "stage={:?}, error={:?}", view.stage, view.error.map(|e| e.code));
+    f.zero();
+    assert!(!f.tick(&a));
+    assert_eq!(*f.port.record.bytes.lock(), f.typed_bytes());
+    assert!(!f.tick(&a));
+    assert_eq!(*f.port.record.calls.lock(), 1);
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn busy_prompt_before_admission_times_out_without_typing() {
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    let a = f.open();
+    f.register(&a);
+    f.ready(1);
+    f.gate(Gate::Verified).await;
+    f.port.bare_checks.lock().push_back(true);
+    f.port.bare.store(false, Ordering::SeqCst);
+    let driver = f.driver(&a);
+    let start = Instant::now();
+    assert!(driver.tick(start));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::WaitingReady);
+    assert!(driver.tick(start + READY_TIMEOUT - Duration::from_millis(1)));
+    f.zero();
+    assert!(!driver.tick(start + READY_TIMEOUT));
+    let failed = f.access(&a, Operation::Query).unwrap();
+    assert_eq!((failed.stage, failed.error.unwrap().code), (LaunchStage::Error, Code::Timeout));
+    f.zero();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn busy_prompt_after_admission_reuses_epoch_and_types_once() {
+    let (f, a) = second_qualify_fixture().await;
+    f.port.bare_checks.lock().extend([true, true, false]);
+    assert!(f.tick(&a));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::WaitingReady);
+    f.zero();
+    assert!(!f.tick(&a));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::Typed);
+    assert!(!f.tick(&a));
+    assert_eq!(*f.port.record.calls.lock(), 1);
+    assert_eq!(*f.port.record.bytes.lock(), f.typed_bytes());
+    f.shutdown().await;
+}
+
+async fn second_qualify_fixture() -> (Fixture, LaunchAttemptRef) {
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    let a = f.open();
+    f.register(&a);
+    f.ready(1);
+    f.gate(Gate::Verified).await;
+    (f, a)
+}
+
+#[tokio::test]
+async fn busy_prompt_after_admission_respects_original_timeout() {
+    let (f, a) = second_qualify_fixture().await;
+    let driver = f.driver(&a);
+    let start = Instant::now();
+    f.port.bare_checks.lock().push_back(false);
+    assert!(driver.tick(start));
+    for elapsed in [READY_TIMEOUT / 2, READY_TIMEOUT - Duration::from_millis(1)] {
+        f.port.bare_checks.lock().extend([true, true, false]);
+        assert!(driver.tick(start + elapsed));
+    }
+    f.port.bare_checks.lock().extend([true, true, false]);
+    assert!(!driver.tick(start + READY_TIMEOUT));
+    let failed = f.access(&a, Operation::Query).unwrap();
+    assert_eq!((failed.stage, failed.error.unwrap().code), (LaunchStage::Error, Code::Timeout));
+    f.zero();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn busy_prompt_after_admission_releases_fifo_for_ordinary_writer() {
+    use crate::pty_manager::input_gate::{write_input, InputSource};
+    let (f, a) = second_qualify_fixture().await;
+    f.port.bare_checks.lock().extend([true, true, false]);
+    assert!(f.tick(&a));
+    // Waiting launches retain their input lock. Cancel without a new prompt.
+    f.access(&a, Operation::Cancel).unwrap();
+    let port = f.port.clone();
+    let (done, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(write_input(&*port, PROCESS, InputSource::Renderer, None, b"user"));
+    });
+    result.recv_timeout(Duration::from_secs(5)).expect("FIFO head did not advance").unwrap();
+    assert_eq!(*f.port.record.bytes.lock(), b"user");
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn busy_prompt_after_admission_with_concurrent_user_input_fails_closed() {
+    use crate::pty_manager::input_gate::Refusal;
+    let (f, a) = second_qualify_fixture().await;
+    // A harmless refusal may restore readiness; a later one with queued input may not.
+    f.port.bare_checks.lock().extend([true, true, false]);
+    assert!(f.tick(&a));
+    f.port.bare_checks.lock().extend([true, true, false]);
+    let port = f.port.clone();
+    let (done, result) = std::sync::mpsc::channel();
+    *f.port.second_check.lock() = Some(Box::new(move || {
+        let (admitted, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(port.keys.admit_input(PROCESS, None, |_| {
+                admitted.send(()).unwrap();
+                Ok::<_, Refusal>(InputDispatch::local(|| Ok(())))
+            }));
+        });
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+    }));
+    assert_second_qualify_stale(&f, &a);
+    result.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn second_qualify_lease_and_store_refusals_fail_closed() {
+    use crate::pty_manager::input_gate::Refusal;
+    for lease in [true, false] {
+        let (f, a) = second_qualify_fixture().await;
+        f.port.bare_checks.lock().extend([true, true, false]);
+        assert!(f.tick(&a));
+        f.port.bare_checks.lock().extend([true, true, true]);
+        let (port, store) = (f.port.clone(), f.store.clone());
+        *f.port.second_check.lock() = Some(Box::new(move || {
+            if lease {
+                port.keys.takeover_input(PROCESS, |_| Ok::<_, Refusal>(InputDispatch::Complete(()))).unwrap();
+            } else {
+                store.transact(|data| { data.connections[0].port = 2222; Ok(()) }, |_| {}).unwrap();
+            }
+        }));
+        assert_second_qualify_stale(&f, &a);
+        f.shutdown().await;
+    }
+}
+
+fn assert_second_qualify_stale(f: &Fixture, a: &LaunchAttemptRef) {
+    assert!(!f.tick(a));
+    let failed = f.access(a, Operation::Query).unwrap();
+    assert_eq!((failed.stage, failed.error.unwrap().code), (LaunchStage::Error, Code::StaleAttempt));
+    assert!(!f.tick(a));
+    f.zero();
+}
+
+#[tokio::test]
+async fn git_launcher_without_child_times_out_without_typing() {
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    let a = f.open();
+    f.register(&a);
+    f.ready(1);
+    f.gate(Gate::Verified).await;
+    f.port.bare.store(bare_shell::launcher_without_child_is_bare(), Ordering::SeqCst);
+    let driver = f.driver(&a);
+    let start = Instant::now();
+    assert!(driver.tick(start));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::WaitingReady);
+    assert!(driver.tick(start + READY_TIMEOUT - Duration::from_millis(1)));
+    assert!(!driver.tick(start + READY_TIMEOUT));
+    let failed = f.access(&a, Operation::Query).unwrap();
+    assert_eq!((failed.stage, failed.error.unwrap().code), (LaunchStage::Error, Code::Timeout));
     f.zero();
     f.shutdown().await;
 }

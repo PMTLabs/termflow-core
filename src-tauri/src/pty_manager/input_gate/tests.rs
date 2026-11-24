@@ -858,3 +858,123 @@ fn retry_requires_fresh_prompt_after_submission_input_or_transfer() {
         }
     }
 }
+
+#[test]
+fn local_launch_restore_requires_every_guard() {
+    use std::cell::Cell;
+
+    struct SecondRefusal<F> {
+        called: Cell<bool>,
+        on_head: F,
+        not_bare: bool,
+        possibly_written: bool,
+    }
+    impl<F: Fn()> InputFence<Refusal> for SecondRefusal<F> {
+        fn qualify<T>(&self, work: impl FnOnce() -> Result<T, Refusal>) -> Result<T, Refusal> {
+            if self.called.replace(true) {
+                (self.on_head)();
+                Err(Refusal::StaleAttempt)
+            } else {
+                work()
+            }
+        }
+
+        fn refused_not_bare(&self) -> bool { self.not_bare }
+        fn possibly_written(&self) -> bool { self.possibly_written }
+    }
+
+    for changed in [
+        "none", "turn", "generation", "stdin", "prompt", "owner", "lease", "attempt", "unsubmitted",
+        "not bare refusal", "possibly written", "live owner",
+    ] {
+        let (backend, _) = Backend::new(false);
+        let keys = &backend.keys;
+        keys.register_ssh_prompt(PC, 1, "0123456789abcdef0123456789abcdef").unwrap();
+        let ticket = keys.prepare_ssh_input(PC).unwrap();
+        let ready = backend.ready();
+        let entry = keys.input.processes.lock().get(PC).unwrap().clone();
+        let fence = SecondRefusal {
+            called: Cell::new(false),
+            not_bare: changed != "not bare refusal",
+            possibly_written: changed == "possibly written",
+            on_head: || {
+                if changed == "live owner" {
+                    transfer(keys);
+                    assert_ne!(keys.input_stamp(PC).as_ref(), Some(&entry.lock().owner));
+                }
+                let mut state = entry.lock();
+                assert!(state.attempt.as_ref().unwrap().submitted);
+                match changed {
+                    "turn" => state.next_local_turn += 1,
+                    "generation" => state.input_generation += 1,
+                    "stdin" => state.ssh_prompt.as_mut().unwrap().stdin_writes += 1,
+                    "prompt" => state.prompt_epoch += 1,
+                    "owner" => state.owner.generation += 1,
+                    "lease" => state.lease_epoch += 1,
+                    "attempt" => state.attempt.as_mut().unwrap().id = Uuid::new_v4(),
+                    "unsubmitted" => state.attempt.as_mut().unwrap().submitted = false,
+                    _ => {}
+                }
+            },
+        };
+        let result = keys.submit_ssh_input_fenced(&ticket, &ready, &fence, |_| {
+            Ok(InputDispatch::local(|| -> Result<(), Refusal> { panic!("refused head must not write") }))
+        });
+        let state = entry.lock();
+        if changed == "none" {
+            assert_eq!(result, Ok(None), "unchanged zero-byte refusal must restore readiness");
+            assert!(!state.attempt.as_ref().unwrap().submitted);
+            let restored = state.ready.as_ref().unwrap();
+            assert_eq!(restored.process, ready.process);
+            assert_eq!(restored.owner, ready.owner);
+            assert_eq!(restored.input_generation, ready.input_generation);
+            assert_eq!(restored.stdin_writes, ready.stdin_writes);
+            assert_eq!(restored.epoch, ready.epoch);
+            assert!(ready.host.is_none() && restored.host.is_none());
+            assert_eq!(state.next_local_turn, 1);
+            assert_eq!(state.input_generation, ready.input_generation);
+            assert_eq!(state.ssh_prompt.as_ref().unwrap().stdin_writes, ready.stdin_writes);
+        } else {
+            assert!(matches!(result, Err(Refusal::StaleAttempt)), "{changed}");
+            assert_eq!(state.attempt.as_ref().unwrap().submitted, changed != "unsubmitted", "{changed}");
+            assert!(state.ready.is_none(), "{changed}");
+        }
+    }
+}
+
+#[test]
+fn effective_ssh_shell_identity_uses_live_pin_and_rejects_dead_pin() {
+    use crate::pty_manager::ssh_helpers::ProcessIdentity;
+    let live = ProcessIdentity::capture(std::process::id()).unwrap();
+    let bound = BoundSshShell { shell: "test".into(), identity: live.clone(), leaf: Arc::default() };
+    assert_eq!(bound.effective_identity().unwrap().0, live);
+    let dead = ProcessIdentity { pid: live.pid, start_time: live.start_time + 1 };
+    let launcher = BoundSshShell { shell: "test".into(), identity: dead.clone(), leaf: Arc::default() };
+    launcher.pin_leaf_for_test(live.clone());
+    assert_eq!(launcher.effective_identity().unwrap().0, live);
+    bound.pin_leaf_for_test(dead);
+    assert!(bound.effective_identity().is_none());
+}
+
+#[test]
+fn ssh_shell_resolver_accessor_source_census() {
+    use std::{fs, path::Path};
+    fn scan(dir: &Path, root: &Path, hits: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                scan(&path, root, hits);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let source = fs::read_to_string(&path).unwrap();
+                for _ in source.lines().flat_map(|line| line.matches(concat!("launcher_for_", "leaf_resolution"))) {
+                    hits.push(path.strip_prefix(root).unwrap().to_str().unwrap().replace(char::from(92), "/"));
+                }
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut hits = Vec::new();
+    scan(&root, &root, &mut hits);
+    hits.sort();
+    assert_eq!(hits, ["pty_manager/input_gate.rs", "ssh/launch/drive/bare_shell.rs"]);
+}
