@@ -133,7 +133,10 @@ fn marker_decoy(marker: &str) -> std::process::Child {
     let child = std::process::Command::new(crate::pty_manager::ssh_shell::system_shell("powershell.exe").unwrap())
         .args(["-NoProfile", "-Command", "Start-Sleep 30 #", marker]).spawn();
     #[cfg(not(windows))]
-    let child = std::process::Command::new("/bin/sh").args(["-c", "sleep 30", marker]).spawn();
+    // bash (macOS /bin/sh) execs a lone `-c` command in place, so `sleep`
+    // would replace the process and drop the marker from argv. The EXIT trap
+    // keeps bash alive with its argv; bash on Linux too, so CI there covers it.
+    let child = std::process::Command::new("/bin/bash").args(["-c", "trap : EXIT; sleep 30", marker]).spawn();
     child.unwrap()
 }
 
@@ -173,6 +176,8 @@ async fn a_live_marker_child_defers_the_reap_and_the_next_launch_reaps() {
     // Shell gone but a marker child alive: it may still use the payload.
     f.launches.reconcile_processes(f.keys());
     let _ = f.access(&a, Operation::Launch(CONNECTION));
+    let still_live = crate::ssh::launch_process::live_markers([marker.as_str()]).contains(&marker);
+    assert!(still_live, "the decoy lost its marker (exited or exec'd), so this test proves nothing");
     assert!(dir.is_dir(), "reaped while a marker child was alive");
     decoy.kill().unwrap();
     decoy.wait().unwrap();
