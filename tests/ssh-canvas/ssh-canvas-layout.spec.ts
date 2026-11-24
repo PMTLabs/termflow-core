@@ -145,9 +145,12 @@ test('sshCanvas_browserWheelReachesScroller_withoutViewportChange', async ({ pag
 const allocationBoxes = (scope: Locator) => scope.evaluate(root => {
   const size = (selector: string, axis: 'width' | 'height') =>
     parseFloat(getComputedStyle(root.querySelector(selector)!)[axis]);
+  // 050 (D108): a connected, idle SSH surface renders neither the running strip nor the empty
+  // chrome row, so their allocation is "absent", not a reserved height.
+  const present = (selector: string) => !!root.querySelector(selector);
   return {
     browser: size('.ssh-browser', 'width'), status: size('.ssh-status', 'height'),
-    chrome: size('.ssh-pane-chrome', 'height'), terminal: {
+    strip: present('.ssh-launch-strip'), chrome: present('.ssh-pane-chrome'), terminal: {
       width: size('.terminal-display', 'width'), height: size('.terminal-display', 'height'),
     },
   };
@@ -175,6 +178,7 @@ test('sshCanvasLayout_usesDeclaredCssAllocations', async ({ page }) => {
     test.info().annotations.push({ type: 'entry fit', description: evidence });
     expect(canvas.terminal).toEqual(source.terminal);
     expect(canvas.browser).toBe(source.browser);
+    expect({ strip: canvas.strip, chrome: canvas.chrome }).toEqual({ strip: false, chrome: false });
     // Plan 070 §4.1 B: the relocation fit RUNS and finds nothing to do. Liveness: it must run at all
     // (else the box equality above is never exercised by xterm); safety: it never resizes xterm.
     expect(fits, `${label}: entry fit calls`).toBeGreaterThan(0);
@@ -182,6 +186,7 @@ test('sshCanvasLayout_usesDeclaredCssAllocations', async ({ page }) => {
     unchanged(current, baseline);
   };
   const expanded = await scene(false);
+  expect({ strip: expanded.strip, chrome: expanded.chrome }).toEqual({ strip: false, chrome: false });
   await checkEntry('baseline expanded', expanded);
   const rail = await scene(true);
   await checkEntry('baseline collapsed', rail);
@@ -195,6 +200,7 @@ test('sshCanvasLayout_usesDeclaredCssAllocations', async ({ page }) => {
     expect(source).toEqual({
       browser: baseline.browser + (label === 'status' ? 0 : delta),
       status: baseline.status + (label === 'status' ? delta : 0),
+      strip: baseline.strip,
       chrome: baseline.chrome,
       terminal: {
         width: baseline.terminal.width - (label === 'status' ? 0 : delta),
@@ -501,14 +507,18 @@ test('sshCanvasLayout_stackingAndStripBand', async ({ page }, info) => {
   const collapsed = await collapse(page, true, await sample(page));
   const baseline = await collapse(page, false, collapsed);
   const launch = node(page).locator('.ssh-launch-notice');
-  await expect(launch).toContainText('SSH is running');
+  // 050 (D108): nothing needs action, so neither the running strip nor the chrome row renders.
+  await expect(launch).toHaveCount(0);
+  await expect(node(page).locator('.ssh-pane-chrome')).toHaveCount(0);
   const setNotice = (kind: 'prompt' | 'reconnect' | 'plain') => page.evaluate(kind => window.__sshCanvas.notice(kind), kind);
   await setNotice('prompt');
   const prompt = launch.locator('.ssh-prompt');
   await expect(prompt).toBeVisible();
   await screenshot(page, info, 'host-key-prompt');
   await expect(launch).toHaveCSS('z-index', '6');
-  await expect(node(page).locator('.ssh-pane-chrome')).toHaveCSS('z-index', '5');
+  // The launch notice owns this prompt (sessionPrompts=false on the shell), so the shell shows no
+  // second copy. Since 050 the empty chrome row is not rendered, rather than kept reserved under the strip.
+  await expect(node(page).locator('.ssh-pane-chrome')).toHaveCount(0);
   expect(await prompt.evaluate(el => {
     const box = el.getBoundingClientRect();
     return el.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
@@ -520,22 +530,34 @@ test('sshCanvasLayout_stackingAndStripBand', async ({ page }, info) => {
     return { strip: getComputedStyle(strip).height, band: getComputedStyle(wrapper).paddingTop,
       stripOffset: (strip as HTMLElement).offsetTop, terminalOffset: terminal.offsetTop };
   })).toEqual({ strip: '36px', band: '36px', stripOffset: 0, terminalOffset: 36 });
+  // 050 (D108): the strip's row is no longer reserved while idle, so a notice that appears takes
+  // exactly its 36 px band from the terminal slot (one refit, width untouched), and clearing it
+  // gives the identical box and grid back.
+  await expect.poll(async () => (await sample(page)).resizes.length).toBe(baseline.resizes.length + 1);
   await settle(page);
-  unchanged(await sample(page), baseline);
+  const banded = await sample(page);
+  expect(banded.content).toEqual({ w: baseline.content!.w, h: baseline.content!.h - 36 });
+  expect(banded.actual!.cols).toBe(baseline.actual!.cols);
+  expect(banded.actual!.rows).toBeLessThan(baseline.actual!.rows);
+  expect(banded.proposal).toEqual(banded.actual);
+  expect(banded.resizes.slice(baseline.resizes.length)).toEqual([banded.actual]);
   await page.evaluate(id => window.__sshCanvas.overlay(id), SSH);
   await expect(node(page)).toHaveClass(/\boverlaid\b/);
   await expect(prompt).toBeVisible();
   await settle(page);
-  unchanged(await sample(page), baseline);
+  unchanged(await sample(page), banded);
   await setNotice('reconnect');
   await expect(launch.getByRole('button', { name: 'Reconnect' })).toBeVisible();
   await expect(prompt).toHaveCount(0);
   await screenshot(page, info, 'reconnect-overlay');
   await settle(page);
-  unchanged(await sample(page), baseline);
+  unchanged(await sample(page), banded);
   await page.evaluate(() => window.__sshCanvas.overlay(null));
   await setNotice('plain');
-  await expect(launch).toContainText('SSH is running');
+  await expect(launch).toHaveCount(0);
+  await expect(node(page).locator('.ssh-pane-chrome')).toHaveCount(0);
+  await expect.poll(async () => (await sample(page)).resizes.length).toBe(banded.resizes.length + 1);
   await settle(page);
-  unchanged(await sample(page), baseline);
+  const cleared = await sample(page);
+  unchanged(cleared, { ...baseline, resizes: [...banded.resizes, baseline.actual] });
 });

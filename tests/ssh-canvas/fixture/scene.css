@@ -3,7 +3,8 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .fixture-panes { position: absolute; inset: 0; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 16px; padding: 16px; }
 .fixture-panes > .terminal-pane { flex: none; width: 800.53125px; height: 430.40625px; }
 .fixture-panes > [data-source="tm-local"] { width: 610.53125px; height: 390.40625px; }
-/* Local pane border box that yields the expanded SSH FitAddon host box (the SSH pane loses its
-   36 px strip, 36 px P068-7 chrome row, 25 px status row and browser column). */
-.fixture-panes > [data-source="tm-matched"] { width: 540.53125px; height: 332.40625px; }
-.fixture-panes[data-portrait] > [data-source="tm-matched"] { width: 292.125px; height: 617.40625px; }
+/* Local pane border box that yields the expanded SSH FitAddon host box. A connected, idle SSH pane
+   loses only its 25 px status row and browser column: since 050 (D108) the running strip and the
+   empty chrome row are not rendered, so they no longer take 36 + 36 px from the terminal. */
+.fixture-panes > [data-source="tm-matched"] { width: 540.53125px; height: 404.40625px; }
+.fixture-panes[data-portrait] > [data-source="tm-matched"] { width: 292.125px; height: 689.40625px; }
