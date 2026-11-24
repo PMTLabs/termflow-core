@@ -100,7 +100,14 @@ describe('SSH status row liveness', () => {
     const row = renderRow(h, viewState, statusSlot);
     // No samples or pauses are seeded: a connected bar always shows the first-sample label here.
     const ended = state !== 'none' && state !== 'restored' && stage === 'ended' && age === 'current';
-    const expectedLabel = ended ? 'SSH session ended' : state === 'restored' && !stage ? 'Metrics unavailable' : rowLabels[state];
+    const unobserved = state === 'none' || state === 'restored';
+    const preRunning = ['preparing', 'waiting-ready', 'waiting-trust', 'typed'].includes(stage ?? '');
+    const failed = age === 'current' && ['blocked', 'cancelled', 'error'].includes(stage ?? '');
+    const expectedLabel = ended ? 'SSH session ended'
+      : failed && state !== 'error' ? 'Disconnected'
+      : (unobserved && (preRunning || stage === 'running'))
+        || (age === 'current' && preRunning && (state === 'disconnected' || state === 'error')) ? 'Connecting…'
+      : state === 'restored' && !stage ? 'Metrics unavailable' : rowLabels[state];
     const status = row.querySelector('.ssh-metrics-state')?.textContent?.replace(/^○\s*/, '');
     expect(status).toBe(expectedLabel);
     const terminalLive = state === 'connected' && ['preparing', 'waiting-ready', 'waiting-trust', 'typed', 'running'].includes(stage ?? '');
