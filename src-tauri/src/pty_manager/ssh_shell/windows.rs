@@ -162,7 +162,8 @@ pub(crate) fn is_powershell_hook_command(arg: &str) -> bool {
 
 /// Only the exact current hook qualifies a running PowerShell for the short launch.
 pub(crate) fn has_powershell_launcher(argv: &[String]) -> bool {
-    argv.windows(2).any(|pair| pair[0] == "-Command" && is_powershell_hook_command(&pair[1]))
+    argv.windows(2)
+        .any(|pair| pair[0] == "-Command" && is_powershell_hook_command(&pair[1]))
 }
 
 // Quiet launch (see posix ECHO_MAX): reserve six IND rows, then save the cursor where the

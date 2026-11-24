@@ -94,9 +94,13 @@ pub(crate) fn native_powershell_launcher(shell: &str, identity: &ProcessIdentity
     system.process(pid).is_some_and(|process| {
         identity.is_live()
             && Path::new(shell).file_name().is_some_and(|name| {
-                name.to_string_lossy().eq_ignore_ascii_case(&process.name().to_string_lossy())
+                name.to_string_lossy()
+                    .eq_ignore_ascii_case(&process.name().to_string_lossy())
             })
-            && process.cmd().iter().map(|arg| arg.to_str().map(str::to_owned))
+            && process
+                .cmd()
+                .iter()
+                .map(|arg| arg.to_str().map(str::to_owned))
                 .collect::<Option<Vec<_>>>()
                 .is_some_and(|argv| windows::has_powershell_launcher(&argv))
     })

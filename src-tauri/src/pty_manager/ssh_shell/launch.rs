@@ -135,7 +135,9 @@ fn encode(
                 let path = windows::literal_path(&path)?;
                 let quoted = ps_quote(path)?;
                 if powershell_hook {
-                    Ok(format!("& ([scriptblock]$script:__termflowSshLaunch) {quoted}"))
+                    Ok(format!(
+                        "& ([scriptblock]$script:__termflowSshLaunch) {quoted}"
+                    ))
                 } else {
                     Ok(ps_launch(&format!("[IO.File]::ReadAllText({quoted})")))
                 }
@@ -159,8 +161,14 @@ fn encode(
                 } else {
                     ""
                 };
-                let proxy = if posix_proxy { "/usr/bin/env SHELL=/bin/sh " } else { "" };
-                let body = format!("builtin printf '\\033%s\\033[1G\\033[J' 8; {prefix}command {proxy}{literal}\n");
+                let proxy = if posix_proxy {
+                    "/usr/bin/env SHELL=/bin/sh "
+                } else {
+                    ""
+                };
+                let body = format!(
+                    "builtin printf '\\033%s\\033[1G\\033[J' 8; {prefix}command {proxy}{literal}\n"
+                );
                 let (ext, source) = if dialect == Dialect::Fish {
                     ("fish", "builtin source")
                 } else {

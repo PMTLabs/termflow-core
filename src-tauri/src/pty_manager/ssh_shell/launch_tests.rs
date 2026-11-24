@@ -189,7 +189,11 @@ fn exercise_after(
     let width = usize::from(cols);
     let reserve = usize::from(rows - 1).min(1200usize.div_ceil(width) + 1);
     let prompt_rows = prompt_cols.div_ceil(width);
-    let typed_rows = launch_line.trim_end_matches('\r').chars().count().div_ceil(width);
+    let typed_rows = launch_line
+        .trim_end_matches('\r')
+        .chars()
+        .count()
+        .div_ceil(width);
     // Measured at 40x6: pwsh needs 1 prompt + 6 typed rows, and Bash needs
     // 1 prompt + 5 typed rows, with 5 reserved in both cases.
     let skip_prompt_count = matrix && prompt_rows + typed_rows > reserve;
@@ -197,8 +201,14 @@ fn exercise_after(
         eprintln!("{} {cols}x{rows}: skipping prompt count ({prompt_rows} prompt + {typed_rows} typed rows > {reserve} reserved)", ordinary.shell);
     }
     if matrix {
-        for fragment in launch_line.split_whitespace().filter(|s| s.chars().count() >= 6) {
-            assert!(!kept.contains(fragment) && !screen.contains(fragment), "{cols}x{rows}: leaked {fragment:?}\n{kept}\n{screen}");
+        for fragment in launch_line
+            .split_whitespace()
+            .filter(|s| s.chars().count() >= 6)
+        {
+            assert!(
+                !kept.contains(fragment) && !screen.contains(fragment),
+                "{cols}x{rows}: leaked {fragment:?}\n{kept}\n{screen}"
+            );
         }
     }
     assert_launch_echo_erased(&kept);
@@ -322,18 +332,37 @@ fn posix_helper_contains_only_fixed_erase_and_argv_and_is_retired() {
     let argv = vec![exe, "-p".into(), "2222".into(), "alice@example-host".into()];
     let root = f.root();
     let launch = encode_launch(&spec.shell, argv.clone(), &root, owner()).unwrap();
-    let dir = fs::read_dir(root.path()).unwrap().flatten().find(|entry| entry.path().is_dir()).unwrap().path();
+    let dir = fs::read_dir(root.path())
+        .unwrap()
+        .flatten()
+        .find(|entry| entry.path().is_dir())
+        .unwrap()
+        .path();
     let file = dir.join("helper.sh");
-    let prefix = if matches!(paths, Paths::Msys) { "MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 " } else { "" };
-    let quoted = argv.iter().map(|arg| sh_typed_quote(arg)).collect::<Vec<_>>().join(" ");
+    let prefix = if matches!(paths, Paths::Msys) {
+        "MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 "
+    } else {
+        ""
+    };
+    let quoted = argv
+        .iter()
+        .map(|arg| sh_typed_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     let body = format!("builtin printf '\\033%s\\033[1G\\033[J' 8; {prefix}command {quoted}\n");
     assert_eq!(fs::read_to_string(&file).unwrap(), body);
     launch.finish_after_quiescence().unwrap();
     assert!(!file.exists());
 
-    let invalid_owner = ProcessIdentity { pid: 0, start_time: 0 };
+    let invalid_owner = ProcessIdentity {
+        pid: 0,
+        start_time: 0,
+    };
     let fallback = encode_launch(&spec.shell, argv, &root, invalid_owner).unwrap();
-    assert_eq!(std::str::from_utf8(fallback.bytes()).unwrap(), body.replace('\n', "\r"));
+    assert_eq!(
+        std::str::from_utf8(fallback.bytes()).unwrap(),
+        body.replace('\n', "\r")
+    );
     fallback.finish_after_quiescence().unwrap();
 }
 
@@ -343,7 +372,8 @@ fn missing_posix_helper_reports_source_error_and_shell_survives() {
     let f = Fixture::new();
     let mut spec = spec(&f, Dialect::Bash, false);
     let record = f.0.join("argv.json");
-    spec.env.push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
+    spec.env
+        .push(("TF_ARGV_RECORD".into(), record.to_str().unwrap().into()));
     spec.env.push(("LC_ALL".into(), "C".into()));
     let exe = shell_path(&recorder(&f), classify(&spec.shell).unwrap().1).unwrap();
     let launch = encode_launch(&spec.shell, vec![exe], &f.root(), owner()).unwrap();
@@ -358,7 +388,9 @@ fn missing_posix_helper_reports_source_error_and_shell_survives() {
     let screen = final_screen(&prompts.visible, spec.rows, spec.cols);
     assert!(screen.contains("No such file or directory"), "{screen}");
     shell.send("echo 'TF_'\"SURVIVED\"\r");
-    prompts.until(&shell, |p| p.count >= 3 && String::from_utf8_lossy(&p.visible).contains("TF_SURVIVED"));
+    prompts.until(&shell, |p| {
+        p.count >= 3 && String::from_utf8_lossy(&p.visible).contains("TF_SURVIVED")
+    });
     assert!(!record.exists());
     shell.send("exit 0\r");
     shell.wait_success();
@@ -417,15 +449,31 @@ fn every_typed_launch_erases_its_echo_first() {
             else { vec![exe.to_string(), "host".into()] };
         let launch = encode_launch(&shell, argv, &f.root(), owner()).unwrap();
         let typed = String::from_utf8_lossy(launch.bytes()).into_owned();
-        let first = if ps { "& { [Console]::Write([string][char]27 + '8' + [string][char]27 + '[1G' + [string][char]27 + '[J'); $data = " }
-            else if shell.ends_with("fish") || shell.ends_with("fish.exe") { "builtin source " }
-            else { "builtin . " };
+        let first = if ps {
+            "& { [Console]::Write([string][char]27 + '8' + [string][char]27 + '[1G' + [string][char]27 + '[J'); $data = "
+        } else if shell.ends_with("fish") || shell.ends_with("fish.exe") {
+            "builtin source "
+        } else {
+            "builtin . "
+        };
         if !ps {
             let root = f.root();
-            let helper = fs::read_dir(root.path()).unwrap().flatten().find(|entry| entry.path().is_dir()).unwrap().path();
-            let ext = if first == "builtin source " { "fish" } else { "sh" };
+            let helper = fs::read_dir(root.path())
+                .unwrap()
+                .flatten()
+                .find(|entry| entry.path().is_dir())
+                .unwrap()
+                .path();
+            let ext = if first == "builtin source " {
+                "fish"
+            } else {
+                "sh"
+            };
             let body = fs::read_to_string(helper.join(format!("helper.{ext}"))).unwrap();
-            assert!(body.starts_with(r"builtin printf '\033%s\033[1G\033[J' 8; "), "{shell}: {body}");
+            assert!(
+                body.starts_with(r"builtin printf '\033%s\033[1G\033[J' 8; "),
+                "{shell}: {body}"
+            );
         }
         assert!(typed.starts_with(first), "{shell}: {typed}");
         assert!(!typed.contains("preview"), "{shell}: the launch never displays its argv");
@@ -497,29 +545,59 @@ fn launch_echo_is_erased_from_the_bottom_row_of_a_narrow_pane() {
 #[cfg(windows)]
 #[test]
 fn powershell_launcher_is_constant_and_missing_launcher_fails_closed() {
-    use super::super::{launch::encode_launch_with_powershell_hook, windows::has_powershell_launcher};
+    use super::super::{
+        launch::encode_launch_with_powershell_hook, windows::has_powershell_launcher,
+    };
     use super::windows_tests::{installed, ordinary};
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
-    let pwsh = installed("TERMFLOW_TEST_PWSH", PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join(r"PowerShell\7\pwsh.exe"));
+    let pwsh = installed(
+        "TERMFLOW_TEST_PWSH",
+        PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join(r"PowerShell\7\pwsh.exe"),
+    );
     let spec = ordinary(&f, &pwsh, &["-NoLogo", "-NoProfile"]);
     let adapter = f.instrument(&spec);
     assert!(has_powershell_launcher(&adapter.spec.args));
     let hook = adapter.spec.args.last().unwrap();
     let begin = hook.find("; Microsoft.PowerShell.Utility").unwrap();
-    let end = hook.find("; $script:__termflowSshReadySequence = 0;").unwrap();
+    let end = hook
+        .find("; $script:__termflowSshReadySequence = 0;")
+        .unwrap();
     let legacy_hook = format!("{}{}", &hook[..begin], &hook[end..]);
-    assert!(!has_powershell_launcher(&["-Command".into(), legacy_hook.clone()]));
-    let launch = encode_launch_with_powershell_hook(&pwsh, vec![recorder(&f).to_str().unwrap().into()], &f.root(), owner()).unwrap();
+    assert!(!has_powershell_launcher(&[
+        "-Command".into(),
+        legacy_hook.clone()
+    ]));
+    let launch = encode_launch_with_powershell_hook(
+        &pwsh,
+        vec![recorder(&f).to_str().unwrap().into()],
+        &f.root(),
+        owner(),
+    )
+    .unwrap();
     let call = std::str::from_utf8(launch.bytes()).unwrap().trim_end();
-    for (setup, attempt) in [(hook.as_str(), "$script:__termflowSshLaunch = { 'TF_REPLACED' }"), (legacy_hook.as_str(), call)] {
+    for (setup, attempt) in [
+        (
+            hook.as_str(),
+            "$script:__termflowSshLaunch = { 'TF_REPLACED' }",
+        ),
+        (legacy_hook.as_str(), call),
+    ] {
         let record = f.0.join("argv.json");
         let command = format!("{setup}; try {{ $ErrorActionPreference = 'Stop'; {attempt}; 'TF_NO_ERROR' }} catch {{ 'TF_EXPECTED_ERROR' }}; 'TF_SHELL_SURVIVED'");
-        let output = std::process::Command::new(&pwsh).args(["-NoProfile", "-Command", &command])
-            .env("TF_ARGV_RECORD", &record).output().unwrap();
+        let output = std::process::Command::new(&pwsh)
+            .args(["-NoProfile", "-Command", &command])
+            .env("TF_ARGV_RECORD", &record)
+            .output()
+            .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success() && stdout.contains("TF_EXPECTED_ERROR") && stdout.contains("TF_SHELL_SURVIVED"),
-            "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success()
+                && stdout.contains("TF_EXPECTED_ERROR")
+                && stdout.contains("TF_SHELL_SURVIVED"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(!stdout.contains("TF_NO_ERROR") && !record.exists());
     }
     launch.finish_after_quiescence().unwrap();
@@ -546,7 +624,10 @@ fn native_sampler_detects_the_instrumented_powershell_process() {
         let detected = native_powershell_launcher(&spec.shell, &identity);
         shell.send("exit 0\r");
         shell.wait_success();
-        assert_eq!(detected, expected, "native sampler for instrumented={expected}");
+        assert_eq!(
+            detected, expected,
+            "native sampler for instrumented={expected}"
+        );
     }
     adapter.finish_after_shell_quiescence().unwrap();
 }
@@ -558,13 +639,22 @@ fn powershell_launch_selection_requires_the_exact_current_hook() {
     let path = f.0.join("helper.txt");
     let hook = windows::powershell_hook_command(path.to_str().unwrap()).unwrap();
     let begin = hook.find("; Microsoft.PowerShell.Utility").unwrap();
-    let end = hook.find("; $script:__termflowSshReadySequence = 0;").unwrap();
+    let end = hook
+        .find("; $script:__termflowSshReadySequence = 0;")
+        .unwrap();
     let legacy = format!("{}{}", &hook[..begin], &hook[end..]);
-    let exe = if cfg!(windows) { r"C:\Windows\System32\OpenSSH\ssh.exe" } else { "/usr/bin/ssh" };
+    let exe = if cfg!(windows) {
+        r"C:\Windows\System32\OpenSSH\ssh.exe"
+    } else {
+        "/usr/bin/ssh"
+    };
     for (argv, prefix) in [
         (vec!["-NoExit".into()], "& { [Console]"),
         (vec!["-Command".into(), legacy], "& { [Console]"),
-        (vec!["-Command".into(), hook], "& ([scriptblock]$script:__termflowSshLaunch) "),
+        (
+            vec!["-Command".into(), hook],
+            "& ([scriptblock]$script:__termflowSshLaunch) ",
+        ),
     ] {
         let encode = if windows::has_powershell_launcher(&argv) {
             encode_launch_with_powershell_hook
@@ -573,7 +663,10 @@ fn powershell_launch_selection_requires_the_exact_current_hook() {
         };
         let launch = encode("pwsh", vec![exe.into()], &f.root(), owner()).unwrap();
         let typed = std::str::from_utf8(launch.bytes()).unwrap();
-        assert!(typed.starts_with(prefix), "expected {prefix:?}, got {typed:?}");
+        assert!(
+            typed.starts_with(prefix),
+            "expected {prefix:?}, got {typed:?}"
+        );
         launch.finish_after_quiescence().unwrap();
     }
 }
@@ -583,7 +676,17 @@ fn small_pane_launch_matrix() {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let mut failures = Vec::new();
     let mut check = |label: &str, ps: Option<&str>| {
-        for (cols, rows) in [(90, 6), (90, 8), (90, 10), (90, 12), (40, 6), (40, 8), (40, 12), (60, 6), (60, 10)] {
+        for (cols, rows) in [
+            (90, 6),
+            (90, 8),
+            (90, 10),
+            (90, 12),
+            (40, 6),
+            (40, 8),
+            (40, 12),
+            (60, 6),
+            (60, 10),
+        ] {
             if label == "powershell" && (cols, rows) == (40, 6) {
                 // System ConPTY/Windows PowerShell 5.1 drops the interactive launch
                 // here: partial input repaint, clear-screen, then a new prompt with
@@ -599,26 +702,45 @@ fn small_pane_launch_matrix() {
                     let exe = recorder(&f);
                     let (mut spec, exe, fill, following) = if let Some(_ps) = ps {
                         #[cfg(windows)]
-                        { (super::windows_tests::ordinary(&f, _ps, &["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Restricted"]),
-                            exe.to_str().unwrap().to_owned(), "1..30 | ForEach-Object { 'FILL' }\r".to_owned(),
-                            "[Console]::WriteLine('TF_MATRIX_' + 'RETURNED')\r") }
+                        {
+                            (
+                                super::windows_tests::ordinary(
+                                    &f,
+                                    _ps,
+                                    &["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Restricted"],
+                                ),
+                                exe.to_str().unwrap().to_owned(),
+                                "1..30 | ForEach-Object { 'FILL' }\r".to_owned(),
+                                "[Console]::WriteLine('TF_MATRIX_' + 'RETURNED')\r",
+                            )
+                        }
                         #[cfg(not(windows))]
                         unreachable!()
                     } else {
                         let mut spec = spec(&f, Dialect::Bash, false);
                         spec.env.push(("LC_ALL".into(), "C".into()));
                         let paths = classify(&spec.shell).unwrap().1;
-                        (spec, shell_path(&exe, paths).unwrap(), "for i in {1..30}; do echo FILL; done\r".to_owned(),
-                            "echo 'TF_MATRIX_'\"RETURNED\"\r")
+                        (
+                            spec,
+                            shell_path(&exe, paths).unwrap(),
+                            "for i in {1..30}; do echo FILL; done\r".to_owned(),
+                            "echo 'TF_MATRIX_'\"RETURNED\"\r",
+                        )
                     };
                     if ps.is_some() {
                         spec.cwd = std::env::temp_dir().to_str().map(str::to_owned);
                     }
                     (spec.cols, spec.rows) = (cols, rows);
                     let mut argv = vec![exe];
-                    argv.extend(if long { table(true) } else { vec!["-t".into(), "example-host".into()] });
+                    argv.extend(if long {
+                        table(true)
+                    } else {
+                        vec!["-t".into(), "example-host".into()]
+                    });
                     exercise_after(&f, spec, argv, Some(&fill), following, "TF_MATRIX_RETURNED");
-                }).is_err() {
+                })
+                .is_err()
+                {
                     failures.push(format!("{label} {cols}x{rows} long={long}"));
                 }
             }
@@ -627,8 +749,21 @@ fn small_pane_launch_matrix() {
     #[cfg(windows)]
     {
         use super::windows_tests::{installed, system32};
-        check("pwsh", Some(&installed("TERMFLOW_TEST_PWSH", PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join(r"PowerShell\7\pwsh.exe"))));
-        check("powershell", Some(&installed("TERMFLOW_TEST_POWERSHELL", system32().join(r"WindowsPowerShell\v1.0\powershell.exe"))));
+        check(
+            "pwsh",
+            Some(&installed(
+                "TERMFLOW_TEST_PWSH",
+                PathBuf::from(std::env::var_os("ProgramFiles").unwrap())
+                    .join(r"PowerShell\7\pwsh.exe"),
+            )),
+        );
+        check(
+            "powershell",
+            Some(&installed(
+                "TERMFLOW_TEST_POWERSHELL",
+                system32().join(r"WindowsPowerShell\v1.0\powershell.exe"),
+            )),
+        );
     }
     check("bash", None);
     assert!(failures.is_empty(), "failed cases: {failures:?}");
