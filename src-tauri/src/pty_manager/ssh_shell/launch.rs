@@ -1,7 +1,7 @@
 //! Encode one foreground launch for an already instrumented shell. ProxyCommand
 //! has a different interpreter (OpenSSH's login shell); do not use this encoder there.
 
-use super::{adapter_error, classify, fish_quote, sh_quote, shell_path, windows, Dialect, Paths};
+use super::{adapter_error, classify, fish_quote, sh_quote, windows, Dialect, Paths};
 use crate::pty_manager::ssh_helpers::{Helper, HelperKind, HelperRoot, HelperUse, ProcessIdentity};
 use std::{io, path::Path};
 
@@ -135,9 +135,8 @@ fn encode(
                 let path = windows::literal_path(&path)?;
                 let quoted = ps_quote(path)?;
                 if powershell_hook {
-                    Ok(format!(
-                        "& ([scriptblock]$script:__termflowSshLaunch) {quoted}"
-                    ))
+                    let id = entry_id(Path::new(path))?;
+                    Ok(format!("& ([scriptblock]$script:__termflowSshLaunch) '{id}'"))
                 } else {
                     Ok(ps_launch(&format!("[IO.File]::ReadAllText({quoted})")))
                 }
@@ -169,19 +168,17 @@ fn encode(
                 let body = format!(
                     "builtin printf '\\033%s\\033[1G\\033[J' 8; {prefix}command {proxy}{literal}\n"
                 );
-                let (ext, source) = if dialect == Dialect::Fish {
-                    ("fish", "builtin source")
-                } else {
-                    ("sh", "builtin .")
+                let (ext, source) = match dialect {
+                    Dialect::Fish => ("fish", "\\__tfssh"),
+                    Dialect::Bash => ("sh", "\\__tfssh"),
+                    Dialect::Zsh => ("sh", r#"builtin . "${__tfssh:?SSH launcher missing}""#),
                 };
                 // Write once through the same private publisher as the shell hooks:
                 // owner-only 0600 in a sealed 0500 directory (ssh_helpers/unix.rs:176,248).
                 if launch.publish(root, owner, ext, body.as_bytes()).is_ok() {
                     let (_, usage) = launch.payload.as_ref().unwrap();
-                    if let Ok(path) = shell_path(&usage.path(), paths) {
-                        if !path.chars().any(char::is_control) {
-                            return Ok(format!("{source} {}", quote(&path)));
-                        }
+                    if let Ok(id) = entry_id(&usage.path()) {
+                        return Ok(format!("{source} {id}"));
                     }
                     // No bytes have been submitted; the unusable helper is quiescent.
                     if let Some((helper, usage)) = launch.payload.take() {
@@ -238,6 +235,12 @@ pub(super) fn sh_typed_quote(value: &str) -> String {
         output.push_str(&sh_quote(&ascii));
     }
     output
+}
+
+fn entry_id(path: &Path) -> io::Result<uuid::Uuid> {
+    path.parent().and_then(Path::file_name).and_then(|entry| entry.to_str())
+        .and_then(|entry| uuid::Uuid::parse_str(entry).ok().filter(|id| id.to_string() == entry))
+        .ok_or_else(|| adapter_error("invalid SSH launch entry id"))
 }
 
 fn ps_quote(path: &str) -> io::Result<String> {

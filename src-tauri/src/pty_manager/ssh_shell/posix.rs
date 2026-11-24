@@ -86,9 +86,33 @@ pub(crate) fn instrument_posix(
         return Err(adapter_error("SSH readiness does not support a POSIX-mode bash profile"));
     }
     // Validate the root's spelling before publishing anything for this runtime.
-    shell_path(root.path(), paths)?;
+    let launch_root = shell_path(root.path(), paths)?;
     let mut output = PosixAdapter { spec: ordinary.clone(), hooks: Vec::new() };
     let result = (|| -> io::Result<()> {
+        let launcher = match dialect {
+            Dialect::Bash => format!("\nfunction __tfssh {{\n{}\n}} || return 1\nbuiltin readonly -f __tfssh || return 1\n", bourne_id_launcher(&launch_root)),
+            Dialect::Zsh => {
+                // Sourcing alone does not scope locals in zsh. Restore the caller's options too.
+                let body = bourne_id_launcher(&launch_root);
+                let launcher = format!("() {{
+    builtin emulate -L zsh
+    builtin setopt localoptions norematchpcre
+{body}}} \"$@\"
+");
+                let path = output.publish(root, &supervisor, paths, "sh", &launcher)?;
+                format!("\nbuiltin typeset -gr __tfssh={} || return 1\n", sh_quote(&path))
+            }
+            // Fish has no readonly function or variable; users can redefine this function.
+            Dialect::Fish => format!(r#"
+function __tfssh
+    if test (count $argv) -ne 1; or not builtin string match -rq '\A{LAUNCH_ID_REGEX}\z' -- "$argv[1]"
+        builtin printf '%s\n' 'Invalid SSH launch id' >&2
+        return 1
+    end
+    builtin source {}"/$argv[1]/helper.fish"
+end
+"#, fish_quote(&launch_root)),
+        };
         match dialect {
             Dialect::Bash if args.login && cfg!(target_os = "macos") => {
                 // macOS /bin/bash is 3.2, whose --posix startup never reads $ENV, so a
@@ -101,7 +125,7 @@ pub(crate) fn instrument_posix(
                 let home = effective_env("HOME").ok_or_else(|| adapter_error("SSH readiness requires HOME for a bash login shell"))?;
                 // bash derives the default HISTFILE from HOME before any startup file.
                 let history = if effective_env("HISTFILE").is_some() { "" } else { "HISTFILE=$HOME/.bash_history\n" };
-                let hook = format!("builtin export HOME={}\n{history}{}{}", sh_quote(&home),
+                let hook = format!("builtin export HOME={}\n{history}{}{launcher}{}", sh_quote(&home),
                     BASH_LOGIN_RC.split_once('\n').expect("login rc lines").1, BASH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX));
                 let helper = output.publish(root, &supervisor, paths, ".bash_profile", &hook)?;
                 let dir = helper.rsplit_once('/').ok_or_else(|| adapter_error("invalid bash hook directory"))?.0;
@@ -117,7 +141,7 @@ pub(crate) fn instrument_posix(
                 } else {
                     "if [[ -r $HOME/.bashrc ]]; then builtin source \"$HOME/.bashrc\"; fi\n".into()
                 };
-                let hook = source + &BASH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX);
+                let hook = source + &launcher + &BASH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX);
                 let helper = output.publish(root, &supervisor, paths, "sh", &hook)?;
                 if args.login {
                     // bash ignores --rcfile on a native login. Use its interactive ENV
@@ -151,6 +175,7 @@ pub(crate) fn instrument_posix(
                         script.push_str(ZSH_SAVE);
                         script.push_str(&format!("export ZDOTDIR={}\n", sh_quote(&dir)));
                     } else {
+                        script.push_str(&launcher);
                         script.push_str(&ZSH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX));
                     }
                     let helper = output.publish(root, &supervisor, paths, stage, &script)?;
@@ -159,7 +184,7 @@ pub(crate) fn instrument_posix(
                 output.spec.env.push(("ZDOTDIR".into(), next.expect("zsh has startup phases")));
             }
             Dialect::Fish => {
-                let helper = output.publish(root, &supervisor, paths, "fish", &FISH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX))?;
+                let helper = output.publish(root, &supervisor, paths, "fish", &(launcher + &FISH_HOOK.replace("@NONCE@", nonce).replace("@ECHO_MAX@", ECHO_MAX)))?;
                 output.spec.args.extend(["--init-command".into(), format!("source {}", fish_quote(&helper))]);
             }
         }
@@ -170,6 +195,23 @@ pub(crate) fn instrument_posix(
         return Err(error);
     }
     Ok(output)
+}
+
+const LAUNCH_ID_REGEX: &str = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+
+fn bourne_id_launcher(root: &str) -> String {
+    format!(r#"
+    local id_re='^{LAUNCH_ID_REGEX}$' id="$1"
+    local lower="${{id//A/a}}"
+    lower="${{lower//B/b}}"; lower="${{lower//C/c}}"; lower="${{lower//D/d}}"
+    lower="${{lower//E/e}}"; lower="${{lower//F/f}}"
+    # Regex captures (notably Bash BASH_REMATCH) are shell-global.
+    if [[ $# != 1 ]] || ! ( LC_ALL=C; [[ $id =~ $id_re ]] ) || ! builtin test "$id" = "$lower"; then
+        builtin printf '%s\n' 'Invalid SSH launch id' >&2
+        return 1
+    fi
+    builtin . {}"/$1/helper.sh"
+"#, sh_quote(root))
 }
 
 pub(super) fn is_powershell(executable: &str) -> bool {

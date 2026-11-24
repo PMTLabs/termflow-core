@@ -75,7 +75,6 @@ fn native_bare_shell(shell: &str, identity: &ProcessIdentity) -> bool {
     })
 }
 
-#[cfg(windows)]
 pub(crate) fn native_powershell_launcher(shell: &str, identity: &ProcessIdentity) -> bool {
     use crate::pty_manager::ssh_shell::posix::windows;
     if windows::dialect(shell) != Some(true) {
@@ -104,6 +103,26 @@ pub(crate) fn native_powershell_launcher(shell: &str, identity: &ProcessIdentity
                 .collect::<Option<Vec<_>>>()
                 .is_some_and(|argv| windows::has_powershell_launcher(&argv))
     })
+}
+
+pub(crate) fn encode_for_shell(
+    shell: &str,
+    args: Vec<String>,
+    root: &HelperRoot,
+    owner: ProcessIdentity,
+    _hop_count: usize,
+    powershell_hook: bool,
+) -> std::io::Result<EncodedLaunch> {
+    // The fixed POSIX proxy interpreter applies to Bourne/fish launch bodies,
+    // not to PowerShell, whose encoder never uses that prefix.
+    if powershell_hook {
+        return launch::encode_launch_with_powershell_hook(shell, args, root, owner);
+    }
+    #[cfg(unix)]
+    if _hop_count == 2 {
+        return launch::encode_launch_with_posix_proxy(shell, args, root, owner);
+    }
+    launch::encode_launch(shell, args, root, owner)
 }
 
 fn native_ssh() -> Result<String, LaunchError> {
@@ -201,15 +220,10 @@ impl Candidate {
             {
                 args[0] = crate::pty_manager::ssh_shell::posix::native_ssh_outer_path(&self.shell, &args[0])?;
             }
-            #[cfg(unix)]
-            if self.definition.target.hops.len() == 2 {
-                return launch::encode_launch_with_posix_proxy(&self.shell, args, &root, owner);
-            }
-            #[cfg(windows)]
-            if native_powershell_launcher(&self.shell, &self.identity) {
-                return launch::encode_launch_with_powershell_hook(&self.shell, args, &root, owner);
-            }
-            launch::encode_launch(&self.shell, args, &root, owner)
+            encode_for_shell(
+                &self.shell, args, &root, owner, self.definition.target.hops.len(),
+                native_powershell_launcher(&self.shell, &self.identity),
+            )
         })();
         match encoded {
             Ok(encoded) => Ok(Payload {
