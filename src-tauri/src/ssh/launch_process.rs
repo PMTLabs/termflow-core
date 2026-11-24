@@ -48,6 +48,35 @@ pub(super) struct Sample {
 }
 
 impl Command {
+    /// Cheap first half of terminal quiescence: the shell that held the typed
+    /// line is positively gone, so the line itself can no longer run.
+    pub(super) fn shell_gone(&self) -> bool {
+        self.shell.is_some_and(|shell| ProcessIdentity::pid_quiescent(shell.pid.as_u32()))
+    }
+}
+
+/// Second half, for many attempts at once: which of these markers a live
+/// process still carries. Global, because a marker child can outlive its
+/// parent. ONE process-table scan per call, however many markers.
+pub(super) fn live_markers<'a>(markers: impl IntoIterator<Item = &'a str>) -> std::collections::HashSet<String> {
+    let wanted: std::collections::HashSet<&str> = markers.into_iter().collect();
+    if wanted.is_empty() {
+        return Default::default();
+    }
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+    );
+    system.processes().values()
+        .flat_map(|process| process.cmd().iter())
+        .filter_map(|arg| arg.to_str().filter(|arg| wanted.contains(arg)).map(str::to_owned))
+        .collect()
+}
+
+impl Command {
+
     pub(super) fn sample(&self) -> Sample {
         let mut sample = Sample { bare: false, candidate: None };
         let Some(shell) = self.shell.filter(|s| Identity::read(s.pid) == Some(*s)) else { return sample };
@@ -182,6 +211,8 @@ pub(super) struct Tracker {
 pub(super) enum Observation { Wait, Running, Exited }
 
 impl Tracker {
+    pub(super) fn seen(&self) -> bool { self.seen.is_some() }
+
     pub(super) fn running(&self) -> Option<Identity> { self.running }
 
     pub(super) fn sample(&mut self, sample: &Sample, now: Instant, may_start: bool) -> Observation {

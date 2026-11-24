@@ -19,6 +19,7 @@ use tokio::{io::DuplexStream, net::{TcpListener, TcpStream}, sync::{broadcast, m
 const DEADLINE: Duration = Duration::from_secs(15);
 
 mod end_to_end;
+mod reprompt;
 
 struct NativeShell {
     child: Box<dyn Child + Send + Sync>,

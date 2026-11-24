@@ -147,7 +147,7 @@ impl ProcessIdentity {
         Ok(())
     }
 
-    pub(super) fn pid_quiescent(pid: u32) -> bool {
+    pub(crate) fn pid_quiescent(pid: u32) -> bool {
         pid != 0 && platform::process_absent(pid)
     }
 

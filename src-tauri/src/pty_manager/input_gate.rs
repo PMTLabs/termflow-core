@@ -203,6 +203,7 @@ struct HostPrompt {
 }
 pub(crate) struct LaunchBoundary {
     pub returned: bool,
+    pub prompt_epoch: u64,
     pub extra_input: bool,
     pub transport_lost: bool,
 }
@@ -587,6 +588,7 @@ impl crate::state::HostKeys {
         let prompt = state.ssh_prompt.as_ref().filter(|p| p.nonce == nonce)?;
         Some(LaunchBoundary {
             returned: state.prompt_epoch > ready.epoch,
+            prompt_epoch: state.prompt_epoch,
             extra_input: Some(prompt.stdin_writes) != ready.stdin_writes.checked_add(1),
             transport_lost: ready.host.as_ref().is_some_and(|host| {
                 !self.launch_host_epoch_alive(host.channel, host.epoch)

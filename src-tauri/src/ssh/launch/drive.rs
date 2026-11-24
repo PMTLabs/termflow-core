@@ -165,11 +165,12 @@ pub(super) struct Watcher {
     accepted_at: Instant,
     ended_at: Option<Instant>,
     child: Tracker,
+    child_epoch: Option<u64>,
 }
 
 impl Watcher {
     fn new(accepted_at: Instant) -> Self {
-        Self { accepted_at, ended_at: None, child: Tracker::default() }
+        Self { accepted_at, ended_at: None, child: Tracker::default(), child_epoch: None }
     }
 }
 impl Payload {
@@ -177,6 +178,15 @@ impl Payload {
         let _ = self.encoded.retire_payload();
         let _ = self.proxy.retire_payload();
     }
+    pub(super) fn shell_gone(&self) -> bool { self.command.shell_gone() }
+    pub(super) fn marker(&self) -> &str { &self.command.marker }
+
+    /// The ssh marker proves nothing about a ProxyCommand helper, which can
+    /// outlive ssh. Like a proved return: finish the launch, retire the proxy.
+    pub(super) fn finish_quiescent(self) {
+        self.finish_after_return();
+    }
+
     // Positive non-submission: even a proxy helper was never reachable.
     fn finish_unsubmitted(self) {
         let _ = self.encoded.finish_after_quiescence();
@@ -557,7 +567,7 @@ impl<P: LaunchPort> Driver<'_, P> {
             }).unwrap_or_else(|| record(Err(Code::TrustBlocked.into()))),
         };
         if let Some(payload) = retiring { payload.retire(); }
-        if let Some(payload) = payload { payload.retire(); }
+        if let Some(payload) = payload { self.registry.retain_payload(Arc::new(payload)); }
         if let Some((seq, process)) = typed {
             self.emit(seq, process, LaunchState::Typed);
         }
@@ -601,20 +611,30 @@ impl<P: LaunchPort> Driver<'_, P> {
                 retired = entry.payload.take();
                 return false;
             };
-            let returned = boundary.returned && sample.bare;
+            let returned = boundary.returned
+                && watch.child_epoch.is_some_and(|epoch| boundary.prompt_epoch > epoch);
             let stage = entry.snapshot.stage;
+            let observation = if matches!(stage, LaunchStage::Typed | LaunchStage::Running) {
+                let observation = watch.child.sample(&sample, now, !boundary.extra_input);
+                if watch.child.seen() {
+                    watch.child_epoch.get_or_insert(boundary.prompt_epoch);
+                }
+                observation
+            } else {
+                Observation::Wait
+            };
             let transition = match stage {
                 // Typed only: a Running ssh keeps being sampled by PID, so it survives a host hot-swap.
                 LaunchStage::Typed if boundary.transport_lost => {
                     Some((LaunchStage::Ended, LaunchState::Ended, Some(Code::TransportClosed.into())))
                 }
-                LaunchStage::Typed if boundary.returned || now.saturating_duration_since(watch.accepted_at) >= NO_START => {
+                LaunchStage::Typed if returned || (observation != Observation::Running && now.saturating_duration_since(watch.accepted_at) >= NO_START) => {
                     // Works with old hosts and with partial host-side writes:
                     // the queue has no delivery feedback and must not replay.
                     Some((LaunchStage::Ended, LaunchState::Ended, Some(typed_end_error(boundary.returned))))
                 }
-                LaunchStage::Running if boundary.returned => Some((LaunchStage::Ended, LaunchState::Ended, None)),
-                LaunchStage::Typed | LaunchStage::Running => match watch.child.sample(&sample, now, !boundary.extra_input) {
+                LaunchStage::Running if returned => Some((LaunchStage::Ended, LaunchState::Ended, None)),
+                LaunchStage::Typed | LaunchStage::Running => match observation {
                     Observation::Running => Some((LaunchStage::Running, LaunchState::Running, None)),
                     Observation::Exited => Some((LaunchStage::Ended, LaunchState::Ended, None)),
                     Observation::Wait => None,
@@ -634,7 +654,7 @@ impl<P: LaunchPort> Driver<'_, P> {
                 event = Some((entry.snapshot.launch_seq, process, state));
             }
             if let Some(ended_at) = watch.ended_at {
-                if returned {
+                if returned && sample.bare {
                     finished = entry.payload.take();
                     return false;
                 }
@@ -649,19 +669,23 @@ impl<P: LaunchPort> Driver<'_, P> {
         drop(payload);
         if let Some((seq, process, state)) = event { self.emit(seq, process, state); }
         if let Some(payload) = finished {
-            if let Ok(payload) = Arc::try_unwrap(payload) { payload.finish_after_return(); }
+            match Arc::try_unwrap(payload) {
+                Ok(payload) => payload.finish_after_return(),
+                Err(payload) => self.registry.retain_payload(payload),
+            }
         }
-        if let Some(payload) = retired { payload.retire(); }
+        if let Some(payload) = retired { self.registry.retain_payload(payload); }
         if keep.is_none() {
             // Session closed independently of its pane. Drop this exact
-            // observer without removing the pane or retaining its payload.
+            // observer without removing the pane. Its payload moves to the
+            // registry's retained list until the line provably cannot run.
             let retired = {
                 let mut attempts = self.registry.0.lock();
                 attempts.get_mut(self.terminal)
                     .filter(|entry| entry.snapshot.attempt.session_generation == self.generation)
                     .and_then(|entry| { entry.watcher = None; entry.payload.take() })
             };
-            if let Some(payload) = retired { payload.retire(); }
+            if let Some(payload) = retired { self.registry.retain_payload(payload); }
         }
         keep.unwrap_or(false)
     }
@@ -726,8 +750,9 @@ impl<P: LaunchPort> InputFence<LaunchError> for Fence<'_, '_, P> {
     }
 }
 
-// A returned shell after an accepted write means SSH ran and exited,
-// regardless of whether the process sampler observed it.
+// Any prompt after an accepted write means the shell ran something, so SSH
+// may have run and exited before the sampler saw it. With no prompt at all,
+// NO_START is not evidence that ssh exited: the line never ran.
 fn typed_end_error(returned: bool) -> LaunchError {
     if returned {
         Code::SshExitedBeforeConnecting.into()
@@ -741,10 +766,9 @@ fn typed_end_error(returned: bool) -> LaunchError {
 
 #[cfg(test)]
 #[test]
-fn returned_after_accepted_write_does_not_depend_on_sampling() {
-    // Typed is reached only after writer acceptance; no PID sample is required.
+fn no_start_error_depends_on_a_prompt_not_on_sampling() {
     assert_eq!(typed_end_error(true).code, Code::SshExitedBeforeConnecting);
-    // A NO_START timeout with no shell return is not evidence ssh exited.
+    // A NO_START timeout with no shell prompt is not evidence ssh exited.
     assert_eq!(typed_end_error(false).code, Code::WriteFailed);
 }
 
