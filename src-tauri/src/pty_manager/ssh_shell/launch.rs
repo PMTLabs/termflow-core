@@ -1,7 +1,7 @@
 //! Encode one foreground launch for an already instrumented shell. ProxyCommand
 //! has a different interpreter (OpenSSH's login shell); do not use this encoder there.
 
-use super::{adapter_error, classify, fish_quote, sh_quote, windows, Dialect, Paths};
+use super::{adapter_error, classify, fish_quote, sh_quote, shell_path, windows, Dialect, Paths};
 use crate::pty_manager::ssh_helpers::{Helper, HelperKind, HelperRoot, HelperUse, ProcessIdentity};
 use std::{io, path::Path};
 
@@ -75,7 +75,16 @@ pub(crate) fn encode_launch(
     root: &HelperRoot,
     owner: ProcessIdentity,
 ) -> io::Result<EncodedLaunch> {
-    encode(shell, argv, root, owner, false)
+    encode(shell, argv, root, owner, false, false)
+}
+
+pub(crate) fn encode_launch_with_powershell_hook(
+    shell: &str,
+    argv: Vec<String>,
+    root: &HelperRoot,
+    owner: ProcessIdentity,
+) -> io::Result<EncodedLaunch> {
+    encode(shell, argv, root, owner, false, true)
 }
 
 /// Native POSIX OpenSSH selects ProxyCommand's interpreter using SHELL.
@@ -91,7 +100,7 @@ pub(crate) fn encode_launch_with_posix_proxy(
     if !Path::new("/usr/bin/env").is_file() || !Path::new("/bin/sh").is_file() {
         return Err(adapter_error("fixed POSIX proxy interpreter unavailable"));
     }
-    encode(shell, argv, root, owner, true)
+    encode(shell, argv, root, owner, true, false)
 }
 
 fn encode(
@@ -100,6 +109,7 @@ fn encode(
     root: &HelperRoot,
     owner: ProcessIdentity,
     posix_proxy: bool,
+    powershell_hook: bool,
 ) -> io::Result<EncodedLaunch> {
     let exe = argv.first().ok_or_else(|| adapter_error("missing SSH executable"))?;
     if argv.iter().any(|arg| arg.chars().any(char::is_control)) {
@@ -123,8 +133,12 @@ fn encode(
                 launch.publish(root, owner, "json", &data)?;
                 let path = launch.payload.as_ref().unwrap().1.path();
                 let path = windows::literal_path(&path)?;
-                let source = format!("[IO.File]::ReadAllText({})", ps_quote(path)?);
-                Ok(ps_launch(&source))
+                let quoted = ps_quote(path)?;
+                if powershell_hook {
+                    Ok(format!("& ([scriptblock]$script:__termflowSshLaunch) {quoted}"))
+                } else {
+                    Ok(ps_launch(&format!("[IO.File]::ReadAllText({quoted})")))
+                }
             }
             (Some(false), _) => {
                 windows::literal_path(root.path())?;
@@ -146,8 +160,28 @@ fn encode(
                     ""
                 };
                 let proxy = if posix_proxy { "/usr/bin/env SHELL=/bin/sh " } else { "" };
-                // First erase this line's own echo back to the ready hook's saved cursor.
-                Ok(format!("builtin printf '\\033%s\\033[1G\\033[J' 8; {prefix}command {proxy}{literal}"))
+                let body = format!("builtin printf '\\033%s\\033[1G\\033[J' 8; {prefix}command {proxy}{literal}\n");
+                let (ext, source) = if dialect == Dialect::Fish {
+                    ("fish", "builtin source")
+                } else {
+                    ("sh", "builtin .")
+                };
+                // Write once through the same private publisher as the shell hooks:
+                // owner-only 0600 in a sealed 0500 directory (ssh_helpers/unix.rs:176,248).
+                if launch.publish(root, owner, ext, body.as_bytes()).is_ok() {
+                    let (_, usage) = launch.payload.as_ref().unwrap();
+                    if let Ok(path) = shell_path(&usage.path(), paths) {
+                        if !path.chars().any(char::is_control) {
+                            return Ok(format!("{source} {}", quote(&path)));
+                        }
+                    }
+                    // No bytes have been submitted; the unusable helper is quiescent.
+                    if let Some((helper, usage)) = launch.payload.take() {
+                        let _ = helper.cancel_attempt();
+                        let _ = usage.finish();
+                    }
+                }
+                Ok(body.trim_end_matches('\n').to_owned())
             }
             _ => unreachable!("classified shell"),
         }
@@ -216,7 +250,11 @@ fn ps_quote(path: &str) -> io::Result<String> {
 // on, before PROMPT (and so the save) renders; that row stays too. Erasing above the save
 // is not done because it would delete real output whenever that row is not blank.
 fn ps_launch(json_source: &str) -> String {
-    format!("& {{ [Console]::Write([string][char]27 + '8' + [string][char]27 + '[1G' + [string][char]27 + '[J'); \
+    format!("& {{ {} }}", ps_launch_body(json_source))
+}
+
+pub(super) fn ps_launch_body(json_source: &str) -> String {
+    format!("[Console]::Write([string][char]27 + '8' + [string][char]27 + '[1G' + [string][char]27 + '[J'); \
         $data = ({json_source}) | ConvertFrom-Json; \
         $si = [System.Diagnostics.ProcessStartInfo]::new(); \
         $si.FileName = $data.exe; $si.UseShellExecute = $false; \
@@ -226,7 +264,7 @@ fn ps_launch(json_source: &str) -> String {
         }} else {{ $si.Arguments = $data.crt }}; \
         $child = [System.Diagnostics.Process]::Start($si); \
         try {{ $child.WaitForExit(); $global:LASTEXITCODE = $child.ExitCode }} \
-        finally {{ $child.Dispose() }} }}")
+        finally {{ $child.Dispose() }}")
 }
 
 fn ps_payload(argv: &[String]) -> io::Result<Vec<u8>> {

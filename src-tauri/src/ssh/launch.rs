@@ -1,6 +1,8 @@
 //! Desktop launch registration and one-shot PTY launch. The 067 registry
 //! remains authoritative for verification, prompts and session ownership.
 mod drive;
+#[cfg(all(test, windows))]
+pub(crate) use drive::native_powershell_launcher;
 use super::session::{Gate, KnownHostsPaths, SessionRegistry, SessionState, SessionView};
 use crate::{
     pty_manager::input_gate::{LaunchTicket, Refusal},

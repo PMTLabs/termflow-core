@@ -11,7 +11,7 @@ pub(super) fn instrument(
     Some(prepare(ordinary, nonce, root, owner, dialect(&ordinary.shell)?))
 }
 
-pub(super) fn dialect(executable: &str) -> Option<bool> {
+pub(crate) fn dialect(executable: &str) -> Option<bool> {
     let base = executable.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
     Some(match base.as_str() {
         "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe" => true,
@@ -134,7 +134,8 @@ const PS_HOOK_SUFFIX: &str = "; $script:__termflowSshReadySequence++; $__tfRows 
 
 fn powershell_hook_tail() -> String {
     let wrapper = PS_CWD_INTEGRATION.strip_suffix(" }").expect("PowerShell prompt wrapper");
-    format!("'); $script:__termflowSshReadySequence = 0; {wrapper}{PS_HOOK_SUFFIX}")
+    let launcher = super::launch::ps_launch_body("[IO.File]::ReadAllText($path)");
+    format!("'); Microsoft.PowerShell.Utility\\Set-Variable -Name __termflowSshLaunch -Scope Script -Option Constant -ErrorAction Stop -Value {{ param([string]$path) {launcher} }}; $script:__termflowSshReadySequence = 0; {wrapper}{PS_HOOK_SUFFIX}")
 }
 
 pub(crate) fn powershell_hook_command(path: &str) -> io::Result<String> {
@@ -157,6 +158,11 @@ pub(crate) fn is_powershell_hook_command(arg: &str) -> bool {
         && path_ref.file_name().is_some_and(|name| name == "helper.txt")
         && literal_path(path_ref).is_ok_and(|literal| literal == path.as_str())
         && powershell_hook_command(&path).is_ok_and(|generated| generated == arg)
+}
+
+/// Only the exact current hook qualifies a running PowerShell for the short launch.
+pub(crate) fn has_powershell_launcher(argv: &[String]) -> bool {
+    argv.windows(2).any(|pair| pair[0] == "-Command" && is_powershell_hook_command(&pair[1]))
 }
 
 // Quiet launch (see posix ECHO_MAX): reserve six IND rows, then save the cursor where the
