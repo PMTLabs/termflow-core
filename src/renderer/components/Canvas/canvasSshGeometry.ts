@@ -3,7 +3,7 @@
  *
  * An SSH leaf has a terminal MEASURING box — the `.terminal-display` FitAddon reads, which stays
  * the meaning of `HostBox` — inside a larger content ENVELOPE: browser column + terminal slot +
- * bottom status row, plus the shell's own chrome row above the body (P068-7: always rendered, in
+ * bottom status row, plus the shell's own chrome row above the body (when visible, in
  * flow) and the launch strip's row reserved at the top of the terminal slot (066's
  * strip sits above the shell in a pane, inside the slot here), no pane or node title. Canvas sizes the outer surface to the envelope and
  * gives the registered host the remainder, so the terminal keeps the exact box it had in its pane
@@ -13,7 +13,7 @@
  *   envelope.h = terminal.h + stripH + chromeH + statusH
  *
  * The envelope is frozen for the Canvas mount. An explicit browser collapse/expand keeps it and
- * moves the difference into that one terminal's slot width; nothing else may change the slot.
+ * moves the difference into that one terminal's slot width; notice rows may also change the live slot height.
  */
 
 import { SSH_METRICS_BAR_HEIGHT_PX } from '../Ssh/sshPaneLayout';
@@ -37,7 +37,7 @@ export interface SshSurfaceBox {
   statusH: number;
   /** 066's launch strip row, reserved at the top of the terminal slot (`Canvas.css`). */
   stripH: number;
-  /** The shell's chrome row (`SshPaneShell` `SSH_PANE_CHROME_H`), always rendered in flow. */
+  /** The shell's chrome row (`SshPaneShell` `SSH_PANE_CHROME_H`), in flow when visible. */
   chromeH: number;
   columnGap: number;
   /** `measured` from the rendered pane, or an honest `fallback` for a never-rendered leaf. */
@@ -86,8 +86,11 @@ export function sshTerminalBox(box: SshSurfaceBox, collapsed: boolean): Box {
 /** Builds the descriptor from a measured source: terminal border box plus the rendered allocations. */
 export function sshSurfaceBoxFrom(m: {
   terminal: Box; browserW: number; collapsed: boolean; statusH: number; columnGap: number; preferredBrowserWidth?: number;
+  hasStrip?: boolean; hasChrome?: boolean;
 }): SshSurfaceBox {
-  const envelope = { w: m.terminal.w + m.browserW + m.columnGap, h: m.terminal.h + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H + m.statusH };
+  const stripH = m.hasStrip ? SSH_CSS_LAUNCH_STRIP_H : 0;
+  const chromeH = m.hasChrome ? SSH_CSS_CHROME_H : 0;
+  const envelope = { w: m.terminal.w + m.browserW + m.columnGap, h: m.terminal.h + stripH + chromeH + m.statusH };
   return {
     envelope,
     initialTerminal: { ...m.terminal },
@@ -95,8 +98,8 @@ export function sshSurfaceBoxFrom(m: {
     ...(m.preferredBrowserWidth !== undefined ? { preferredBrowserWidth: m.preferredBrowserWidth } : {}),
     collapsedBrowserW: m.collapsed ? m.browserW : cappedBrowserW(SSH_CSS_RAIL_W, envelope.w),
     statusH: m.statusH,
-    stripH: SSH_CSS_LAUNCH_STRIP_H,
-    chromeH: SSH_CSS_CHROME_H,
+    stripH,
+    chromeH,
     columnGap: m.columnGap,
     source: 'measured',
   };

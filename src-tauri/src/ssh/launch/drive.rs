@@ -84,6 +84,56 @@ fn native_bare_shell(bound: &BoundSshShell) -> bool {
     }
 }
 
+pub(crate) fn native_powershell_launcher(shell: &str, identity: &ProcessIdentity) -> bool {
+    use crate::pty_manager::ssh_shell::posix::windows;
+    if windows::dialect(shell) != Some(true) {
+        return false;
+    }
+    let mut system = sysinfo::System::new();
+    let pid = sysinfo::Pid::from_u32(identity.pid);
+    // The default process refresh does not populate argv in sysinfo 0.33.
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cmd(sysinfo::UpdateKind::Always)
+            .with_exe(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
+    system.process(pid).is_some_and(|process| {
+        identity.is_live()
+            && Path::new(shell).file_name().is_some_and(|name| {
+                name.to_string_lossy()
+                    .eq_ignore_ascii_case(&process.name().to_string_lossy())
+            })
+            && process
+                .cmd()
+                .iter()
+                .map(|arg| arg.to_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .is_some_and(|argv| windows::has_powershell_launcher(&argv))
+    })
+}
+
+pub(crate) fn encode_for_shell(
+    shell: &str,
+    args: Vec<String>,
+    root: &HelperRoot,
+    owner: ProcessIdentity,
+    _hop_count: usize,
+    powershell_hook: bool,
+) -> std::io::Result<EncodedLaunch> {
+    // The fixed POSIX proxy interpreter applies to Bourne/fish launch bodies,
+    // not to PowerShell, whose encoder never uses that prefix.
+    if powershell_hook {
+        return launch::encode_launch_with_powershell_hook(shell, args, root, owner);
+    }
+    #[cfg(unix)]
+    if _hop_count == 2 {
+        return launch::encode_launch_with_posix_proxy(shell, args, root, owner);
+    }
+    launch::encode_launch(shell, args, root, owner)
+}
+
 fn native_ssh() -> Result<String, LaunchError> {
     #[cfg(windows)]
     return crate::pty_manager::ssh_shell::native_ssh_client().map_err(native_ssh_error);
@@ -178,11 +228,15 @@ impl Candidate {
             {
                 args[0] = crate::pty_manager::ssh_shell::posix::native_ssh_outer_path(&self.shell, &args[0])?;
             }
-            #[cfg(unix)]
-            if self.definition.target.hops.len() == 2 {
-                return launch::encode_launch_with_posix_proxy(&self.shell, args, &root, owner);
-            }
-            launch::encode_launch(&self.shell, args, &root, owner)
+            encode_for_shell(
+                &self.shell,
+                args,
+                &root,
+                owner,
+                self.definition.target.hops.len(),
+                self.bound.effective_identity()
+                    .is_some_and(|(identity, _)| native_powershell_launcher(&self.shell, &identity)),
+            )
         })();
         match encoded {
             Ok(encoded) => Ok(Payload {

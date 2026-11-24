@@ -62,6 +62,7 @@ function createBridge() {
     onFsEditState: jest.fn(async (cb: (event: EditNotice) => void) => { editListener = cb; return () => { editListener = undefined; }; }),
     emitEdit(event: EditNotice) { editListener?.(event); },
     fsEditList: jest.fn(async () => []),
+    fsEditStop: jest.fn(async (_target: unknown) => ({ retained: true, localPath: 'C:/tmp/file-1' })),
     onFsCwd: jest.fn(async (cb: (event: CwdEvent) => void) => { cwd = cb; return () => { cwd = undefined; }; }),
     emit(path: string, sessionGeneration = 1) { cwd?.({ terminalId, path, sessionGeneration, host: 'remote' }); },
   };
@@ -111,7 +112,7 @@ afterEach(() => {
 
 const shell = (session: SshSessionView, reconnect = jest.fn(async () => {})) => root.render(<Provider store={store}>
   <SshBrowserPaneShell view={session} terminalId={terminalId} sshTag={tag} surfaceActive onPatchTag={patch}
-    terminal={<div className="terminal-pane-content"><div className="terminal-display" /></div>}
+    terminal={<div className="terminal-pane-content"><div className="terminal-display"><textarea aria-label="Terminal input" /></div></div>}
     status={<span>Host metrics</span>} onSecret={async () => {}} onTrust={async () => {}} onCancel={() => {}}
     onReconnect={reconnect} />
 </Provider>);
@@ -146,51 +147,83 @@ test('SSH notice strip CSS reserves one fixed in-flow row', () => {
   expect(row).toMatch(/box-sizing:\s*border-box/);
   expect(row).toMatch(/flex:\s*none/);
   expect(row).toContain(`height:${SSH_PANE_CHROME_H}px;`);
-  expect(css).not.toMatch(/\.ssh-pane-chrome:empty/);
 });
 
-test('three SSH edits cannot cover toolbar; zero to three to zero preserves the host layout', async () => {
+const watchItem = () => container.querySelector<HTMLButtonElement>('.ssh-status .ssh-watch-item > button');
+const chromeRow = () => container.querySelector('.ssh-pane-chrome');
+const editNotice = (n: number, state: EditNotice['state'] = 'watching'): EditNotice => ({
+  terminalId, editId: `edit-${n}`, path: `/home/file-${n}`, state, sessionGeneration: 1,
+});
+
+test('one watched file uses a status item with a basename and full path tooltip, not chrome', async () => {
   await act(async () => shell(view('connected')));
-  const chrome = container.querySelector('.ssh-pane-chrome')!;
-  const host = container.querySelector('.ssh-terminal-host')!;
-  const layout = (el: Element) => [el.className, el.getAttribute('style')];
-  const baseline = [layout(chrome), layout(host)];
-  const edits = [1, 2, 3].map(n => ({
-    terminalId, editId: `edit-${n}`, path: `/home/file-${n}`, state: 'watching' as const, sessionGeneration: 1,
-  }));
-  const expectStable = () => {
-    expect(container.querySelector('.ssh-pane-chrome')).toBe(chrome);
-    expect(container.querySelector('.ssh-terminal-host')).toBe(host);
-    expect([layout(chrome), layout(host)]).toEqual(baseline);
-  };
+  expect(chromeRow()).toBeNull();
+  act(() => api.emitEdit(editNotice(1)));
+  expect(watchItem()?.textContent).toContain('file-1 · watching');
+  expect(watchItem()?.title).toBe('/home/file-1 — watching');
+  expect(watchItem()?.getAttribute('aria-label')).toBe('1 remote file: file-1 (watching)');
+  expect(chromeRow()).toBeNull();
+});
+
+test('three routine edits share one status item without covering toolbar or replacing terminal', async () => {
+  await act(async () => shell(view('connected')));
+  const terminal = container.querySelector('.ssh-terminal-host');
+  const edits = [editNotice(1), editNotice(2, 'uploading'), editNotice(3, 'paused')];
   act(() => edits.forEach(edit => api.emitEdit(edit)));
-  expectStable();
-  const body = chrome.nextElementSibling!;
-  expect(body.className).toBe('ssh-pane-body');
+  expect(watchItem()?.textContent).toContain('3 files');
+  expect(watchItem()?.title).toBe(['/home/file-1 — watching', '/home/file-2 — uploading', '/home/file-3 — paused'].join('\n'));
+  expect(chromeRow()).toBeNull();
+  const body = container.querySelector('.ssh-pane-body')!;
   for (const control of [button('Refresh'), pathBox(), [...container.querySelectorAll('label')].find(label => label.textContent?.includes('Follow cd'))?.control]) {
     expect(control).toBeTruthy();
     expect(body.contains(control!)).toBe(true);
   }
-  expect(container.querySelector('.ssh-pane-popover')).toBeNull();
-  expect(chrome.textContent).toContain('/home/file-3 — watching');
-  expect(chrome.textContent).toContain('+2 more');
-  act(() => button('+2 more').click());
-  expect(container.querySelectorAll('.ssh-pane-popover li')).toHaveLength(3);
-  expectStable();
-  act(() => button('Close SSH notices').click());
   act(() => edits.forEach(edit => api.emitEdit({ ...edit, state: 'stopped' })));
-  expectStable();
-  expect(chrome.textContent).toBe('');
+  expect(watchItem()).toBeNull();
+  expect(container.querySelector('.ssh-terminal-host')).toBe(terminal);
 });
 
-test('SSH notice popover opens explicitly and restores focus on Escape and outside click', async () => {
+test('a watched edit moving to conflict leaves the status item and raises chrome', async () => {
   await act(async () => shell(view('connected')));
-  act(() => api.emitEdit({ terminalId, editId: 'edit-1', path: '/home/file', state: 'watching', sessionGeneration: 1 }));
-  const dialog = () => container.querySelector<HTMLElement>('[role="dialog"][aria-label="SSH notices"]');
-  const invoker = button('Details');
+  act(() => api.emitEdit(editNotice(1)));
+  expect(watchItem()).not.toBeNull();
+  act(() => api.emitEdit(editNotice(1, 'conflict')));
+  expect(chromeRow()?.textContent).toContain('/home/file-1 — conflict');
+  expect(watchItem()).toBeNull();
+});
+
+test('an open watch item whose last routine edit turns into a conflict closes, never showing 0 files, and keeps focus off body', async () => {
+  await act(async () => shell(view('connected')));
+  act(() => api.emitEdit(editNotice(1)));
+  act(() => watchItem()!.click());
+  const dialog = container.querySelector<HTMLElement>('[role="dialog"][aria-label="Remote file edits"]')!;
+  expect(document.activeElement && dialog.contains(document.activeElement)).toBe(true);
+  act(() => api.emitEdit(editNotice(1, 'conflict')));
+  expect(watchItem()).toBeNull();
+  expect(container.querySelector('.ssh-watch-item')).toBeNull();
+  expect(container.textContent).not.toContain('0 files');
+  expect(container.querySelector('[role="dialog"][aria-label="Remote file edits"]')).toBeNull();
+  expect(document.activeElement).toBe(container.querySelector('.ssh-terminal-host textarea'));
+  expect(chromeRow()?.textContent).toContain('/home/file-1 — conflict');
+});
+
+test('a stopped edit that the backend retains stays in the status item tooltip as paused (retained)', async () => {
+  await act(async () => shell(view('connected')));
+  act(() => api.emitEdit(editNotice(1)));
+  act(() => watchItem()!.click());
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Stop editing /home/file-1"]')!.click());
+  expect(api.fsEditStop).toHaveBeenCalledTimes(1);
+  expect(watchItem()?.title).toBe('/home/file-1 — paused (retained)');
+});
+
+test('watch item opens the existing Stop action and restores focus on Escape and outside click', async () => {
+  await act(async () => shell(view('connected')));
+  act(() => api.emitEdit(editNotice(1)));
+  const dialog = () => container.querySelector<HTMLElement>('[role="dialog"][aria-label="Remote file edits"]');
+  const invoker = watchItem()!;
   expect(dialog()).toBeNull();
   act(() => invoker.click());
-  expect(dialog()?.textContent).toContain('/home/file');
+  expect(dialog()?.querySelector('[aria-label="Stop editing /home/file-1"]')).not.toBeNull();
   act(() => dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
   expect(dialog()).toBeNull();
   expect(document.activeElement).toBe(invoker);

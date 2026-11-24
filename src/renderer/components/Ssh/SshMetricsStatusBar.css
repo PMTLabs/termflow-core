@@ -13,11 +13,21 @@
   padding: 0 2px;
   border-top: 1px solid var(--border-color);
   background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 11px;
+  color: var(--text-primary);
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
 }
+
+/* The light theme overrides tab colors, but leaves the shared layout palette dark. */
+.light-theme .ssh-metrics-status-bar {
+  background: var(--tab-bar-background);
+  color: var(--tab-foreground);
+}
+
+.light-theme .ssh-metrics-value { color: var(--tab-active-foreground); }
+.light-theme .ssh-metrics-value > svg { color: var(--tab-foreground); }
+.light-theme .ssh-metrics-status-bar > button { color: var(--tab-active-foreground); background: var(--tab-active-background); }
 
 .ssh-metrics-status-bar:focus-visible {
   outline: 1px solid var(--focus-border, var(--text-primary));
@@ -48,11 +58,17 @@
 .ssh-metrics-value[data-metric='netDown'] { flex: none; }
 .ssh-metrics-value[data-metric='host'] { max-width: 30%; }
 
+.ssh-metrics-value {
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+}
+
 /* D101: each value leads with its metric glyph; the full label stays in title and aria-label. */
 .ssh-metrics-value > svg {
   margin-right: 4px;
   vertical-align: -2px;
-  opacity: 0.85;
+  color: var(--text-secondary);
 }
 
 .ssh-metrics-state,

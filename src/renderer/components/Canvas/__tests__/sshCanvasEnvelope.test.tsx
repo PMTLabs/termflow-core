@@ -22,7 +22,7 @@ import { Provider } from 'react-redux';
 import { store } from '../../../store';
 import { NodeTerminal } from '../NodeTerminal';
 import { measureHostBox, measureSshSurfaceBox, clearHostBoxes, _sshBoxCount, _hostBoxCount } from '../canvasHostBoxes';
-import { SSH_CSS_CHROME_H, SSH_CSS_LAUNCH_STRIP_H, sshBrowserAllocation, sshTerminalBox, sshFallbackSurfaceBox } from '../canvasSshGeometry';
+import { sshBrowserAllocation, sshTerminalBox, sshFallbackSurfaceBox } from '../canvasSshGeometry';
 import { SshCanvasPresentation } from '../../Ssh/SshTerminalComposition';
 import { __getSurfaceHostForTest, __resetSurfaceHostsForTest } from '../../../services/surfaceHosts';
 import { __resetSshPresentationsForTest } from '../../Ssh/sshPresentations';
@@ -74,7 +74,7 @@ describe('SSH envelope capture and entry', () => {
     expect(hostBox).toEqual(TERMINAL);
     expect(box.source).toBe('measured');
     expect(box.initialTerminal).toEqual(TERMINAL);
-    expect(box.envelope).toEqual({ w: TERMINAL.w + BROWSER_W, h: TERMINAL.h + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H + STATUS_H });
+    expect(box.envelope).toEqual({ w: TERMINAL.w + BROWSER_W, h: TERMINAL.h + STATUS_H });
     expect(box.envelope).not.toEqual(hostBox);          // the two boxes are distinct
     expect(sshTerminalBox(box, false)).toEqual(TERMINAL); // the slot is exactly the source box
 
@@ -125,7 +125,7 @@ describe('SSH envelope capture and entry', () => {
     // Positive first: a valid fractional source is captured and cached.
     const first = measureSshSurfaceBox(id, TERMINAL, false);
     expect(first.source).toBe('measured');
-    expect(first.envelope).toEqual({ w: 1261.53125, h: TERMINAL.h + STATUS_H + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H });
+    expect(first.envelope).toEqual({ w: 1261.53125, h: TERMINAL.h + STATUS_H });
     expect(_sshBoxCount()).toBe(1);
 
     // After relocation the parent is our own replica; a zero source is no better. Neither

@@ -132,15 +132,15 @@ const LEDGER_SSH_CSS_DEFINED: readonly string[] = [
 ];
 /** Every custom property read with var() from an SSH-owned file. */
 const LEDGER_SSH_CSS_READ: readonly string[] = [
-  '--accent-color', '--bg-hover', '--bg-primary', '--bg-secondary', '--border-color', '--error-color', '--focus-border',
+  '--accent-color', '--bg-hover', '--bg-primary', '--bg-secondary', '--border-color', '--error-color', '--focus-border', '--font-mono', '--tab-bar-background',
   '--ssh-amber', '--ssh-green', '--ssh-grey', '--ssh-orange', '--ssh-sky', '--ssh-violet',
-  '--tab-active-foreground', '--tab-foreground', '--text-primary', '--text-secondary',
+  '--tab-active-background', '--tab-active-foreground', '--tab-foreground', '--text-primary', '--text-secondary',
 ];
 /**
  * Theme fallbacks: read with an inline fallback value and defined nowhere in src/renderer. Allowed
  * only if every SSH read carries the fallback, so the property can never resolve to nothing.
  */
-const THEME_FALLBACKS: readonly string[] = ['--error-color', '--focus-border'];
+const THEME_FALLBACKS: readonly string[] = ['--error-color', '--focus-border', '--font-mono'];
 /** Existing Canvas properties the SSH node layout must keep (plan 070 section 4.3, last two rows). */
 const CANVAS_AUDITED: readonly string[] = [
   '--canvas-raster-r', '--canvas-raster-inv', '--node-host-w', '--node-host-h', '--node-surface-scale', '--node-surface-shift',
