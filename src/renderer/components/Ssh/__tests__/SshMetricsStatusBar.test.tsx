@@ -396,7 +396,7 @@ test('D101: every value leads with its own aria-hidden glyph and no text label; 
     expect(v.children).toHaveLength(1);
     const label = SSH_METRIC_LABELS[v.dataset.metric as typeof SSH_METRIC_KEYS[number]];
     expect(v.title.startsWith(`${label}: `)).toBe(true);
-    expect(v.getAttribute('aria-label')).toBe(v.title);
+    expect(v.getAttribute('aria-label')).toMatch(new RegExp(`^${label}: [^\r\n]+$`));
     expect(v.textContent!.startsWith(label)).toBe(false);
   }
   // One distinct glyph per metric, so no two values read the same at a glance.
@@ -463,3 +463,26 @@ test.each(['Metrics collector unavailable', 'Metrics command failed', 'Metrics e
     expect(bar().textContent).toContain('14%');
     expect(bar().textContent).toContain('mac-host.local');
  });
+
+
+test('metrics titles put one structured fact on each line', () => {
+  const h = setup();
+  h.dispatch(setSshHiddenMetrics({ terminalId: B, hiddenMetrics: [] }));
+  const reading = sample(48);
+  reading.metrics.users = { available: true, count: 2, names: ['bob', 'alice'] };
+  reading.metrics.partitions = { available: true, mounts: ['/', '/home'].map(mountPoint => ({
+    mountPoint, source: '/dev/sda', fsType: 'ext4', usedPercent: 24,
+    totalBytes: 1006.9 * 1024 ** 3, usedBytes: 0, availableBytes: 0,
+  })) };
+  reading.metrics.nfs = { available: true, mounts: ['data', 'archive'].map(name => ({
+    mountPoint: `/mnt/${name}`, source: `nas:/${name}`, fsType: 'nfs', usedPercent: 25,
+    totalBytes: 8 * 1024 ** 3, usedBytes: 2 * 1024 ** 3, availableBytes: 6 * 1024 ** 3,
+  })) };
+  h.publish(reading); h.render();
+  const title = (key: string) => bar().querySelector<HTMLElement>(`[data-metric="${key}"]`)?.title;
+  expect(title('host')).toBe('Host: db-beta\nLinux\nn/a (arch failed)');
+  expect(title('partitions')).toBe('Partitions: / 24% of 1006.9 G\n/home 24% of 1006.9 G');
+  expect(title('users')).toBe('Connected users: 2\nalice\nbob');
+  expect(title('cpu')).toBe('CPU: 48%\n8 cores\nload n/a (load failed)');
+  expect(title('nfs')).toBe('NFS partitions: nas:/data /mnt/data 25% of 8 G\nnas:/archive /mnt/archive 25% of 8 G');
+});

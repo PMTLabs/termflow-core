@@ -180,6 +180,9 @@ export function measureSshSurfaceBox(terminalId: string, fallbackTerminal: HostB
     preferredBrowserWidth,
     collapsed: browser.classList.contains('collapsed'),
     statusH: st.height,
+    hasStrip: !!(host.parentElement?.querySelector(':scope > .ssh-launch-notice > .ssh-launch-strip')
+      || shell.closest('.terminal-pane')?.querySelector(':scope > .ssh-launch-notice > .ssh-launch-strip')),
+    hasChrome: !!shell.querySelector(':scope > .ssh-pane-chrome'),
     columnGap: Number.isFinite(gap) ? gap : 0,
   });
   sshBoxes.set(terminalId, box);

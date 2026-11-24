@@ -156,14 +156,12 @@ test('opening the details popover keeps focus on the prompt field it contains', 
   expect(document.activeElement).not.toBe(popover);
 });
 
-test('non-interactive SSH presentation keeps the reserved row empty', () => {
+test('non-interactive SSH presentation does not render a chrome row', () => {
   const props = { terminal: <div />, browserWidth: 220, browserCollapsed: false,
     onBrowserCollapsedChange: jest.fn(), onSecret: jest.fn(async () => {}),
     onTrust: jest.fn(async () => {}), onCancel: jest.fn() };
   act(() => root.render(<SshPaneShell {...props} view={view('needs-secret')} interactive={false} />));
-  const row = container.querySelector('.ssh-pane-chrome')!;
-  expect(row.outerHTML).toBe('<div class="ssh-pane-chrome"></div>');
-  expect(row.nextElementSibling?.className).toBe('ssh-pane-body');
+  expect(container.querySelector('.ssh-pane-chrome')).toBeNull();
 });
 
 test('two-hop prompts retain pending focus, chain, and restore only inside their scope', async () => {
@@ -319,10 +317,7 @@ test('SshPaneShell inactiveSurface_closesChromePopover_withoutTakingFocusOrEscap
     act(() => { outside.dispatchEvent(escape); });
     expect(escape.defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(outside);
-    // The row keeps its fixed height on the non-owning presentation: no notice, no Canvas markers.
-    const row = container.querySelector('.ssh-pane-chrome')!;
-    expect(row.hasAttribute('data-canvas-passthrough')).toBe(false);
-    expect(row.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
+    expect(container.querySelector('.ssh-pane-chrome')).toBeNull();
     // The status row (069's focusable bar, D66) follows the same rule (review 349 F6).
     expect(container.querySelector('.ssh-status')!.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
   } finally { outside.remove(); }

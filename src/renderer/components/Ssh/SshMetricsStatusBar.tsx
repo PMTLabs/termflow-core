@@ -96,11 +96,12 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
           // Compact RAM ("3.1/16.0 GiB"); the full spacing stays in the tooltip and copy text.
           const shown = key === 'ram' ? value.text.replace(' / ', '/') : value.text;
           const text = identityOnly ? `${identity} · ${shown}` : shown;
-          const detail = identityOnly ? `${identity} (configured) · ${value.detail}`
-            : key === 'users' && sample?.metrics.platform === 'Windows' ? `${value.detail} · SSH sessions are not listed`
-            : value.detail;
-          return <span className="ssh-metrics-value" key={key} data-metric={key} title={`${label}: ${detail}`}
-            aria-label={`${label}: ${detail}`}><SshIcon name={SSH_METRIC_ICONS[key]} size={12} />{text}</span>;
+          const usersNote = key === 'users' && sample?.metrics.platform === 'Windows' ? 'SSH sessions are not listed' : undefined;
+          const detail = identityOnly ? `${identity} (configured) · ${value.detail}` : value.detail;
+          const tooltip = [...('tooltipLines' in value && value.tooltipLines ? value.tooltipLines : [detail]),
+            ...(usersNote ? [usersNote] : [])].join('\n');
+          return <span className="ssh-metrics-value" key={key} data-metric={key} title={`${label}: ${tooltip}`}
+            aria-label={`${label}: ${usersNote ? `${detail} · ${usersNote}` : detail}`.replace(/[\r\n]+/g, ' ')}><SshIcon name={SSH_METRIC_ICONS[key]} size={12} />{text}</span>;
         })}
       </>}
       {/* Portalled to body, so it carries the Canvas keyboard-owner marker itself (review 349 F6). */}

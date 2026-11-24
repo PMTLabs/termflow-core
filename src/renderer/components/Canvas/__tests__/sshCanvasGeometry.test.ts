@@ -21,7 +21,7 @@ const close = (a: number, b: number) => expect(Math.abs(a - b)).toBeLessThan(1e-
 
 // Unequal on purpose, fractional, with a non-zero column gap.
 const TERMINAL = { w: 1001.53125, h: 603.40625 };
-const BOX = sshSurfaceBoxFrom({ terminal: TERMINAL, browserW: 259.75, collapsed: false, statusH: 25, columnGap: 6.5 });
+const BOX = sshSurfaceBoxFrom({ terminal: TERMINAL, browserW: 259.75, collapsed: false, statusH: 25, columnGap: 6.5, hasStrip: true, hasChrome: true });
 
 /** The four corners of the scaled envelope inside the node body, in node px. */
 function corners(env: { w: number; h: number }, fit: { scale: number; shift: number }) {
@@ -70,7 +70,8 @@ describe('SSH envelope and terminal remainder', () => {
   it('the never-rendered fallback is self-consistent under the cap', () => {
     const wide = sshFallbackSurfaceBox({ w: 1600, h: 680 }, false);
     expect(wide.source).toBe('fallback');
-    expect(wide.envelope).toEqual({ w: 1600 + SSH_CSS_BROWSER_W, h: 680 + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H + SSH_CSS_STATUS_H });
+    expect([wide.stripH, wide.chromeH]).toEqual([0, 0]);
+    expect(wide.envelope).toEqual({ w: 1600 + SSH_CSS_BROWSER_W, h: 680 + SSH_CSS_STATUS_H });
     const custom = sshFallbackSurfaceBox({ w: 1600, h: 680 }, false, 420);
     expect(custom.expandedBrowserW).toBe(420);
     expect(custom.envelope.w).toBe(2020);

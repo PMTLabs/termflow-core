@@ -358,14 +358,17 @@
   min-height: 0;
   /* The containing block for 066's launch notice below; no z-index, so no stacking context. */
   position: relative;
-  /* The launch strip's row, reserved whether or not a notice is showing. In a pane the strip sits
-     above the SSH shell; here it sits inside the slot, so the envelope adds the same row
-     (`SSH_CSS_LAUNCH_STRIP_H`, `canvasSshGeometry.ts`) and `.terminal-display` (height 100% of the
-     content box) keeps exactly the pane's measured box: no fit change on entry. */
   box-sizing: border-box;
-  padding-top: 36px;
+  padding-top: var(--ssh-launch-row, 0px);
   /* No `container-type` here: containment could make this wrapper a stacking context and trap the
      notice's z6 under the shell's chrome row (z5). The overlay is bounded from the envelope below. */
+}
+/* Reserve room only for the portalled strip, not for an idle SSH session. */
+.canvas-ssh-surface .terminal-display-wrapper:has(> .ssh-launch-notice > .ssh-launch-strip) {
+  --ssh-launch-row: 36px;
+}
+.canvas-ssh-surface .ssh-pane-shell:has(> .ssh-pane-chrome) {
+  --ssh-chrome-row: 36px;
 }
 /* D51: 066's launch notice (strip, prompts, Retry/Reconnect) is portalled to the surface host's
    parent, which in an SSH node is this wrapper, not a `.canvas-surface` (T2 moved that class to
@@ -384,7 +387,7 @@
    `canvasSshGeometry.ts`. Same 65%
    cap as 066; the overlay never runs past the slot. */
 .canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice > .ssh-launch-overlay {
-  max-height: calc((var(--node-host-h) - 26px - 36px - 36px) * 0.65);
+  max-height: calc((var(--node-host-h) - 26px - var(--ssh-chrome-row, 0px) - var(--ssh-launch-row, 0px)) * 0.65);
 }
 
 /* Snapshot tier: the browser and the status row stay visible; only the live terminal pixels are

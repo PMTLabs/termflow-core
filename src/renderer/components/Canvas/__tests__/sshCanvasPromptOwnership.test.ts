@@ -36,13 +36,17 @@ it('sshNotice_canvasOverlay_neverTakesARowInTheTerminalSlot', () => {
   expect(wrapper).not.toMatch(/z-index/);
   // 066's strip row is reserved inside the slot (the envelope adds it). No containment on the
   // wrapper: it could become a stacking context and trap the notice under the chrome row (z5).
-  expect(wrapper).toMatch(new RegExp(`padding-top:\\s*${SSH_CSS_LAUNCH_STRIP_H}px`));
+  expect(wrapper).toContain('padding-top: var(--ssh-launch-row, 0px)');
+  expect(block('.canvas-ssh-surface .terminal-display-wrapper:has(> .ssh-launch-notice > .ssh-launch-strip)'))
+    .toContain(`--ssh-launch-row: ${SSH_CSS_LAUNCH_STRIP_H}px`);
+  expect(block('.canvas-ssh-surface .ssh-pane-shell:has(> .ssh-pane-chrome)'))
+    .toContain(`--ssh-chrome-row: ${SSH_CSS_CHROME_H}px`);
   expect(wrapper).toMatch(/box-sizing:\s*border-box/);
   expect(wrapper).not.toMatch(/container-type|contain:/);
   // The prompt overlay is bounded by the terminal below the strip, not by viewport cqh fallback.
   const overlay = block('.canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice > .ssh-launch-overlay');
   expect(overlay.replace(/\s+/g, '')).toContain(
-    `max-height:calc((var(--node-host-h)-${SSH_CSS_STATUS_H}px-${SSH_CSS_CHROME_H}px-${SSH_CSS_LAUNCH_STRIP_H}px)*0.65)`);
+    `max-height:calc((var(--node-host-h)-${SSH_CSS_STATUS_H}px-var(--ssh-chrome-row,0px)-var(--ssh-launch-row,0px))*0.65)`);
 });
 
 it('sshNotice_ownsCanvasKeysAndItsOwnWheel', () => {
