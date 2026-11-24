@@ -18,7 +18,19 @@ export function metricsSession(state: RootState, id: string) {
 }
 
 export function selectSshMetricsRowConnected(state: RootState, id: string) {
-  return metricsSession(state, id).connected;
+  return sshConnectionPhase(state, id) === 'connected';
+}
+
+export function sshConnectionPhase(state: RootState, id: string): 'connected' | 'connecting' | 'disconnected' {
+  const { session, ended, connected } = metricsSession(state, id);
+  const launch = selectSshLaunch(state, id);
+  // A launch from an older generation cannot mask a newer observed session.
+  const stage = session?.generation !== undefined && launch && launch.sessionGeneration < session.generation ? undefined : launch?.stage;
+  if (ended || (stage && !launchStageLive(stage))) return 'disconnected';
+  if (connected) return 'connected';
+  if (session?.state === 'connecting' || session?.state === 'needs-hostkey' || session?.state === 'needs-secret'
+    || (launchStageLive(stage) && (stage !== 'running' || !session))) return 'connecting';
+  return 'disconnected';
 }
 
 export function sshStatusMarkerVisible({ terminalLive, barShown, barConnected }: {

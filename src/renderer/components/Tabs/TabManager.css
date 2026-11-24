@@ -176,6 +176,25 @@
   color: var(--tab-exited-indicator, #e5a03f);
 }
 
+.tab-ssh-icon {
+  position: relative;
+  display: inline-flex;
+  padding-right: 3px;
+}
+
+.tab-ssh-dot {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tab-ssh-disconnected);
+}
+
+.tab-ssh-dot.connected { background: var(--tab-ssh-connected); }
+.tab-ssh-dot.connecting { background: var(--tab-ssh-connecting); }
+
 /* Tab Icon */
 .tab-icon {
   margin-right: 6px;
@@ -499,6 +518,9 @@
   --tab-bar-background: #252526;
   --border-color: #3e3e42;
   --tab-background: #2d2d30;
+  --tab-ssh-connected: #57cf85;
+  --tab-ssh-connecting: #f0a020;
+  --tab-ssh-disconnected: #a0a0a0;
   --tab-foreground: #cccccc;
   --tab-hover-background: #323235;
   --tab-active-background: #141414;
@@ -525,6 +547,9 @@
   --tab-bar-background: #f3f3f3;
   --border-color: #e5e5e5;
   --tab-background: #ececec;
+  --tab-ssh-connected: #19743d;
+  --tab-ssh-connecting: #955600;
+  --tab-ssh-disconnected: #666666;
   --tab-foreground: #333333;
   --tab-hover-background: #e5e5e5;
   --tab-active-background: #ffffff;

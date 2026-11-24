@@ -8,7 +8,7 @@ import { resumeSshMetrics } from '../../services/sshMetricsWatch';
 import { writeClipboardText } from '../../utils/clipboard';
 import type { MetricKey } from '../../types/ssh';
 import { formatSshMetricsCopy } from './metricFormat';
-import { metricsSession, tagConnectionId } from './sshStatusLiveness';
+import { metricsSession, sshConnectionPhase, tagConnectionId } from './sshStatusLiveness';
 
 // The chrome can move without owning a watch. Keep the lease in its terminal
 // owner, or overlap leases during handoff: the coordinator shares one consumer.
@@ -17,7 +17,7 @@ export { reconnectSshTerminal } from '../../services/sshLaunch';
 export { selectSshHiddenMetrics, setSshHiddenMetrics } from '../../store/slices/panesSlice';
 
 function currentSample(state: RootState, id: string) {
-  return metricsSession(state, id).connected ? selectSshMetricsSample(state.sshSession, id) : undefined;
+  return sshConnectionPhase(state, id) === 'connected' ? selectSshMetricsSample(state.sshSession, id) : undefined;
 }
 
 export function useSshMetrics(terminalId: string) {
@@ -28,7 +28,9 @@ export function useSshMetrics(terminalId: string) {
     return connection ? `${connection.user}@${connection.host}` : connectionId ?? 'SSH host';
   });
   const hidden = useSelector((s: RootState) => selectSshHiddenMetrics(s, terminalId));
-  const { session, ended, connected, hasLaunch } = useSelector((s: RootState) => metricsSession(s, terminalId), shallowEqual);
+  const { session, ended, hasLaunch } = useSelector((s: RootState) => metricsSession(s, terminalId), shallowEqual);
+  const phase = useSelector((s: RootState) => sshConnectionPhase(s, terminalId));
+  const connected = phase === 'connected';
   // D57: a reattached shell whose SSH session predates this renderer has no app session.
   // Same predicate as OwnedSshLaunchNotice's restored strip: the attachment is recorded for
   // this connection and nothing newer (session or launch) has been observed since.
@@ -67,7 +69,7 @@ export function useSshMetrics(terminalId: string) {
 
   function resume() {
     const state = store.getState();
-    if (isCurrent(state) && metricsSession(state, terminalId).connected && selectSshMetricsPause(state.sshSession, terminalId) !== null)
+    if (isCurrent(state) && sshConnectionPhase(state, terminalId) === 'connected' && selectSshMetricsPause(state.sshSession, terminalId) !== null)
       void resumeSshMetrics(terminalId);
   }
 
@@ -81,5 +83,5 @@ export function useSshMetrics(terminalId: string) {
     if (!result.ok) dispatch(addToast({ type: 'error', message: result.error.message }));
   }
 
-  return { identity, hidden, sample: connected ? sample : undefined, session, ended, connected, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect };
+  return { identity, hidden, sample: connected ? sample : undefined, session, ended, connected, phase, restored, paused, unavailable, delayed, setPreference, copy, resume, reconnect };
 }
