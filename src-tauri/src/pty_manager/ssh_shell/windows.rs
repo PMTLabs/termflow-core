@@ -11,7 +11,7 @@ pub(super) fn instrument(
     Some(prepare(ordinary, nonce, root, owner, dialect(&ordinary.shell)?))
 }
 
-pub(super) fn dialect(executable: &str) -> Option<bool> {
+pub(crate) fn dialect(executable: &str) -> Option<bool> {
     let base = executable.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
     Some(match base.as_str() {
         "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe" => true,
@@ -132,9 +132,15 @@ fn cmd_flags(ordinary: &[String]) -> io::Result<Vec<String>> {
 const PS_HOOK_PREFIX: &str = "$script:__termflowSshReadyNonce = [System.IO.File]::ReadAllText('";
 const PS_HOOK_SUFFIX: &str = "; $script:__termflowSshReadySequence++; $__tfRows = 1; try { $__tfWin = $Host.UI.RawUI.WindowSize; $__tfRows = [Math]::Max(1, [Math]::Min($__tfWin.Height - 1, [Math]::Ceiling(1200 / [Math]::Max(20, $__tfWin.Width)) + 1)) } catch {}; [Console]::Write(([string][char]27 + 'D') * $__tfRows + [string][char]27 + '[' + $__tfRows + 'A' + [string][char]27 + '7' + [string][char]27 + ']633;TermFlowSshReady;' + $script:__termflowSshReadyNonce + ';' + $script:__termflowSshReadySequence + [string][char]27 + '\\') }";
 
-fn powershell_hook_tail() -> String {
-    let wrapper = PS_CWD_INTEGRATION.strip_suffix(" }").expect("PowerShell prompt wrapper");
-    format!("'); $script:__termflowSshReadySequence = 0; {wrapper}{PS_HOOK_SUFFIX}")
+fn powershell_hook_tail(root: &str) -> String {
+    let wrapper = PS_CWD_INTEGRATION
+        .strip_suffix(" }")
+        .expect("PowerShell prompt wrapper");
+    let launcher = super::launch::ps_launch_body(&format!(
+        "[IO.File]::ReadAllText([IO.Path]::Combine('{}', $id, 'helper.json'))",
+        root.replace('\'', "''")
+    ));
+    format!("'); Microsoft.PowerShell.Utility\\Set-Variable -Name __termflowSshLaunch -Scope Script -Option Constant -ErrorAction Stop -Value {{ param([string]$id) if ($args.Count -ne 0 -or $id -cnotmatch '\\A[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}\\z') {{ throw 'Invalid SSH launch id' }}; $ErrorActionPreference = 'Stop'; {launcher} }}; $script:__termflowSshReadySequence = 0; {wrapper}{PS_HOOK_SUFFIX}")
 }
 
 pub(crate) fn powershell_hook_command(path: &str) -> io::Result<String> {
@@ -144,19 +150,37 @@ pub(crate) fn powershell_hook_command(path: &str) -> io::Result<String> {
     }
     // Inline fixed code runs under Restricted/AllSigned. The helper is data only,
     // so the nonce stays out of the command line and the environment.
-    Ok(format!("{PS_HOOK_PREFIX}{}{tail}", path.replace('\'', "''"), tail = powershell_hook_tail()))
+    let root = Path::new(path)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::to_str)
+        .ok_or_else(|| adapter_error("missing SSH readiness helper root"))?;
+    Ok(format!(
+        "{PS_HOOK_PREFIX}{}{tail}",
+        path.replace('\'', "''"),
+        tail = powershell_hook_tail(root)
+    ))
 }
 
 pub(crate) fn is_powershell_hook_command(arg: &str) -> bool {
-    let Some(encoded) = arg.strip_prefix(PS_HOOK_PREFIX) else { return false };
-    let tail = powershell_hook_tail();
-    let Some(encoded) = encoded.strip_suffix(tail.as_str()) else { return false };
+    let Some(encoded) = arg.strip_prefix(PS_HOOK_PREFIX) else {
+        return false;
+    };
+    let Some((encoded, _)) = encoded.split_once("'); Microsoft.PowerShell.Utility") else {
+        return false;
+    };
     let path = encoded.replace("''", "'");
     let path_ref = Path::new(&path);
     path_ref.is_absolute()
         && path_ref.file_name().is_some_and(|name| name == "helper.txt")
         && literal_path(path_ref).is_ok_and(|literal| literal == path.as_str())
         && powershell_hook_command(&path).is_ok_and(|generated| generated == arg)
+}
+
+/// Only the exact current hook qualifies a running PowerShell for the short launch.
+pub(crate) fn has_powershell_launcher(argv: &[String]) -> bool {
+    argv.windows(2)
+        .any(|pair| pair[0] == "-Command" && is_powershell_hook_command(&pair[1]))
 }
 
 // Quiet launch (see posix ECHO_MAX): reserve six IND rows, then save the cursor where the
