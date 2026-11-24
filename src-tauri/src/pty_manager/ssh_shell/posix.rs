@@ -184,6 +184,11 @@ pub(super) fn validate_profile(executable: &str, args: &[String]) -> io::Result<
     inspect_args(dialect, args).map(|_| ())
 }
 
+#[cfg(windows)]
+pub(crate) fn uses_native_fork_stub(shell: &str) -> bool {
+    matches!(classify(shell), Ok((_, Paths::Msys | Paths::Cygwin)))
+}
+
 fn classify(executable: &str) -> io::Result<(Dialect, Paths)> {
     let base = executable.rsplit(['/', '\\']).next().unwrap_or_default();
     let dialect = match base.to_ascii_lowercase().trim_end_matches(".exe") {

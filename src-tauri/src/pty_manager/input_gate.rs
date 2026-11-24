@@ -212,13 +212,42 @@ struct Attempt {
     id: Uuid,
     submitted: bool,
 }
+type ShellLeafPin = Arc<Mutex<Option<super::ssh_helpers::ProcessIdentity>>>;
+
+#[derive(Clone)]
+pub(crate) struct BoundSshShell {
+    pub shell: String,
+    identity: super::ssh_helpers::ProcessIdentity,
+    leaf: ShellLeafPin,
+}
+
+impl BoundSshShell {
+    pub(crate) fn effective_identity(&self) -> Option<(super::ssh_helpers::ProcessIdentity, crate::ssh::launch_process::Identity)> {
+        let leaf = self.leaf.lock();
+        let effective = leaf.as_ref().unwrap_or(&self.identity);
+        let birth = crate::ssh::launch_process::Identity::shell(effective)?;
+        Some((effective.clone(), birth))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pin_leaf_for_test(&self, leaf: super::ssh_helpers::ProcessIdentity) {
+        *self.leaf.lock() = Some(leaf);
+    }
+
+    /// Only the Windows leaf resolver may inspect the launcher and its pin slot.
+    #[cfg(windows)]
+    pub(crate) fn launcher_for_leaf_resolution(&self) -> (&super::ssh_helpers::ProcessIdentity, &ShellLeafPin) {
+        (&self.identity, &self.leaf)
+    }
+}
+
 struct RegisteredPrompt {
     connection_id: Option<String>,
     generation: u64,
     nonce: String,
     prompt_order: termflow_pty_protocol::ssh_prompt::PromptOrder,
     stdin_writes: u64,
-    shell: Option<(String, super::ssh_helpers::ProcessIdentity, Option<crate::ssh::launch_process::Identity>)>,
+    shell: Option<BoundSshShell>,
 }
 
 /// A foreign authority (SSH registry + store) held only for queue admission
@@ -467,16 +496,19 @@ impl crate::state::HostKeys {
     }
 
     pub(crate) fn bind_ssh_shell(&self, process: &str, shell: String, identity: super::ssh_helpers::ProcessIdentity) {
-        let birth = crate::ssh::launch_process::Identity::shell(&identity);
         let entry = self.input.processes.lock().get(process).cloned();
         if let Some(entry) = entry {
             if let Some(prompt) = entry.lock().ssh_prompt.as_mut() {
-                prompt.shell = Some((shell, identity, birth));
+                let leaf = prompt.shell.as_ref()
+                    .filter(|bound| bound.identity == identity)
+                    .map(|bound| bound.leaf.clone())
+                    .unwrap_or_default();
+                prompt.shell = Some(BoundSshShell { shell, identity, leaf });
             }
         }
     }
 
-    pub(crate) fn ssh_shell_identity(&self, process: &str) -> Option<(String, super::ssh_helpers::ProcessIdentity, Option<crate::ssh::launch_process::Identity>)> {
+    pub(crate) fn ssh_shell_identity(&self, process: &str) -> Option<BoundSshShell> {
         let entry = self.input.processes.lock().get(process)?.clone();
         let state = entry.lock();
         state.ssh_prompt.as_ref()?.shell.clone()

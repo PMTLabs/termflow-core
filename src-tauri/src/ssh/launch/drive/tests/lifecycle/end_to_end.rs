@@ -37,7 +37,7 @@ impl Drop for Recorded {
 
 /// The T5 local fixture, unpinned, with the recording `ssh` as the port's
 /// executable and the fake server also listening on real loopback TCP.
-async fn recorded(tcp: TcpListener, port: u16) -> Recorded {
+async fn recorded(tcp: TcpListener, port: u16, profile: (String, Vec<String>)) -> Recorded {
     let mut f = keyed(port);
     // An allowlisted option the config oracle must see in the real client.
     f.store.transact(|store| {
@@ -60,7 +60,7 @@ async fn recorded(tcp: TcpListener, port: u16) -> Recorded {
         }
     });
     let (cg, staged) = f.stage();
-    let mut shell = NativeShell::spawn(instrument_env(&f, env));
+    let mut shell = NativeShell::spawn(instrument_profile(&f, env, profile));
     shell.bind(&f, cg, &staged);
     let p = Arc::get_mut(&mut f.port).unwrap();
     p.writer = Arc::new(std::sync::Mutex::new(Box::new(Tee(shell.writer.clone(), p.record.clone()))));
@@ -88,9 +88,19 @@ fn config(ssh: &str, args: &[String]) -> Vec<String> {
 // or extra options (the -G oracle and the real login fail).
 #[tokio::test]
 async fn saved_ssh_launch_trust_then_shell_argv_end_to_end() {
+    saved_launch(default_profile()).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn saved_ssh_launch_git_bash_end_to_end() {
+    saved_launch(git_bash_profile()).await;
+}
+
+async fn saved_launch(profile: (String, Vec<String>)) {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
-    let mut r = recorded(tcp, port).await;
+    let mut r = recorded(tcp, port, profile).await;
     let f = &r.f;
     let a = f.open();
     f.register(&a);
@@ -102,11 +112,18 @@ async fn saved_ssh_launch_trust_then_shell_argv_end_to_end() {
 
     f.trust(&prompt, true).unwrap();
     f.gate(Gate::Verified).await;
-    assert!(!f.tick(&a));
+    tokio::time::timeout(DEADLINE, async {
+        while f.tick(&a) {
+            tokio::time::sleep(CHECK_INTERVAL).await;
+        }
+    }).await.expect("saved SSH launch did not finish dispatching");
     let typed = f.typed_bytes();
     assert_eq!(*f.port.record.bytes.lock(), typed);
     let argv = f.launches.0.lock()[LEAF].payload.as_ref().unwrap().encoded.argv().to_vec();
-    assert_eq!(argv[0], f.port.ssh.clone().unwrap());
+    let recorder = f.port.ssh.as_deref().unwrap();
+    #[cfg(windows)]
+    let recorder = posix::native_ssh_outer_path(&r.shell.adapter.as_ref().unwrap().spec.shell, recorder).unwrap();
+    assert_eq!(argv[0], recorder);
 
     // The same shell returns to its prompt after the real client's session.
     r.shell.prompt(f.keys(), false).await;
@@ -145,7 +162,7 @@ async fn saved_ssh_launch_trust_then_shell_argv_end_to_end() {
 async fn untrusted_cancel_has_zero_ssh_execs() {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
-    let mut r = recorded(tcp, port).await;
+    let mut r = recorded(tcp, port, default_profile()).await;
     let shell_id = ProcessIdentity::capture(r.shell.pid()).unwrap();
     let f = &r.f;
     let a = f.open();

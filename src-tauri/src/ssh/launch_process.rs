@@ -34,6 +34,7 @@ impl Identity {
 
 pub(super) struct Command {
     pub shell: Option<Identity>,
+    pub posix_fork_stub: bool,
     pub exe: PathBuf,
     pub marker: String,
     // Only the cmd Unicode adapter launches an intermediary process. Its
@@ -53,10 +54,17 @@ impl Command {
         let mut system = System::new();
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
         if system.process(shell.pid).is_none() { return sample; }
-        let children = children_of(&system, shell.pid);
-        sample.bare = children.is_empty();
-        for pid in children {
-            let Some(id) = Identity::read(pid) else { continue };
+        let shell_exe = if self.posix_fork_stub {
+            let mut canonical = None;
+            inspect(&mut system, shell, None, |exe, _| {
+                canonical = exe.canonicalize().ok();
+                canonical.is_some()
+            }).then_some(canonical).flatten()
+        } else { None };
+        let children: Vec<_> = children_of(&system, shell.pid).into_iter().map(Identity::read).collect();
+        sample.bare = shell_is_bare(children.iter().copied(), shell.birth);
+        let children = children.into_iter().flatten().filter(|child| child.birth >= shell.birth);
+        for id in children {
             let found = if self.destination(&mut system, id, shell.pid) {
                 Some(id)
             } else if self.intermediary.as_ref().is_some_and(|argv| {
@@ -69,7 +77,17 @@ impl Command {
                     .find(|&child| self.destination(&mut system, child, id.pid))
                     .filter(|_| Identity::read(id.pid) == Some(id))
             } else {
-                None
+                self.fork_stub_destination(shell, id, || {
+                    let shell_exe = shell_exe.as_deref()?;
+                    let same_exe = inspect(&mut system, id, Some(shell.pid), |exe, _| {
+                        exe.canonicalize().is_ok_and(|exe| same_path(&exe, shell_exe))
+                    });
+                    let children = live_children_of(&system, id);
+                    let matches = children.first().copied().flatten()
+                        .is_some_and(|child| self.destination(&mut system, child, id.pid))
+                        && Identity::read(id.pid) == Some(id);
+                    Some((same_exe, children, matches))
+                })
             };
             if let Some(found) = found {
                 if sample.candidate.replace(found).is_some() {
@@ -83,6 +101,21 @@ impl Command {
             return Sample { bare: false, candidate: None };
         }
         sample
+    }
+
+    fn fork_stub_destination(
+        &self,
+        shell: Identity,
+        stub: Identity,
+        inspect_stub: impl FnOnce() -> Option<(bool, Vec<Option<Identity>>, bool)>,
+    ) -> Option<Identity> {
+        if !self.posix_fork_stub || stub.birth < shell.birth { return None; }
+        let (same_exe, children, matches_destination) = inspect_stub()?;
+        if !same_exe { return None; }
+        // An unreadable child still counts, so it can never be claimed and it
+        // keeps a sibling from passing as the only child.
+        let child = (*children.first()?)?;
+        (children.len() == 1 && matches_destination && child.birth >= stub.birth).then_some(child)
     }
 
     /// Once correlated, sample only that incarnation, never search for a
@@ -106,6 +139,19 @@ impl Command {
 
 fn children_of(system: &System, parent: Pid) -> Vec<Pid> {
     system.processes().values().filter(|p| p.parent() == Some(parent)).map(|p| p.pid()).collect()
+}
+
+fn shell_is_bare(children: impl IntoIterator<Item = Option<Identity>>, parent_birth: u64) -> bool {
+    !children.into_iter().any(|child| child.is_none_or(|child| child.birth >= parent_birth))
+}
+
+/// Children not provably older than `parent`; an unreadable child is kept as `None`.
+fn live_children_of(system: &System, parent: Identity) -> Vec<Option<Identity>> {
+    not_older(children_of(system, parent.pid).into_iter().map(Identity::read), parent.birth)
+}
+
+fn not_older(children: impl IntoIterator<Item = Option<Identity>>, parent_birth: u64) -> Vec<Option<Identity>> {
+    children.into_iter().filter(|child| child.is_none_or(|child| child.birth >= parent_birth)).collect()
 }
 
 fn inspect(system: &mut System, id: Identity, parent: Option<Pid>, matches: impl FnOnce(&Path, &[std::ffi::OsString]) -> bool) -> bool {

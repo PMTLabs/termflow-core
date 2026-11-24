@@ -17,6 +17,7 @@ async fn pid_reuse_unrelated_manual_ssh_and_proxy_child_do_not_claim_launch() {
     let exe = std::fs::canonicalize(&path).unwrap();
     let marker = marker();
     let cmd = Command {
+        posix_fork_stub: false,
         shell: Identity::shell(&ProcessIdentity::capture(std::process::id()).unwrap()),
         exe,
         marker: marker.clone(),
@@ -73,4 +74,42 @@ async fn pid_reuse_unrelated_manual_ssh_and_proxy_child_do_not_claim_launch() {
         tokio::time::timeout(Duration::from_secs(10), child.wait()).await.unwrap().unwrap();
     }
     assert_eq!(tracker.sample(&cmd.sample(), Instant::now(), true), Observation::Exited);
+}
+
+#[test]
+fn fork_stub_requires_enabled_same_exe_and_only_marker_child() {
+    let shell = Identity { pid: Pid::from_u32(1), birth: 1 };
+    let stub = Identity { pid: Pid::from_u32(2), birth: 2 };
+    let dest = Identity { pid: Pid::from_u32(3), birth: 3 };
+    let other = Identity { pid: Pid::from_u32(4), birth: 4 };
+    let mut cmd = Command {
+        shell: Some(shell), exe: PathBuf::from("ssh.exe"), marker: "marker".into(),
+        intermediary: None, posix_fork_stub: true,
+    };
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((true, vec![Some(dest)], true))), Some(dest));
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((true, vec![Some(dest)], false))), None, "not the marker destination");
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((false, vec![Some(dest)], true))), None, "different exe");
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((true, vec![Some(dest), Some(other)], true))), None, "multiple children");
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((true, vec![Some(dest), None], true))), None, "unreadable sibling");
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((true, vec![None], true))), None, "unreadable only child");
+    assert_eq!(cmd.fork_stub_destination(shell, Identity { birth: 0, ..stub }, || Some((true, vec![Some(dest)], true))), None);
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((true, vec![Some(Identity { birth: 1, ..dest })], true))), None);
+    cmd.posix_fork_stub = false;
+    assert_eq!(cmd.fork_stub_destination(shell, stub, || Some((true, vec![Some(dest)], true))), None, "flag disabled");
+}
+
+#[test]
+fn unreadable_observer_child_is_busy_but_older_child_is_ignored() {
+    let older = Identity { pid: Pid::from_u32(1), birth: 9 };
+    let current = Identity { birth: 10, ..older };
+    assert!(shell_is_bare([Some(older)], 10));
+    assert!(!shell_is_bare([Some(current)], 10));
+    assert!(!shell_is_bare([Some(older), None], 10));
+}
+
+#[test]
+fn stub_children_keep_unreadable_and_drop_only_provably_older() {
+    let older = Identity { pid: Pid::from_u32(1), birth: 9 };
+    let current = Identity { birth: 10, ..older };
+    assert_eq!(not_older([Some(older), Some(current), None], 10), vec![Some(current), None]);
 }

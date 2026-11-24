@@ -858,3 +858,40 @@ fn retry_requires_fresh_prompt_after_submission_input_or_transfer() {
         }
     }
 }
+
+#[test]
+fn effective_ssh_shell_identity_uses_live_pin_and_rejects_dead_pin() {
+    use crate::pty_manager::ssh_helpers::ProcessIdentity;
+    let live = ProcessIdentity::capture(std::process::id()).unwrap();
+    let bound = BoundSshShell { shell: "test".into(), identity: live.clone(), leaf: Arc::default() };
+    assert_eq!(bound.effective_identity().unwrap().0, live);
+    let dead = ProcessIdentity { pid: live.pid, start_time: live.start_time + 1 };
+    let launcher = BoundSshShell { shell: "test".into(), identity: dead.clone(), leaf: Arc::default() };
+    launcher.pin_leaf_for_test(live.clone());
+    assert_eq!(launcher.effective_identity().unwrap().0, live);
+    bound.pin_leaf_for_test(dead);
+    assert!(bound.effective_identity().is_none());
+}
+
+#[test]
+fn ssh_shell_resolver_accessor_source_census() {
+    use std::{fs, path::Path};
+    fn scan(dir: &Path, root: &Path, hits: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                scan(&path, root, hits);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let source = fs::read_to_string(&path).unwrap();
+                for _ in source.lines().flat_map(|line| line.matches(concat!("launcher_for_", "leaf_resolution"))) {
+                    hits.push(path.strip_prefix(root).unwrap().to_str().unwrap().replace(char::from(92), "/"));
+                }
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut hits = Vec::new();
+    scan(&root, &root, &mut hits);
+    hits.sort();
+    assert_eq!(hits, ["pty_manager/input_gate.rs", "ssh/launch/drive/bare_shell.rs"]);
+}
