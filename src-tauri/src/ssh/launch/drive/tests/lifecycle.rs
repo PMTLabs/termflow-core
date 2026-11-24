@@ -209,7 +209,7 @@ impl Fixture {
             while self.tick(a) { tokio::time::sleep(CHECK_INTERVAL).await; }
         }).await.expect("launch did not finish dispatching");
         let snapshot = self.access(a, Operation::Query).unwrap();
-        assert_eq!(snapshot.stage, LaunchStage::Typed);
+        assert_eq!(snapshot.stage, LaunchStage::Typed, "error {:?}; events {:?}", snapshot.error, self.port.events.lock().as_slice());
         assert_eq!(self.sessions.current_launch(LEAF).unwrap().state, Some(LaunchState::Typed));
         snapshot
     }
