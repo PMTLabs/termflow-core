@@ -130,7 +130,7 @@ test('real_shell_composition_has_one_host_one_reconnect', async () => {
     if (session.state === 'disconnected') act(() => button('Details').click());
     expect([...container.querySelectorAll('button')].filter(b => b.textContent === 'Reconnect')).toHaveLength(session.state === 'disconnected' ? 1 : 0);
   }
-  expect(container.textContent).toContain('Stale');
+  expect(container.textContent).not.toContain('.env');
   act(() => button('Collapse file browser').click());
   tag = { ...tag, browserCollapsed: true };
   act(() => shell(view('disconnected', 1, 3)));
@@ -311,12 +311,35 @@ test('drop_disables_all_actions_and_late_listing_stays_stale', async () => {
   await act(async () => render());
   const late = deferred<RemoteListing>(); api.fsList.mockReturnValueOnce(late.promise);
   await go('/late');
-  act(() => observe(view('disconnected', 1, 2), snapshot(1, 'ended')));
+  act(() => observe(view('disconnected', 1, 2)));
   expect([...container.querySelectorAll('button, input')].every(el => (el as HTMLButtonElement).disabled)).toBe(true);
   await act(async () => late.resolve(listing('/late')));
   expect(container.querySelector('.ssh-file-rows.stale')?.textContent).toContain('.env');
   expect(container.querySelector('time')).not.toBeNull(); expect(container.textContent).not.toContain('/late');
   expect(patch).not.toHaveBeenCalled();
+});
+
+test('ended_ssh_clears_the_listing_and_a_late_one_stays_out', async () => {
+  // Each order the two channels can report a quit in.
+  for (const [index, session] of [view('connected', 1, 2), view('disconnected', 1, 3)].entries()) {
+    await act(async () => render());
+    if (index === 0) await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Expand logs"]')!.click());
+    expect(container.textContent).toContain('.env');
+    const late = deferred<RemoteListing>(); api.fsList.mockReturnValueOnce(late.promise);
+    await go('/late');
+    act(() => observe(session, snapshot(1, 'ended')));
+    expect(container.querySelectorAll('.ssh-file-name')).toHaveLength(0);
+    expect(container.querySelector('time')).toBeNull();
+    expect(container.textContent).not.toMatch(/Stale|Empty directory|Current directory|Loading/);
+    expect(container.textContent).toContain('SSH is not running');
+    await act(async () => late.resolve(listing('/late')));
+    expect(container.querySelectorAll('.ssh-file-name')).toHaveLength(0);
+    // The saved path is where a reconnect resumes; quitting must not rewrite it.
+    expect(pathBox().value).toBe('/home'); expect(patch).not.toHaveBeenCalled();
+    act(() => root.unmount()); root = createRoot(container);
+    act(() => { store.dispatch(sshOwnersChanged({})); store.dispatch(sshOwnersChanged({ [terminalId]: initialTag.connectionId })); });
+    observe(view('connected'));
+  }
 });
 
 test('reconnect_loads_new_listing_before_live_state', async () => {
@@ -328,8 +351,9 @@ test('reconnect_loads_new_listing_before_live_state', async () => {
   await act(async () => observe(view('connected', 2, 2), snapshot(2)));
   expect(api.fsList).toHaveBeenLastCalledWith({ terminalId, path: '/home', expectedGeneration: 2 });
   expect(button('Refresh').disabled).toBe(true); expect(button('New file').disabled).toBe(true);
-  expect(container.querySelector('.stale')).not.toBeNull();
+  expect(container.textContent).not.toContain('.env');
   await act(async () => fresh.resolve(listing('/home', 2)));
+  expect(container.textContent).toContain('.env');
   expect(container.querySelector('.stale')).toBeNull(); expect(button('New file').disabled).toBe(false);
 });
 
@@ -482,7 +506,7 @@ test('right_click_selects_and_focuses_the_row_without_opening_it', async () => {
 
 test('right_click_on_an_unusable_row_opens_the_menu_without_selecting', async () => {
   await act(async () => render());
-  act(() => observe(view('disconnected', 1, 2), snapshot(1, 'ended')));
+  act(() => observe(view('disconnected', 1, 2)));
   act(() => { mouse(row().parentElement!, 'contextmenu', 2); });
   expect(document.querySelector('[role="menu"]')).not.toBeNull();
   expect(row().getAttribute('aria-pressed')).toBe('false');
@@ -506,7 +530,7 @@ test('folder_open_disabled_but_download_enabled', async () => {
 test('disconnected_menu_and_middle_click_make_no_calls', async () => {
   await act(async () => render());
   act(() => { mouse(row().parentElement!, 'contextmenu', 2); });
-  act(() => observe(view('disconnected', 1, 2), snapshot(1, 'ended')));
+  act(() => observe(view('disconnected', 1, 2)));
   const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
   expect(items).toHaveLength(9);
   act(() => {

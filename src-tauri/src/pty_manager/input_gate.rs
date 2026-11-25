@@ -116,6 +116,48 @@ impl InputSource {
     }
 }
 
+/// Whether these terminal bytes can neither edit nor run a shell line: only complete
+/// Win32-Input-Mode key releases, bare modifier presses and focus reports.
+///
+/// Under ConPTY every key release is its own write. The Enter that runs `exit` is usually
+/// released AFTER the local prompt is drawn, so a release must not spend that prompt.
+/// Anything unrecognised is input.
+fn inert_input(bytes: &[u8]) -> bool {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match strip_inert(rest) {
+            Some(next) => rest = next,
+            None => return false,
+        }
+    }
+    !bytes.is_empty()
+}
+
+fn strip_inert(bytes: &[u8]) -> Option<&[u8]> {
+    const VK_MENU: u32 = 0x12;
+    // Shift, Control, Alt, CapsLock, left/right Windows, NumLock, ScrollLock.
+    const MODIFIERS: [u32; 8] = [0x10, 0x11, VK_MENU, 0x14, 0x5b, 0x5c, 0x90, 0x91];
+    let body = bytes.strip_prefix(b"\x1b[")?;
+    if let [b'I' | b'O', rest @ ..] = body {
+        return Some(rest);
+    }
+    // CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _
+    let end = body.iter().position(|b| !matches!(b, b'0'..=b'9' | b';'))?;
+    if body[end] != b'_' {
+        return None;
+    }
+    let fields = std::str::from_utf8(&body[..end]).ok()?.split(';')
+        .map(str::parse).collect::<Result<Vec<u32>, _>>().ok()?;
+    let [vk, _, uc, kd, _, _] = fields[..] else { return None };
+    let inert = match kd {
+        // Releasing Alt commits an Alt+numpad character, carried in Uc.
+        0 => vk != VK_MENU || uc == 0,
+        1 => uc == 0 && MODIFIERS.contains(&vk),
+        _ => false,
+    };
+    inert.then(|| &body[end + 1..])
+}
+
 pub fn write_input(
     backend: &impl InputBackend,
     process: &str,
@@ -124,7 +166,8 @@ pub fn write_input(
     bytes: &[u8],
 ) -> Result<(), WriteFailure> {
     use std::io::Write;
-    let result = backend.input_keys().admit_input(process, lease, |permit| {
+    let keys = backend.input_keys();
+    let dispatch = |permit: &InputPermit<'_>| {
         // Automation historically selects its local writer first and ignores flush errors.
         let local_first = matches!(source, InputSource::Automation);
         if !local_first && backend.enqueue_hosted(permit, bytes) {
@@ -150,7 +193,13 @@ pub fn write_input(
             return Ok(InputDispatch::Complete(()));
         }
         Err(source.missing(process))
-    });
+    };
+    // Win32-Input-Mode and the mandatory ?1004h exist only under ConPTY.
+    let result = if cfg!(windows) && inert_input(bytes) {
+        keys.admit_inert_input(process, lease, dispatch)
+    } else {
+        keys.admit_input(process, lease, dispatch)
+    };
     result.map_err(|e: WriteFailure| {
         if e.kind == FailureKind::Missing {
             source.missing(process)
@@ -191,7 +240,7 @@ pub struct ReadyEpoch {
     process: String,
     owner: OwnerStamp,
     input_generation: u64,
-    stdin_writes: u64,
+    inputs: u64,
     epoch: u64,
     host: Option<HostPrompt>,
 }
@@ -242,12 +291,37 @@ impl BoundSshShell {
     }
 }
 
+/// Admitted renderer/API writes. The pty-host counts every stdin frame, inert ones too, so
+/// `writes` keeps parity with it while `inputs` counts only what could touch a shell line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StdinCount {
+    writes: u64,
+    inputs: u64,
+    /// `writes` as of the latest non-inert write.
+    settled: u64,
+}
+impl StdinCount {
+    fn admitted(self, inert: bool) -> Option<Self> {
+        let writes = self.writes.checked_add(1)?;
+        Some(if inert {
+            Self { writes, ..self }
+        } else {
+            Self { writes, inputs: self.inputs.checked_add(1)?, settled: writes }
+        })
+    }
+    /// A hosted prompt is fresh when the host had written every input before drawing it.
+    /// Inert writes still in flight to the host cannot change what that prompt will run.
+    fn covers(self, host_writes: u64) -> bool {
+        (self.settled..=self.writes).contains(&host_writes)
+    }
+}
+
 struct RegisteredPrompt {
     connection_id: Option<String>,
     generation: u64,
     nonce: String,
     prompt_order: termflow_pty_protocol::ssh_prompt::PromptOrder,
-    stdin_writes: u64,
+    stdin: StdinCount,
     shell: Option<BoundSshShell>,
 }
 
@@ -382,7 +456,7 @@ impl ProcessInput {
 struct LaunchConsume {
     ready: ReadyEpoch,
     prompt_epoch: u64,
-    stdin_writes: Option<u64>,
+    stdin: Option<StdinCount>,
 }
 
 impl LaunchConsume {
@@ -396,7 +470,7 @@ impl LaunchConsume {
             || possibly_written
             || state.next_local_turn != turn + 1
             || state.input_generation != self.ready.input_generation + 1
-            || state.ssh_prompt.as_ref().map(|prompt| prompt.stdin_writes) != self.stdin_writes.map(|n| n + 1)
+            || state.ssh_prompt.as_ref().map(|prompt| prompt.stdin) != self.stdin.and_then(|n| n.admitted(false))
             || state.prompt_epoch != self.prompt_epoch
             || state.check_lease(&self.ready.process, &ticket.lease).is_err()
             || !state.attempt.as_ref().is_some_and(|a| a.id == ticket.id && a.submitted)
@@ -406,8 +480,8 @@ impl LaunchConsume {
 
         state.attempt.as_mut().unwrap().submitted = false;
         state.input_generation = self.ready.input_generation;
-        if let (Some(prompt), Some(writes)) = (&mut state.ssh_prompt, self.stdin_writes) {
-            prompt.stdin_writes = writes;
+        if let (Some(prompt), Some(stdin)) = (&mut state.ssh_prompt, self.stdin) {
+            prompt.stdin = stdin;
         }
         state.ready = Some(self.ready);
         // The LocalTurn guard advances the head even on refusal. Never reuse turn.
@@ -532,7 +606,7 @@ impl crate::state::HostKeys {
         if state.ssh_prompt.is_some() || state.input_generation != 0 {
             return Err(Refusal::StaleAttempt);
         }
-        state.ssh_prompt = Some(RegisteredPrompt { connection_id: connection_id.map(str::to_owned), generation, nonce: nonce.into(), prompt_order: Default::default(), stdin_writes: 0, shell: None });
+        state.ssh_prompt = Some(RegisteredPrompt { connection_id: connection_id.map(str::to_owned), generation, nonce: nonce.into(), prompt_order: Default::default(), stdin: StdinCount::default(), shell: None });
         Ok(())
     }
 
@@ -589,7 +663,7 @@ impl crate::state::HostKeys {
         Some(LaunchBoundary {
             returned: state.prompt_epoch > ready.epoch,
             prompt_epoch: state.prompt_epoch,
-            extra_input: Some(prompt.stdin_writes) != ready.stdin_writes.checked_add(1),
+            extra_input: Some(prompt.stdin.inputs) != ready.inputs.checked_add(1),
             transport_lost: ready.host.as_ref().is_some_and(|host| {
                 !self.launch_host_epoch_alive(host.channel, host.epoch)
             }),
@@ -660,7 +734,7 @@ impl crate::state::HostKeys {
                 Self::publish_prompt_epoch(process, owner, &mut state, None)
             }
             PromptProof::Hosted { channel, key, epoch, stdin_writes } => {
-                if stdin_writes != registration.stdin_writes {
+                if !registration.stdin.covers(stdin_writes) {
                     return Err(Refusal::NotReady);
                 }
                 let mut observed = Err(Refusal::NotReady);
@@ -694,7 +768,7 @@ impl crate::state::HostKeys {
             process: process.into(),
             owner,
             input_generation: state.input_generation,
-            stdin_writes: state.ssh_prompt.as_ref().map_or(0, |p| p.stdin_writes),
+            inputs: state.ssh_prompt.as_ref().map_or(0, |p| p.stdin.inputs),
             epoch: state.prompt_epoch,
             host,
         };
@@ -709,6 +783,17 @@ impl crate::state::HostKeys {
         enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
         self.input_write(process, WriteKind::Ordinary(lease), enqueue)
+    }
+
+    /// Ordinary admission for bytes `inert_input` accepted: same lock and lease rules, but the
+    /// shell's prompt stays ready.
+    fn admit_inert_input<'io, T, E: From<Refusal>>(
+        &self,
+        process: &str,
+        lease: Option<&InputLease>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
+    ) -> Result<T, E> {
+        self.input_write(process, WriteKind::Inert(lease), enqueue)
     }
 
     pub fn admit_protocol_input<'io, T, E: From<Refusal>>(
@@ -769,7 +854,7 @@ impl crate::state::HostKeys {
         fence: &impl InputFence<E>,
         enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<Option<T>, E> {
-        let missing = if matches!(&kind, WriteKind::Launch(..) | WriteKind::Ordinary(Some(_))) {
+        let missing = if matches!(&kind, WriteKind::Launch(..) | WriteKind::Ordinary(Some(_)) | WriteKind::Inert(Some(_))) {
             Refusal::StaleAttempt
         } else {
             Refusal::NotFound
@@ -781,9 +866,10 @@ impl crate::state::HostKeys {
             let mut state = entry.lock();
             state.owner(&owner)?;
             let is_protocol = matches!(&kind, WriteKind::Protocol);
+            let inert = matches!(&kind, WriteKind::Inert(_));
             let mut consumed = None;
             match &kind {
-                WriteKind::Ordinary(lease) => {
+                WriteKind::Ordinary(lease) | WriteKind::Inert(lease) => {
                     if let Some(lease) = lease {
                         state.check_lease(process, lease)?;
                     }
@@ -819,16 +905,18 @@ impl crate::state::HostKeys {
                     consumed = Some(LaunchConsume {
                         ready: state.ready.clone().expect("qualified ready epoch"),
                         prompt_epoch: state.prompt_epoch,
-                        stdin_writes: state.ssh_prompt.as_ref().map(|prompt| prompt.stdin_writes),
+                        stdin: state.ssh_prompt.as_ref().map(|prompt| prompt.stdin),
                     });
                     // Consume BEFORE enqueue: an I/O error may mean a partial write. Never retry it.
                     state.attempt.as_mut().unwrap().submitted = true;
                 }
             }
-            state.invalidate_ready()?;
+            if !inert {
+                state.invalidate_ready()?;
+            }
             if !is_protocol {
                 if let Some(prompt) = &mut state.ssh_prompt {
-                    prompt.stdin_writes = prompt.stdin_writes.checked_add(1).ok_or(Refusal::StaleAttempt)?;
+                    prompt.stdin = prompt.stdin.admitted(inert).ok_or(Refusal::StaleAttempt)?;
                 }
             }
             let host = match &kind { WriteKind::Launch(_, ready) => ready.host.as_ref(), _ => None };
@@ -856,7 +944,7 @@ impl crate::state::HostKeys {
             }
             let state = entry.lock();
             match kind {
-                WriteKind::Ordinary(Some(lease)) => state.check_lease(process, lease)?,
+                WriteKind::Ordinary(Some(lease)) | WriteKind::Inert(Some(lease)) => state.check_lease(process, lease)?,
                 WriteKind::Launch(ticket, _) => {
                     state.check_lease(process, &ticket.lease)?;
                     if !state.attempt.as_ref().is_some_and(|a| a.id == ticket.id && a.submitted) {
@@ -891,6 +979,7 @@ mod tests;
 
 enum WriteKind<'a> {
     Ordinary(Option<&'a InputLease>),
+    Inert(Option<&'a InputLease>),
     Protocol,
     Takeover,
     Launch(&'a LaunchTicket, &'a ReadyEpoch),
