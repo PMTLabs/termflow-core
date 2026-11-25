@@ -54,6 +54,7 @@ export function useSshFileBrowser({ terminalId, sshTag, surfaceActive, onPatchTa
   const api = window.electronAPI?.ssh;
   const key = useSelector((state: RootState) => sshBrowserEpochKey(state, terminalId));
   const epoch = useRef<BrowserEpoch | undefined>(undefined);
+  const ended = useSelector((state: RootState) => readSshLaunchState(state, terminalId)?.stage === 'ended');
   const sequence = useRef(0);
   const latestRootRequest = useRef(0);
   const rootVersion = useRef(0);
@@ -117,6 +118,16 @@ export function useSshFileBrowser({ terminalId, sshTag, surfaceActive, onPatchTa
       }
     }
   }
+
+  // The terminal's ssh is over (the user quit it, or it died): its listing describes a session
+  // that no longer exists, so clear it. A file channel that drops while ssh still runs keeps the
+  // dimmed listing. Declared before the reset below, which reads `confirmed`. The tag's path stays,
+  // so a reconnect lists the same directory again.
+  useLayoutEffect(() => {
+    if (!ended) return;
+    confirmed.current = undefined;
+    setCurrent(undefined);
+  }, [ended]);
 
   useLayoutEffect(() => {
     setError(undefined); setLoading(false); setCreating(false); setReported(false); resetTree();

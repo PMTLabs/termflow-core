@@ -796,6 +796,150 @@ fn startup_replies_drain_before_ready() {
     );
 }
 
+const ENTER_DOWN: &[u8] = b"\x1b[13;28;13;1;0;1_";
+const ENTER_UP: &[u8] = b"\x1b[13;28;13;0;0;1_";
+const ALT_DOWN: &[u8] = b"\x1b[18;56;0;1;2;1_";
+const FOCUS_OUT: &[u8] = b"\x1b[O";
+
+#[test]
+fn only_releases_bare_modifiers_and_focus_reports_are_inert() {
+    let inert: &[&[u8]] = &[
+        ENTER_UP,
+        b"\x1b[68;32;4;0;8;1_", // Ctrl+D: D released while Ctrl is held
+        b"\x1b[17;29;0;0;0;1_", // Ctrl released
+        b"\x1b[18;56;0;0;0;1_", // Alt released with no Alt+numpad character
+        ALT_DOWN,               // Alt+Tab
+        b"\x1b[16;42;0;1;16;1_",
+        b"\x1b[I",
+        FOCUS_OUT,
+        b"\x1b[O\x1b[17;29;0;0;0;1_\x1b[I",
+    ];
+    for bytes in inert {
+        assert!(inert_input(bytes), "{}", bytes.escape_ascii());
+    }
+    let input: &[&[u8]] = &[
+        b"",
+        ENTER_DOWN,
+        b"\r",
+        b"a",
+        b"\x1b",
+        b"\x1b[",
+        b"\x1b[A",                 // Up recalls history
+        b"\x1bOP",                 // F1, not a focus report
+        b"\x1b[68;32;4;1;8;1_",    // Ctrl+D pressed
+        b"\x1b[38;72;0;1;0;1_",    // Up pressed: Uc 0 but not a modifier
+        b"\x1b[18;56;233;0;0;1_",  // Alt released, committing an Alt+numpad character
+        b"\x1b[16;42;65;1;16;1_",  // a modifier that carries a character
+        b"\x1b[13;28;13;2;0;1_",   // unknown key state
+        b"\x1b[13;28;13;0;0_",     // missing field
+        b"\x1b[13;28;13;0;0;1;1_", // extra field
+        b"\x1b[;;;0;;_",           // omitted fields
+        b"\x1b[13;28;13;0;0;1",    // truncated
+        b"\x1b[13;28;13;0;0;1~",
+        b"\x1b[99999999999;28;13;0;0;1_",
+        b"\x1b[13;28;13;0;0;1_x", // a release followed by text
+        b"x\x1b[13;28;13;0;0;1_",
+        b"\x1b[13;28;13;0;0;1_\x1b[13;28;13;1;0;1_",
+    ];
+    for bytes in input {
+        assert!(!inert_input(bytes), "{}", bytes.escape_ascii());
+    }
+}
+
+#[cfg(windows)]
+const PROMPT_NONCE: &str = "0123456789abcdef0123456789abcdef";
+
+#[cfg(windows)]
+fn hosted_prompt(keys: &HostKeys, sequence: u64, stdin_writes: u64) -> Result<ReadyEpoch, Refusal> {
+    keys.observe_shell_prompt(PC, PROMPT_NONCE, sequence, crate::pty_manager::ssh_shell::PromptProof::Hosted {
+        channel: HostChannel::Primary, key: KEY, epoch: 1, stdin_writes,
+    })
+}
+
+/// The reported bug: `exit` + Enter draws the local prompt, the Enter is released after it,
+/// and Reconnect then waited out its 30 s for a prompt the shell was already sitting at.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_key_released_after_the_prompt_keeps_it_ready() {
+    for source in [InputSource::Renderer, InputSource::WebSocket] {
+        let (backend, mut peer) = Backend::new(true);
+        let keys = &backend.keys;
+        keys.register_ssh_prompt(PC, 1, PROMPT_NONCE).unwrap();
+        write_input(&*backend, PC, source, None, ENTER_DOWN).unwrap();
+        let ready = hosted_prompt(keys, 1, 1).unwrap();
+        for inert in [ENTER_UP, FOCUS_OUT, ALT_DOWN] {
+            write_input(&*backend, PC, source, None, inert).unwrap();
+        }
+        let mut ticket = keys.prepare_ssh_input(PC).unwrap();
+        let retained = keys.launch_ready_ordered(&mut ticket).unwrap().expect("a key release spent the prompt");
+        assert_eq!(retained.epoch, ready.epoch);
+        keys.submit_ssh_input(&ticket, &retained, |p| backend.enqueue(p, LAUNCH)).unwrap();
+        assert!(!keys.launch_boundary(&retained, PROMPT_NONCE).unwrap().extra_input);
+        // A release while ssh starts is not somebody answering a prompt either.
+        write_input(&*backend, PC, source, None, ENTER_UP).unwrap();
+        assert!(!keys.launch_boundary(&retained, PROMPT_NONCE).unwrap().extra_input);
+        // Nothing is withheld from the pty: the order on the wire is unchanged.
+        assert_eq!(
+            backend.bytes(&mut peer).await,
+            [ENTER_DOWN, ENTER_UP, FOCUS_OUT, ALT_DOWN, LAUNCH, ENTER_UP].map(<[u8]>::to_vec),
+        );
+        // Real input still counts.
+        write_input(&*backend, PC, source, None, b"y").unwrap();
+        assert!(keys.launch_boundary(&retained, PROMPT_NONCE).unwrap().extra_input);
+    }
+}
+
+/// The host counts every stdin frame. Its prompt may overtake inert writes in either
+/// direction, but must never be accepted across a real one.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_hosted_prompt_tolerates_only_inert_writes_in_flight() {
+    let (backend, _peer) = Backend::new(true);
+    let keys = &backend.keys;
+    keys.register_ssh_prompt(PC, 1, PROMPT_NONCE).unwrap();
+    let write = |bytes: &[u8]| write_input(&*backend, PC, InputSource::Renderer, None, bytes).unwrap();
+    write(b"exit");
+    write(ENTER_DOWN);
+    write(ENTER_UP);
+    assert!(matches!(hosted_prompt(keys, 1, 1), Err(Refusal::NotReady)), "drawn before Enter");
+    assert!(hosted_prompt(keys, 2, 2).is_ok(), "drawn before the release reached the host");
+    assert!(hosted_prompt(keys, 3, 3).is_ok(), "drawn after the release");
+    assert!(matches!(hosted_prompt(keys, 4, 4), Err(Refusal::NotReady)), "a write we never admitted");
+    write(b"x");
+    assert!(matches!(hosted_prompt(keys, 5, 3), Err(Refusal::NotReady)), "drawn before x");
+    assert!(hosted_prompt(keys, 6, 4).is_ok());
+}
+
+/// An in-process shell stamps a prompt with the input generation while it is being read.
+#[cfg(windows)]
+#[test]
+fn a_local_prompt_read_across_a_key_release_is_accepted() {
+    use crate::pty_manager::ssh_shell::PromptProof;
+    let (backend, _) = Backend::new(false);
+    let keys = &backend.keys;
+    keys.register_ssh_prompt(PC, 1, PROMPT_NONCE).unwrap();
+    let write = |bytes: &[u8]| write_input(&*backend, PC, InputSource::Renderer, None, bytes).unwrap();
+    let drain = termflow_pty_protocol::da1::StartupDrain::default();
+    let observe = |sequence, input_generation| {
+        keys.observe_shell_prompt(PC, PROMPT_NONCE, sequence, PromptProof::Local { drain: &drain, input_generation })
+    };
+    write(ENTER_DOWN);
+    let stamp = keys.ssh_prompt_input_generation(PC).unwrap();
+    write(ENTER_UP);
+    let ready = observe(1, stamp).expect("a release raced the prompt");
+    write(ENTER_UP);
+    let mut ticket = keys.prepare_ssh_input(PC).unwrap();
+    assert_eq!(keys.launch_ready_ordered(&mut ticket).unwrap().unwrap().epoch, ready.epoch);
+    keys.cancel_ssh_input(&ticket).unwrap();
+    write(b"x");
+    assert!(matches!(observe(2, stamp), Err(Refusal::NotReady)));
+    let mut ticket = keys.prepare_ssh_input(PC).unwrap();
+    assert!(keys.launch_ready_ordered(&mut ticket).unwrap().is_none(), "typed text spends the prompt");
+    // Inert bytes are not a way past the launch lock.
+    let locked = write_input(&*backend, PC, InputSource::Renderer, None, ENTER_UP).unwrap_err();
+    assert_eq!(locked.kind, FailureKind::Locked);
+}
+
 fn cancel_retry_ticket(keys: &HostKeys, ticket: &LaunchTicket, ordered: bool) -> Result<(), Refusal> {
     if ordered {
         let _order = keys.input_owner_change();
@@ -907,7 +1051,7 @@ fn local_launch_restore_requires_every_guard() {
                 match changed {
                     "turn" => state.next_local_turn += 1,
                     "generation" => state.input_generation += 1,
-                    "stdin" => state.ssh_prompt.as_mut().unwrap().stdin_writes += 1,
+                    "stdin" => state.ssh_prompt.as_mut().unwrap().stdin.writes += 1,
                     "prompt" => state.prompt_epoch += 1,
                     "owner" => state.owner.generation += 1,
                     "lease" => state.lease_epoch += 1,
@@ -928,12 +1072,12 @@ fn local_launch_restore_requires_every_guard() {
             assert_eq!(restored.process, ready.process);
             assert_eq!(restored.owner, ready.owner);
             assert_eq!(restored.input_generation, ready.input_generation);
-            assert_eq!(restored.stdin_writes, ready.stdin_writes);
+            assert_eq!(restored.inputs, ready.inputs);
             assert_eq!(restored.epoch, ready.epoch);
             assert!(ready.host.is_none() && restored.host.is_none());
             assert_eq!(state.next_local_turn, 1);
             assert_eq!(state.input_generation, ready.input_generation);
-            assert_eq!(state.ssh_prompt.as_ref().unwrap().stdin_writes, ready.stdin_writes);
+            assert_eq!(state.ssh_prompt.as_ref().unwrap().stdin, StdinCount::default());
         } else {
             assert!(matches!(result, Err(Refusal::StaleAttempt)), "{changed}");
             assert_eq!(state.attempt.as_ref().unwrap().submitted, changed != "unsubmitted", "{changed}");
