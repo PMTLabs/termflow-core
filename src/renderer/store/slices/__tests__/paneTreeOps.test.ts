@@ -14,6 +14,7 @@ import {
   getSelectedPaneId,
   isTerminalMuted,
   resolveExitedTabId,
+  resolveProcessExitClose,
   tabHasNoPanes,
   soloRootLeafId,
   tabLeafIds,
@@ -338,6 +339,70 @@ describe('resolveExitedTabId', () => {
   // must resolve to nothing here, not to a stale/wrong tab.
   it('returns null in the source window once the tab/pane has been detached away', () => {
     expect(resolveExitedTabId({}, [], 'tm-original-pane-id', alive([]))).toBeNull();
+  });
+});
+
+describe('resolveProcessExitClose (closeTabOnProcessExit on)', () => {
+  const alive = (aliveIds: string[]) => (id: string) => aliveIds.includes(id);
+
+  it('closes the tab when its only pane exits', () => {
+    const trees = { 'tb-1': leaf('p1', 't1') };
+    expect(resolveProcessExitClose(trees, ['tb-1'], 't1', alive([])))
+      .toEqual({ kind: 'tab', tabId: 'tb-1' });
+  });
+
+  it('closes only the exited pane while a sibling is alive (bug repro)', () => {
+    const trees = { 'tb-1': hsplit('s1', leaf('p1', 't1'), leaf('p2', 't2')) };
+    expect(resolveProcessExitClose(trees, ['tb-1'], 't2', alive(['t1'])))
+      .toEqual({ kind: 'pane', tabId: 'tb-1', paneId: 'p2' });
+    expect(resolveProcessExitClose(trees, ['tb-1'], 't1', alive(['t2'])))
+      .toEqual({ kind: 'pane', tabId: 'tb-1', paneId: 'p1' });
+  });
+
+  it('closes a nested pane in a three-pane tab, not the tab', () => {
+    const trees = { 'tb-1': hsplit('s1', leaf('p1', 't1'), hsplit('s2', leaf('p2', 't2'), leaf('p3', 't3'))) };
+    expect(resolveProcessExitClose(trees, ['tb-1'], 't3', alive(['t1', 't2'])))
+      .toEqual({ kind: 'pane', tabId: 'tb-1', paneId: 'p3' });
+  });
+
+  it('routes to the owning tab, not another tab', () => {
+    const trees = {
+      'tb-1': leaf('p0', 't0'),
+      'tb-2': hsplit('s1', leaf('p1', 't1'), leaf('p2', 't2')),
+    };
+    expect(resolveProcessExitClose(trees, ['tb-1', 'tb-2'], 't1', alive(['t0', 't2'])))
+      .toEqual({ kind: 'pane', tabId: 'tb-2', paneId: 'p1' });
+  });
+
+  it('closes the whole tab when every pane has already ended', () => {
+    const trees = { 'tb-1': hsplit('s1', leaf('p1', 't1'), leaf('p2', 't2')) };
+    expect(resolveProcessExitClose(trees, ['tb-1'], 't2', alive([])))
+      .toEqual({ kind: 'tab', tabId: 'tb-1' });
+  });
+
+  it('closes only the pane when the sibling is a fresh split still spawning (no terminalId)', () => {
+    const spawning: PaneNode = { id: 'p2', type: 'terminal' };
+    const trees = { 'tb-1': hsplit('s1', leaf('p1', 't1'), spawning) };
+    expect(resolveProcessExitClose(trees, ['tb-1'], 't1', alive([])))
+      .toEqual({ kind: 'pane', tabId: 'tb-1', paneId: 'p1' });
+  });
+
+  it('returns null for a terminal no tab owns (already closed or detached away)', () => {
+    const trees = { 'tb-1': leaf('p1', 't1') };
+    expect(resolveProcessExitClose(trees, ['tb-1'], 'tm-gone', alive([]))).toBeNull();
+  });
+
+  // The pure resolver is only half the fix: App's pty:exit handler must route its
+  // setting-on branch through it and emit the FORCED event, or a multi-pane tab
+  // goes back to ignoring a sibling's exit while every test above stays green.
+  it('App.tsx exit handler routes the setting-on branch through it as a forced close', () => {
+    const src = readSource(path.resolve(__dirname, '../../../App.tsx'));
+    const start = src.indexOf('const handleTerminalProcessExit');
+    const body = src.slice(start, src.indexOf('const handleSplitHorizontal', start));
+    const onBranch = body.slice(body.indexOf('closeTabOnProcessExit'), body.indexOf('resolveExitedTabId('));
+    expect(onBranch).toMatch(/resolveProcessExitClose\(treesByTabId, tabIds, terminalId, isAlive\)/);
+    expect(onBranch).toMatch(/closeEventFor\(\{[\s\S]*confirm: false/);
+    expect(onBranch).not.toMatch(/'ui:forceTabClose'/);
   });
 });
 

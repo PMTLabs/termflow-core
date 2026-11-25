@@ -423,6 +423,45 @@ export function resolveExitedTabId(
   return stillRunning ? null : tabId;
 }
 
+/** What "Close tab when its process exits" closes for one exited terminal. */
+export type ProcessExitClose =
+  | { kind: 'tab'; tabId: string }
+  | { kind: 'pane'; tabId: string; paneId: string };
+
+/**
+ * Resolve what closes when a terminal's process exits and the user has
+ * `closeTabOnProcessExit` on: only the exited PANE in a multi-pane tab, the
+ * whole TAB when that pane was its last (a root `closePane` would leave an empty
+ * tab), or null when the terminal belongs to no tab here (already closed, or
+ * detached to another window).
+ *
+ * A multi-pane tab still closes as one tab when every pane is already dead, so
+ * enabling the setting after some panes ended does not leave a stranded tab. A
+ * leaf with no terminalId yet (a fresh split still spawning) counts as alive,
+ * the same pane-not-terminal count `decideCanvasClose` uses, so a tab close
+ * never takes a spawning sibling down with it.
+ */
+export function resolveProcessExitClose(
+  treesByTabId: Record<string, PaneNode | null>,
+  tabIds: string[],
+  exitedTerminalId: string,
+  isTerminalAlive: (terminalId: string) => boolean,
+): ProcessExitClose | null {
+  const tabId = tabIds.includes(exitedTerminalId)
+    ? exitedTerminalId
+    : findTabIdByTerminalId(treesByTabId, exitedTerminalId);
+  if (!tabId) return null;
+
+  const leaves = getPaneLeaves(treesByTabId[tabId] ?? null);
+  if (leaves.length <= 1) return { kind: 'tab', tabId };
+
+  const allDead = leaves.every((l) => !!l.terminalId && !isTerminalAlive(l.terminalId));
+  if (allDead) return { kind: 'tab', tabId };
+
+  const leaf = leaves.find((l) => l.terminalId === exitedTerminalId);
+  return leaf ? { kind: 'pane', tabId, paneId: leaf.id } : null;
+}
+
 /**
  * Does this tab have no panes left?
  *

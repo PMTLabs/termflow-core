@@ -71,7 +71,8 @@ import { addTab, markTabExited, flagTabActivity, setActiveTab } from './store/sl
 import { RootState, store } from './store';
 import { terminalTitleColor } from './store/titleColor';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
+import { getAllTerminalIds, resolveExitedTabId, resolveProcessExitClose } from './store/slices/paneTreeOps';
+import { closeEventFor } from './components/Canvas/canvasClose';
 import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
 import { buildApiCreatedTab, buildApiFallbackPane, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
@@ -1002,7 +1003,8 @@ const App: React.FC = () => {
 
   // When a terminal process exits (Ctrl-D, crash, or an agent/API close call),
   // decide what happens to its UI tab based on the user's setting:
-  //   - closeTabOnProcessExit = true  -> close the tab automatically
+  //   - closeTabOnProcessExit = true  -> close the exited pane automatically; in a
+  //     single-pane tab (or once every pane has ended) that closes the tab
   //   - closeTabOnProcessExit = false -> keep the tab, marked terminated, so the
   //     user can review what an agent did while they were away.
   const handleTerminalProcessExit = (event: Event) => {
@@ -1020,26 +1022,38 @@ const App: React.FC = () => {
     // design 014 makes that unreachable, and it is kept only because several of
     // its tests drive it with an empty tree map (harmless — it can return a wrong
     // tab only if a terminal id and a tab id collide, which they no longer can).
-    // Either way, the tab only counts as exited once EVERY terminal in its tree
-    // has no live process — a lone sibling exiting leaves a multi-pane tab
+    // For the mark path, the tab only counts as exited once EVERY terminal in its
+    // tree has no live process — a lone sibling exiting leaves a multi-pane tab
     // running, but the LAST pane to exit (root or not) must still trigger the
-    // tab-level close/mark, which a "root-pane-only" check would miss.
+    // tab-level mark, which a "root-pane-only" check would miss.
     const tabIds: string[] = state?.tabs?.tabs?.map((t: any) => t.id) ?? [];
     const treesByTabId = state?.panes?.treesByTabId ?? {};
-    const tabId = resolveExitedTabId(treesByTabId, tabIds, terminalId, (id) =>
-      !!terminalService.getProcessIdForTerminal(id)
-    );
+    const isAlive = (id: string) => !!terminalService.getProcessIdForTerminal(id);
+
+    if (state?.settings?.closeTabOnProcessExit) {
+      // Close what exited: the pane alone in a multi-pane tab, the tab when it was
+      // the last pane. Forced (no confirm dialog) — the process is already gone, so
+      // "running processes will be terminated" would be wrong. Both events go to the
+      // owning surface (PaneManager / TabManager), which runs the full teardown.
+      const close = resolveProcessExitClose(treesByTabId, tabIds, terminalId, isAlive);
+      if (!close) return;
+      console.log(`Process for ${close.kind} ${close.kind === 'pane' ? close.paneId : close.tabId} exited; auto-closing.`);
+      const { type, detail } = closeEventFor({
+        kind: close.kind,
+        targetId: close.kind === 'pane' ? close.paneId : close.tabId,
+        confirm: false,
+      });
+      window.dispatchEvent(new CustomEvent(type, { detail }));
+      return;
+    }
+
+    const tabId = resolveExitedTabId(treesByTabId, tabIds, terminalId, isAlive);
     if (!tabId) return;
 
     const tab = state?.tabs?.tabs?.find((t: any) => t.id === tabId);
     if (!tab) return;
 
-    if (state?.settings?.closeTabOnProcessExit) {
-      // Force-close (no confirm dialog) — the process is already gone, so the
-      // "running processes will be terminated" prompt would be wrong.
-      console.log(`Process for tab ${tabId} exited; auto-closing tab.`);
-      window.dispatchEvent(new CustomEvent('ui:forceTabClose', { detail: { tabId } }));
-    } else if (!tab.exited) {
+    if (!tab.exited) {
       console.log(`Process for tab ${tabId} exited; keeping tab open for review.`);
       dispatch(markTabExited({ tabId, exitCode }));
     }
