@@ -1605,7 +1605,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             <span className="help-text">
                 When off (default), a tab is kept open and marked “exited” after its
                 process ends (Ctrl-D, crash, or an agent/API close), so you can review
-                what happened while you were away. When on, the tab closes automatically.
+                what happened while you were away. When on, the pane closes automatically;
+                in a split tab the other panes stay open, and the tab closes with its last pane.
             </span>
             <div className="setting-item setting-item-row">
                 <label className="setting-label" htmlFor="smart-ctrl-c">
